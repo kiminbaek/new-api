@@ -50,8 +50,8 @@ func ApplyUpstreamBodyMetadata(req *http.Request, body io.Reader) {
 
 func SetupApiRequestHeader(info *common.RelayInfo, c *gin.Context, req *http.Header) {
 	// [CUSTOM] stealth: configurable outbound User-Agent (empty keeps Go default).
-	if common.RelayUserAgent != "" {
-		req.Set("User-Agent", common.RelayUserAgent)
+	if common2.RelayUserAgent != "" {
+		req.Set("User-Agent", common2.RelayUserAgent)
 	}
 	if info.RelayMode == constant.RelayModeAudioTranscription || info.RelayMode == constant.RelayModeAudioTranslation {
 		// multipart/form-data
