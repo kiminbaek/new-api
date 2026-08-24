@@ -66,6 +66,12 @@ const defaultModelSettings: ModelSettings = {
   RetryTimes: 0,
   ModelGroups: '{}',
   ChannelDisableThreshold: '',
+  RelayUserAgent: '', // [CUSTOM]
+  AutoPriorityEnabled: false, // [CUSTOM]
+  AutoPriorityIntervalSec: 300, // [CUSTOM]
+  AutoPriorityMinSamples: 20, // [CUSTOM]
+  AutoPriorityScale: 50, // [CUSTOM]
+  AutoPriorityMaxDelta: 200, // [CUSTOM]
   AutomaticDisableChannelEnabled: false,
   AutomaticEnableChannelEnabled: false,
   AutomaticDisableKeywords: '',

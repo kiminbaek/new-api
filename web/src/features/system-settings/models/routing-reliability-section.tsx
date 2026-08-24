@@ -63,6 +63,10 @@ const numericString = z.string().refine((value) => {
   return !Number.isNaN(Number(trimmed)) && Number(trimmed) >= 0
 }, 'Enter a non-negative number or leave empty')
 
+// [CUSTOM] 需求4 自动调优参数：非负整数
+const nonNegInt = (min: number, max: number, msg: string) =>
+  z.coerce.number().int().min(min, msg).max(max, msg)
+
 const channelTestModes = [
   'scheduled_all',
   'auto_ban_only',
@@ -83,6 +87,29 @@ const createRoutingReliabilitySchema = (
       AutomaticDisableKeywords: z.string(),
       AutomaticDisableStatusCodes: z.string(),
       AutomaticRetryStatusCodes: z.string(),
+      // [CUSTOM] 需求1/4
+      RelayUserAgent: z.string(),
+      AutoPriorityEnabled: z.boolean(),
+      AutoPriorityIntervalSec: nonNegInt(
+        30,
+        86400,
+        t('Auto-priority interval must be between 30 and 86400 seconds')
+      ),
+      AutoPriorityMinSamples: nonNegInt(
+        1,
+        10000,
+        t('Auto-priority min samples must be between 1 and 10000')
+      ),
+      AutoPriorityScale: nonNegInt(
+        1,
+        10000,
+        t('Auto-priority scale must be between 1 and 10000')
+      ),
+      AutoPriorityMaxDelta: nonNegInt(
+        1,
+        100000,
+        t('Auto-priority max delta must be between 1 and 100000')
+      ),
       monitor_setting: z.object({
         auto_test_channel_enabled: z.boolean(),
         auto_test_channel_minutes: z.coerce
@@ -147,6 +174,13 @@ type RoutingReliabilitySectionProps = {
     'monitor_setting.auto_test_channel_minutes': number
     'monitor_setting.channel_test_concurrency': number
     'monitor_setting.channel_test_mode': ChannelTestMode
+    // [CUSTOM] 需求1/4
+    RelayUserAgent: string
+    AutoPriorityEnabled: boolean
+    AutoPriorityIntervalSec: number
+    AutoPriorityMinSamples: number
+    AutoPriorityScale: number
+    AutoPriorityMaxDelta: number
   }
 }
 
@@ -162,6 +196,13 @@ type NormalizedRoutingReliabilityValues = {
   AutomaticDisableKeywords: string
   AutomaticDisableStatusCodes: string
   AutomaticRetryStatusCodes: string
+  // [CUSTOM] 需求1/4
+  RelayUserAgent: string
+  AutoPriorityEnabled: boolean
+  AutoPriorityIntervalSec: number
+  AutoPriorityMinSamples: number
+  AutoPriorityScale: number
+  AutoPriorityMaxDelta: number
   'monitor_setting.auto_test_channel_enabled': boolean
   'monitor_setting.auto_test_channel_minutes': number
   'monitor_setting.channel_test_concurrency': number
@@ -187,6 +228,13 @@ const buildFormDefaults = (
   ),
   AutomaticDisableStatusCodes: defaults.AutomaticDisableStatusCodes ?? '',
   AutomaticRetryStatusCodes: defaults.AutomaticRetryStatusCodes ?? '',
+  // [CUSTOM] 需求1/4
+  RelayUserAgent: defaults.RelayUserAgent ?? '',
+  AutoPriorityEnabled: defaults.AutoPriorityEnabled ?? false,
+  AutoPriorityIntervalSec: defaults.AutoPriorityIntervalSec ?? 300,
+  AutoPriorityMinSamples: defaults.AutoPriorityMinSamples ?? 20,
+  AutoPriorityScale: defaults.AutoPriorityScale ?? 50,
+  AutoPriorityMaxDelta: defaults.AutoPriorityMaxDelta ?? 200,
   monitor_setting: {
     auto_test_channel_enabled:
       defaults['monitor_setting.auto_test_channel_enabled'],
@@ -216,6 +264,13 @@ const normalizeDefaults = (
   AutomaticRetryStatusCodes: parseHttpStatusCodeRules(
     defaults.AutomaticRetryStatusCodes ?? ''
   ).normalized,
+  // [CUSTOM] 需求1/4
+  RelayUserAgent: (defaults.RelayUserAgent ?? '').trim(),
+  AutoPriorityEnabled: defaults.AutoPriorityEnabled ?? false,
+  AutoPriorityIntervalSec: defaults.AutoPriorityIntervalSec ?? 300,
+  AutoPriorityMinSamples: defaults.AutoPriorityMinSamples ?? 20,
+  AutoPriorityScale: defaults.AutoPriorityScale ?? 50,
+  AutoPriorityMaxDelta: defaults.AutoPriorityMaxDelta ?? 200,
   'monitor_setting.auto_test_channel_enabled':
     defaults['monitor_setting.auto_test_channel_enabled'],
   'monitor_setting.auto_test_channel_minutes':
@@ -243,6 +298,13 @@ const normalizeFormValues = (
   AutomaticRetryStatusCodes: parseHttpStatusCodeRules(
     values.AutomaticRetryStatusCodes
   ).normalized,
+  // [CUSTOM] 需求1/4
+  RelayUserAgent: values.RelayUserAgent.trim(),
+  AutoPriorityEnabled: values.AutoPriorityEnabled,
+  AutoPriorityIntervalSec: values.AutoPriorityIntervalSec,
+  AutoPriorityMinSamples: values.AutoPriorityMinSamples,
+  AutoPriorityScale: values.AutoPriorityScale,
+  AutoPriorityMaxDelta: values.AutoPriorityMaxDelta,
   'monitor_setting.auto_test_channel_enabled':
     values.monitor_setting.auto_test_channel_enabled,
   'monitor_setting.auto_test_channel_minutes':
@@ -658,6 +720,170 @@ export function RoutingReliabilitySection({
                     <FormDescription>
                       {t(
                         'If an upstream error contains any of these keywords (case insensitive), the channel will be disabled automatically.'
+                      )}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </div>
+          </div>
+
+          {/* [CUSTOM] 需求1 隐蔽化：出站 UA */}
+          <Separator />
+
+          <div className='flex min-w-0 flex-col gap-4'>
+            <div className='flex flex-col gap-1'>
+              <h4 className='text-sm font-medium'>{t('Outbound stealth')}</h4>
+            </div>
+            <div className='grid min-w-0 gap-6 xl:grid-cols-[minmax(12rem,24rem)_minmax(0,1fr)]'>
+              <FormField
+                control={form.control}
+                name='RelayUserAgent'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Outbound User-Agent')}</FormLabel>
+                    <FormControl>
+                      <Input
+                        placeholder={t(
+                          'e.g. Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...'
+                        )}
+                        value={field.value ?? ''}
+                        onChange={(event) => field.onChange(event.target.value)}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t(
+                        'User-Agent sent to upstream providers for relay requests and channel tests. Empty = Go default UA (easy to fingerprint).'
+                      )}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </div>
+          </div>
+
+          {/* [CUSTOM] 需求4 自动调优：双向浮动优先级 */}
+          <Separator />
+
+          <div className='flex min-w-0 flex-col gap-4'>
+            <div className='flex flex-col gap-1'>
+              <h4 className='text-sm font-medium'>
+                {t('Auto priority tuning')}
+              </h4>
+            </div>
+            <div className='grid min-w-0 gap-6 lg:grid-cols-3'>
+              <FormField
+                control={form.control}
+                name='AutoPriorityEnabled'
+                render={({ field }) => (
+                  <SettingsSwitchItem>
+                    <SettingsSwitchContent>
+                      <FormLabel>{t('Enable auto priority')}</FormLabel>
+                      <FormDescription>
+                        {t(
+                          'Automatically raise/lower channel priority per model based on rolling success rate. Manual priority is used as the base and restored when disabled.'
+                        )}
+                      </FormDescription>
+                    </SettingsSwitchContent>
+                    <FormControl>
+                      <Switch
+                        checked={field.value}
+                        onCheckedChange={field.onChange}
+                      />
+                    </FormControl>
+                  </SettingsSwitchItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name='AutoPriorityIntervalSec'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Tuning interval (seconds)')}</FormLabel>
+                    <FormControl>
+                      <Input
+                        type='number'
+                        min={30}
+                        step={1}
+                        {...safeNumberFieldProps(field)}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t('How often priorities are recalculated (min 30s)')}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name='AutoPriorityMinSamples'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Min samples')}</FormLabel>
+                    <FormControl>
+                      <Input
+                        type='number'
+                        min={1}
+                        step={1}
+                        {...safeNumberFieldProps(field)}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t(
+                        'Minimum rolling-window samples before a channel is considered'
+                      )}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name='AutoPriorityScale'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Success rate scale')}</FormLabel>
+                    <FormControl>
+                      <Input
+                        type='number'
+                        min={1}
+                        step={1}
+                        {...safeNumberFieldProps(field)}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t(
+                        'Multiplier applied to the success-rate difference when computing priority delta'
+                      )}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name='AutoPriorityMaxDelta'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Max priority delta')}</FormLabel>
+                    <FormControl>
+                      <Input
+                        type='number'
+                        min={1}
+                        step={1}
+                        {...safeNumberFieldProps(field)}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t(
+                        'Maximum offset from the manual base priority in either direction'
                       )}
                     </FormDescription>
                     <FormMessage />

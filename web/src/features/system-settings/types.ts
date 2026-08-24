@@ -229,6 +229,12 @@ export type ModelSettings = {
   RetryTimes: number
   ModelGroups: string
   ChannelDisableThreshold: string
+  RelayUserAgent: string // [CUSTOM] 需求1 隐蔽化 UA
+  AutoPriorityEnabled: boolean // [CUSTOM] 需求4 自动调优开关
+  AutoPriorityIntervalSec: number // [CUSTOM] 需求4 调档周期(秒)
+  AutoPriorityMinSamples: number // [CUSTOM] 需求4 最小样本数
+  AutoPriorityScale: number // [CUSTOM] 需求4 成功率差放大系数
+  AutoPriorityMaxDelta: number // [CUSTOM] 需求4 最大偏移
   AutomaticDisableChannelEnabled: boolean
   AutomaticEnableChannelEnabled: boolean
   AutomaticDisableKeywords: string

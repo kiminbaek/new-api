@@ -88,6 +88,13 @@ const MODELS_SECTIONS = [
             settings['monitor_setting.channel_test_concurrency'],
           'monitor_setting.channel_test_mode':
             settings['monitor_setting.channel_test_mode'],
+          // [CUSTOM] 需求1/4
+          RelayUserAgent: settings.RelayUserAgent,
+          AutoPriorityEnabled: settings.AutoPriorityEnabled,
+          AutoPriorityIntervalSec: settings.AutoPriorityIntervalSec,
+          AutoPriorityMinSamples: settings.AutoPriorityMinSamples,
+          AutoPriorityScale: settings.AutoPriorityScale,
+          AutoPriorityMaxDelta: settings.AutoPriorityMaxDelta,
         }}
       />
     ),

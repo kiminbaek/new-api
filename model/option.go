@@ -156,6 +156,13 @@ func InitOptionMap() {
 	//common.OptionMap["ChatLink2"] = common.ChatLink2
 	common.OptionMap["QuotaPerUnit"] = strconv.FormatFloat(common.QuotaPerUnit, 'f', -1, 64)
 	common.OptionMap["RetryTimes"] = strconv.Itoa(common.RetryTimes)
+	// [CUSTOM] 需求1/4 隐蔽化 UA + 自动调优：env 作为初始默认值，Option 可在管理界面热改
+	common.OptionMap["RelayUserAgent"] = common.RelayUserAgent
+	common.OptionMap["AutoPriorityEnabled"] = strconv.FormatBool(common.AutoPriorityEnabled)
+	common.OptionMap["AutoPriorityIntervalSec"] = strconv.Itoa(common.AutoPriorityIntervalSec)
+	common.OptionMap["AutoPriorityMinSamples"] = strconv.Itoa(common.AutoPriorityMinSamples)
+	common.OptionMap["AutoPriorityScale"] = strconv.Itoa(common.AutoPriorityScale)
+	common.OptionMap["AutoPriorityMaxDelta"] = strconv.Itoa(common.AutoPriorityMaxDelta)
 	common.OptionMap["DataExportInterval"] = strconv.Itoa(common.DataExportInterval)
 	common.OptionMap["DataExportDefaultTime"] = common.DataExportDefaultTime
 	common.OptionMap["DefaultCollapseSidebar"] = strconv.FormatBool(common.DefaultCollapseSidebar)
@@ -556,6 +563,18 @@ func updateOptionMap(key string, value string) (err error) {
 		err = setting.UpdateModelRequestRateLimitGroupByJSONString(value)
 	case "RetryTimes":
 		common.RetryTimes, _ = strconv.Atoi(value)
+	case "RelayUserAgent": // [CUSTOM] 需求1 隐蔽化 UA
+		common.RelayUserAgent = value
+	case "AutoPriorityEnabled": // [CUSTOM] 需求4 自动调优开关（UI 热更，调度器每 tick 重读）
+		common.AutoPriorityEnabled = value == "true"
+	case "AutoPriorityIntervalSec":
+		common.AutoPriorityIntervalSec, _ = strconv.Atoi(value)
+	case "AutoPriorityMinSamples":
+		common.AutoPriorityMinSamples, _ = strconv.Atoi(value)
+	case "AutoPriorityScale":
+		common.AutoPriorityScale, _ = strconv.Atoi(value)
+	case "AutoPriorityMaxDelta":
+		common.AutoPriorityMaxDelta, _ = strconv.Atoi(value)
 	case "DataExportInterval":
 		common.DataExportInterval, _ = strconv.Atoi(value)
 	case "DataExportDefaultTime":

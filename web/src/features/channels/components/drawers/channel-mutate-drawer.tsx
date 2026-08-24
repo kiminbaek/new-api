@@ -4341,7 +4341,7 @@ export function ChannelMutateDrawer({
                                   <FormControl>
                                     <Textarea
                                       placeholder={t(
-                                        '{"gpt-4o": 100, "qwen-max": 50}'
+                                        '{"gpt-4o": 100, "qwen-max": 50} (模型名 → 优先级整数)'
                                       )}
                                       rows={3}
                                       {...field}
@@ -4368,7 +4368,7 @@ export function ChannelMutateDrawer({
                                       type='number'
                                       min={0}
                                       max={99}
-                                      placeholder='Unlimited (global default)'
+                                      placeholder='留空 = 跟随全局'
                                       value={field.value ?? ''}
                                       onChange={(e) =>
                                         field.onChange(
@@ -4398,7 +4398,7 @@ export function ChannelMutateDrawer({
                                       type='number'
                                       min={1}
                                       max={3600}
-                                      placeholder='Global default'
+                                      placeholder='留空 = 跟随全局'
                                       value={field.value ?? ''}
                                       onChange={(e) =>
                                         field.onChange(
@@ -4428,7 +4428,7 @@ export function ChannelMutateDrawer({
                                       type='number'
                                       min={1}
                                       max={999}
-                                      placeholder='Disable immediately (default)'
+                                      placeholder='留空 = 立即禁用（默认）'
                                       value={field.value ?? ''}
                                       onChange={(e) =>
                                         field.onChange(

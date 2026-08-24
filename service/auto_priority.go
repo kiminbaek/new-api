@@ -46,24 +46,33 @@ func manualBasePriority(ch *model.Channel, mdl string) int64 {
 }
 
 func InitAutoPriorityScheduler() {
-	if !common.AutoPriorityEnabled {
-		gopool.Go(func() {
-			time.Sleep(apRestoreDelay)
-			restoreAutoPriority()
-		})
-		return
-	}
-	interval := time.Duration(common.AutoPriorityIntervalSec) * time.Second
-	if interval < apMinInterval {
-		interval = apMinInterval
-	}
+	// [CUSTOM] 改为常驻 watchdog：UI 改 Option 后无需重启即可生效。
+	// 短 tick（apMinInterval）轮询 common.AutoPriorityEnabled 与参数；
+	// 开启时按 AutoPriorityIntervalSec 节流真正调档；关闭时若有触达集则恢复手动基准。
+	lastRun := time.Time{}
+	restoredOnDisable := false
 	gopool.Go(func() {
-		ticker := time.NewTicker(interval)
+		ticker := time.NewTicker(apMinInterval)
 		defer ticker.Stop()
-		common.SysLog(fmt.Sprintf("[CUSTOM] auto-priority(双向浮动) on: interval=%s min_samples=%d scale=%d max_delta=%d",
-			interval, common.AutoPriorityMinSamples, common.AutoPriorityScale, common.AutoPriorityMaxDelta))
+		time.Sleep(apRestoreDelay) // 等 DB/缓存就绪
+		common.SysLog(fmt.Sprintf("[CUSTOM] auto-priority watchdog on (min-tick=%s)", apMinInterval))
 		for range ticker.C {
-			runAutoPriorityTick(interval)
+			if common.AutoPriorityEnabled {
+				restoredOnDisable = false
+				interval := time.Duration(common.AutoPriorityIntervalSec) * time.Second
+				if interval < apMinInterval {
+					interval = apMinInterval
+				}
+				if time.Since(lastRun) < interval {
+					continue
+				}
+				lastRun = time.Now()
+				runAutoPriorityTick(interval)
+			} else if !restoredOnDisable {
+				// 关闭（或刚启动时未开）：恢复一次手动基准
+				restoreAutoPriority()
+				restoredOnDisable = true
+			}
 		}
 	})
 }
