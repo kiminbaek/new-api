@@ -230,14 +230,9 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, header *http.Header, info *
 			header.Set("Authorization", "Bearer "+info.ApiKey)
 		}
 	}
-	if info.ChannelType == constant.ChannelTypeOpenRouter {
-		if header.Get("HTTP-Referer") == "" {
-			header.Set("HTTP-Referer", "https://www.newapi.ai")
-		}
-		if header.Get("X-OpenRouter-Title") == "" {
-			header.Set("X-OpenRouter-Title", "New API")
-		}
-	}
+	// [CUSTOM] stealth: removed hardcoded OpenRouter self-identification
+	// (HTTP-Referer=newapi.ai / X-OpenRouter-Title="New API").
+	// Set these headers per-channel via HeaderOverride if needed.
 	return nil
 }
 
