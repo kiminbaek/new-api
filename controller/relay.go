@@ -216,12 +216,13 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 		// [CUSTOM] 需求2: 渠道级重试上限——超限则跳过该渠道，消耗一次重试预算继续换渠道
-		if relayInfo.ChannelSetting.RetryTimes != nil {
+		// [CUSTOM-fix] ChannelMeta 此时未初始化（嵌入指针为nil），改从 context 读渠道设置
+		if cs, ok := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting); ok && cs.RetryTimes != nil {
 			tried[channel.Id]++
-			if tried[channel.Id] > *relayInfo.ChannelSetting.RetryTimes+1 {
+			if tried[channel.Id] > *cs.RetryTimes+1 {
 				if !capWarned[channel.Id] {
 					capWarned[channel.Id] = true
-					logger.LogWarn(c, fmt.Sprintf("[CUSTOM] channel #%d hit retry_times=%d cap, skip to next", channel.Id, *relayInfo.ChannelSetting.RetryTimes))
+					logger.LogWarn(c, fmt.Sprintf("[CUSTOM] channel #%d hit retry_times=%d cap, skip to next", channel.Id, *cs.RetryTimes))
 				}
 				continue
 			}
@@ -267,7 +268,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		// [CUSTOM] 需求2/4: 失败记账；配置 fail_threshold 且未达阈值时压制本次自动禁用
 		service.RecordRelayFailure(channel.Id, relayInfo.OriginModelName)
 		autoBan := channel.GetAutoBan()
-		if th := relayInfo.ChannelSetting.FailThreshold; th != nil && *th > 0 {
+		if cs2, ok2 := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting); ok2 && cs2.FailThreshold != nil && *cs2.FailThreshold > 0 {
+			th := cs2.FailThreshold
 			if _, _, fails := service.RelayStatSample(channel.Id, relayInfo.OriginModelName); fails < *th {
 				autoBan = false
 			}
