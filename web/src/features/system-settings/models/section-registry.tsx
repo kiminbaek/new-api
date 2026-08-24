@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { ChannelAffinitySection } from '../general/channel-affinity'
+import { ModelGroupsSection } from './model-groups-section'
 import { IoNetDeploymentSettingsSection } from '../integrations/ionet-deployment-settings-section'
 import type { ModelSettings } from '../types'
 import { createSectionRegistry } from '../utils/section-registry'
@@ -87,6 +88,17 @@ const MODELS_SECTIONS = [
             settings['monitor_setting.channel_test_concurrency'],
           'monitor_setting.channel_test_mode':
             settings['monitor_setting.channel_test_mode'],
+        }}
+      />
+    ),
+  },
+  {
+    id: 'model-groups',
+    titleKey: 'Model Groups',
+    build: (settings: ModelSettings) => (
+      <ModelGroupsSection
+        defaultValues={{
+          ModelGroups: settings.ModelGroups,
         }}
       />
     ),
