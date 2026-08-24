@@ -88,6 +88,11 @@ export interface ChannelSettings {
   system_prompt_override?: boolean
   http_protocol?: 'auto' | 'http1' | string
   http2_connection_shards?: number
+  // [CUSTOM] 分模型优先级 / 分渠道可靠性
+  model_priorities?: Record<string, number>
+  retry_times?: number
+  timeout_seconds?: number
+  fail_threshold?: number
 }
 
 export interface ChannelOtherSettings {

@@ -289,6 +289,10 @@ const SENSITIVE_FORM_FIELDS = [
   'proxy',
   'http_protocol',
   'http2_connection_shards',
+  'model_priorities_text',
+  'retry_times',
+  'timeout_seconds',
+  'fail_threshold',
   'pass_through_body_enabled',
   'system_prompt',
   'system_prompt_override',
@@ -347,6 +351,11 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     (values.http_protocol && values.http_protocol !== 'auto') ||
     (values.http2_connection_shards != null &&
       values.http2_connection_shards > 1) ||
+    values.retry_times != null ||
+    values.timeout_seconds != null ||
+    values.fail_threshold != null ||
+    (values.model_priorities_text != null &&
+      values.model_priorities_text.trim() !== '') ||
     values.claude_beta_query ||
     values.upstream_model_update_check_enabled ||
     values.upstream_model_update_auto_sync_enabled ||
@@ -4322,6 +4331,123 @@ export function ChannelMutateDrawer({
                             />
 
                             <FormField
+                              control={form.control}
+                              name='model_priorities_text'
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>
+                                    {t('Per-Model Priority Overrides')}
+                                  </FormLabel>
+                                  <FormControl>
+                                    <Textarea
+                                      placeholder={t(
+                                        '{"gpt-4o": 100, "qwen-max": 50}'
+                                      )}
+                                      rows={3}
+                                      {...field}
+                                    />
+                                  </FormControl>
+                                  <FormDescription>
+                                    {t(
+                                      'JSON map of model name to priority override. Models not listed use the channel default priority.'
+                                    )}
+                                  </FormDescription>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+
+                            <FormField
+                              control={form.control}
+                              name='retry_times'
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>{t('Max Attempts Per Request')}</FormLabel>
+                                  <FormControl>
+                                    <Input
+                                      type='number'
+                                      min={0}
+                                      max={99}
+                                      placeholder='Unlimited (global default)'
+                                      value={field.value ?? ''}
+                                      onChange={(e) =>
+                                        field.onChange(
+                                          e.target.value === ''
+                                            ? undefined
+                                            : Number(e.target.value)
+                                        )
+                                      }
+                                    />
+                                  </FormControl>
+                                  <FormDescription>
+                                    {t('Times this channel may be picked within one request. 0 = single chance. Empty = follow global.')}
+                                  </FormDescription>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+
+                            <FormField
+                              control={form.control}
+                              name='timeout_seconds'
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>{t('Channel Timeout (seconds)')}</FormLabel>
+                                  <FormControl>
+                                    <Input
+                                      type='number'
+                                      min={1}
+                                      max={3600}
+                                      placeholder='Global default'
+                                      value={field.value ?? ''}
+                                      onChange={(e) =>
+                                        field.onChange(
+                                          e.target.value === ''
+                                            ? undefined
+                                            : Number(e.target.value)
+                                        )
+                                      }
+                                    />
+                                  </FormControl>
+                                  <FormDescription>
+                                    {t('Upstream timeout for non-stream requests only. Empty = global default.')}
+                                  </FormDescription>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+
+                            <FormField
+                              control={form.control}
+                              name='fail_threshold'
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>{t('Fail Threshold Before Disable')}</FormLabel>
+                                  <FormControl>
+                                    <Input
+                                      type='number'
+                                      min={1}
+                                      max={999}
+                                      placeholder='Disable immediately (default)'
+                                      value={field.value ?? ''}
+                                      onChange={(e) =>
+                                        field.onChange(
+                                          e.target.value === ''
+                                            ? undefined
+                                            : Number(e.target.value)
+                                        )
+                                      }
+                                    />
+                                  </FormControl>
+                                  <FormDescription>
+                                    {t('Failures required within the rolling window before auto-disable applies. Empty = immediate on qualifying errors.')}
+                                  </FormDescription>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+
+<FormField
                               control={form.control}
                               name='system_prompt'
                               render={({ field }) => (

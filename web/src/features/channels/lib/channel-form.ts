@@ -261,6 +261,14 @@ export const channelFormSchema = z
       .refine(isOptionalProxyURL, ERROR_MESSAGES.INVALID_PROXY),
     http_protocol: z.enum(['auto', 'http1']).optional(),
     http2_connection_shards: z.number().int().optional(),
+    // [CUSTOM] 分模型优先级 / 分渠道可靠性（stored in setting JSON）
+    model_priorities_text: z
+      .string()
+      .optional()
+      .refine(isOptionalJsonObject, ERROR_MESSAGES.INVALID_JSON),
+    retry_times: z.number().int().min(0).max(99).optional(),
+    timeout_seconds: z.number().int().min(1).max(3600).optional(),
+    fail_threshold: z.number().int().min(1).max(999).optional(),
     pass_through_body_enabled: z.boolean().optional(),
     system_prompt: z.string().optional(),
     system_prompt_override: z.boolean().optional(),
@@ -433,6 +441,10 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   proxy: '',
   http_protocol: HTTP_PROTOCOL_AUTO,
   http2_connection_shards: 1,
+  model_priorities_text: '',
+  retry_times: undefined,
+  timeout_seconds: undefined,
+  fail_threshold: undefined,
   pass_through_body_enabled: false,
   system_prompt: '',
   system_prompt_override: false,
@@ -476,6 +488,10 @@ export function transformChannelToFormDefaults(
     pass_through_body_enabled: false,
     system_prompt: '',
     system_prompt_override: false,
+    model_priorities_text: '',
+    retry_times: undefined,
+    timeout_seconds: undefined,
+    fail_threshold: undefined,
   }
 
   if (channel.setting) {
@@ -494,6 +510,12 @@ export function transformChannelToFormDefaults(
         pass_through_body_enabled: parsed.pass_through_body_enabled || false,
         system_prompt: parsed.system_prompt || '',
         system_prompt_override: parsed.system_prompt_override || false,
+        model_priorities_text: parsed.model_priorities
+          ? JSON.stringify(parsed.model_priorities, null, 2)
+          : '',
+        retry_times: parsed.retry_times ?? undefined,
+        timeout_seconds: parsed.timeout_seconds ?? undefined,
+        fail_threshold: parsed.fail_threshold ?? undefined,
       }
     } catch (error) {
       // eslint-disable-next-line no-console
@@ -618,6 +640,26 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     protocol === HTTP_PROTOCOL_HTTP1
       ? 1
       : normalizeHttp2ConnectionShards(formData.http2_connection_shards)
+
+  // [CUSTOM] 分模型优先级 / 分渠道可靠性（空值不写入保持 JSON 等价）
+  if (
+    formData.model_priorities_text &&
+    formData.model_priorities_text.trim() !== ''
+  ) {
+    try {
+      const mp = JSON.parse(formData.model_priorities_text)
+      if (mp && typeof mp === 'object' && Object.keys(mp).length > 0) {
+        settingObj.model_priorities = mp
+      }
+    } catch {
+      // schema 已校验，此处兜底忽略
+    }
+  }
+  if (formData.retry_times != null) settingObj.retry_times = formData.retry_times
+  if (formData.timeout_seconds != null)
+    settingObj.timeout_seconds = formData.timeout_seconds
+  if (formData.fail_threshold != null)
+    settingObj.fail_threshold = formData.fail_threshold
 
   // Omit defaults so unchanged channels keep equivalent JSON.
   if (protocol === HTTP_PROTOCOL_HTTP1) {
