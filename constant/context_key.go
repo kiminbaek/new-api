@@ -8,6 +8,8 @@ const (
 	ContextKeyEstimatedTokens ContextKey = "estimated_tokens"
 
 	ContextKeyOriginalModel    ContextKey = "original_model"
+	ContextKeyVirtualModel     ContextKey = "virtual_model"   // [CUSTOM] 需求5 原始虚拟模型名
+	ContextKeyVirtualMembers   ContextKey = "virtual_members" // [CUSTOM] 需求5 有序成员列表([]string)
 	ContextKeyRequestStartTime ContextKey = "request_start_time"
 
 	/* token related keys */

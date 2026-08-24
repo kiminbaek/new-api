@@ -334,6 +334,11 @@ func updateOptionMap(key string, value string) (err error) {
 			common.AutomaticDisableChannelEnabled = boolValue
 		case "AutomaticEnableChannelEnabled":
 			common.AutomaticEnableChannelEnabled = boolValue
+		case "ModelGroups":
+			// [CUSTOM] 需求5 模型分级：{"top":["a","b"],...} 原子热更
+			if err := LoadVirtualModelGroups(value); err != nil {
+				common.SysError("Failed to load ModelGroups: " + err.Error())
+			}
 		case "LogConsumeEnabled":
 			common.LogConsumeEnabled = boolValue
 		case "DisplayInCurrencyEnabled":

@@ -196,6 +196,19 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
 		relayInfo.RetryIndex = retryParam.GetRetry()
+		// [CUSTOM] 需求5 模型分级：重试预算内轮转虚拟组成员（选渠/计费随成员切换）
+		if idx := retryParam.GetRetry(); idx > 0 {
+			if vmembers := common.GetContextKeyStringSlice(c, constant.ContextKeyVirtualMembers); len(vmembers) > 0 {
+				nextMember := vmembers[idx%len(vmembers)]
+				retryParam.ModelName = nextMember
+				relayInfo.OriginModelName = nextMember
+				relayInfo.UpstreamModelName = nextMember
+				common.SetContextKey(c, constant.ContextKeyOriginalModel, nextMember)
+				if pd, pdErr := helper.ModelPriceHelper(c, relayInfo, tokens, meta); pdErr == nil {
+					relayInfo.PriceData = pd
+				}
+			}
+		}
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
 			logger.LogError(c, channelErr.Error())
