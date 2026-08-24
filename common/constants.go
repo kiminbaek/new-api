@@ -162,6 +162,7 @@ var BatchUpdateInterval int
 var RelayTimeout int // unit is second
 
 var RelayIdleConnTimeout int // unit is second
+var RelayUserAgent string // [CUSTOM] stealth: global outbound User-Agent override
 var RelayMaxIdleConns int
 var RelayMaxIdleConnsPerHost int
 

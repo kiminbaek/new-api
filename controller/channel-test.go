@@ -691,7 +691,7 @@ func detectErrorMessageFromJSONBytes(jsonBytes []byte) string {
 }
 
 func buildTestRequest(model string, endpointType string, channel *model.Channel, isStream bool) dto.Request {
-	testResponsesInput := json.RawMessage(`[{"role":"user","content":"hi"}]`)
+	testResponsesInput := StealthMessagesRaw()
 
 	// 根据端点类型构建不同的测试请求
 	if endpointType != "" {
@@ -700,13 +700,13 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 			// 返回 EmbeddingRequest
 			return &dto.EmbeddingRequest{
 				Model: model,
-				Input: []any{"hello world"},
+				Input: []any{StealthEmbeddingInput()},
 			}
 		case constant.EndpointTypeImageGeneration:
 			// 返回 ImageRequest
 			return &dto.ImageRequest{
 				Model:  model,
-				Prompt: "a cute cat",
+				Prompt: StealthImagePrompt(),
 				N:      lo.ToPtr(uint(1)),
 				Size:   "1024x1024",
 			}
@@ -735,11 +735,11 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 			return &dto.ClaudeRequest{
 				Model:     model,
 				Stream:    lo.ToPtr(isStream),
-				MaxTokens: lo.ToPtr(uint(16)),
+				MaxTokens: lo.ToPtr(StealthMaxTokens(16)),,
 				Messages: []dto.ClaudeMessage{
 					{
 						Role:    "user",
-						Content: "hi",
+						Content: StealthMathPrompt(),
 					},
 				},
 			}
@@ -752,7 +752,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 					},
 				},
 				GenerationConfig: dto.GeminiChatGenerationConfig{
-					MaxOutputTokens: lo.ToPtr(uint(3000)),
+					MaxOutputTokens: lo.ToPtr(uint(1500 + stealthRand(1500))),,
 				},
 			}
 		case constant.EndpointTypeOpenAI:
@@ -762,10 +762,10 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 				Messages: []dto.Message{
 					{
 						Role:    "user",
-						Content: "hi",
+						Content: StealthMathPrompt(),
 					},
 				},
-				MaxTokens: lo.ToPtr(uint(16)),
+				MaxTokens: lo.ToPtr(StealthMaxTokens(16)),,
 			}
 			if isStream {
 				req.StreamOptions = &dto.StreamOptions{IncludeUsage: true}
@@ -778,8 +778,8 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 	if strings.Contains(strings.ToLower(model), "rerank") {
 		return &dto.RerankRequest{
 			Model:     model,
-			Query:     "What is Deep Learning?",
-			Documents: []any{"Deep Learning is a subset of machine learning.", "Machine learning is a field of artificial intelligence."},
+			Query:     rq,
+			Documents: rdocs,
 			TopN:      lo.ToPtr(2),
 		}
 	}
@@ -791,7 +791,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 		// 返回 EmbeddingRequest
 		return &dto.EmbeddingRequest{
 			Model: model,
-			Input: []any{"hello world"},
+			Input: []any{StealthEmbeddingInput()},
 		}
 	}
 
@@ -811,7 +811,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 		Messages: []dto.Message{
 			{
 				Role:    "user",
-				Content: "hi",
+				Content: StealthMathPrompt(),
 			},
 		},
 	}
