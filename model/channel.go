@@ -993,6 +993,16 @@ func (channel *Channel) ValidateSettings() error {
 	return nil
 }
 
+// [CUSTOM] 需求3: 分模型优先级覆盖（未配置的模型回落渠道默认值）
+func (channel *Channel) AbilityPriority(model string) *int64 {
+	if mp := channel.GetSetting().ModelPriorities; mp != nil {
+		if pv, ok := mp[model]; ok {
+			return &pv
+		}
+	}
+	return channel.Priority
+}
+
 func (channel *Channel) GetSetting() dto.ChannelSettings {
 	setting := dto.ChannelSettings{}
 	if channel.Setting != nil && *channel.Setting != "" {

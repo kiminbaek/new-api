@@ -190,6 +190,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
+	// [CUSTOM] 需求2: 渠道级尝试计数（retry_times 语义B）
+	tried := map[int]int{}
+	capWarned := map[int]bool{}
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
 		relayInfo.RetryIndex = retryParam.GetRetry()
@@ -198,6 +201,17 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			logger.LogError(c, channelErr.Error())
 			newAPIError = channelErr
 			break
+		}
+		// [CUSTOM] 需求2: 渠道级重试上限——超限则跳过该渠道，消耗一次重试预算继续换渠道
+		if relayInfo.ChannelSetting.RetryTimes != nil {
+			tried[channel.Id]++
+			if tried[channel.Id] > *relayInfo.ChannelSetting.RetryTimes+1 {
+				if !capWarned[channel.Id] {
+					capWarned[channel.Id] = true
+					logger.LogWarn(c, fmt.Sprintf("[CUSTOM] channel #%d hit retry_times=%d cap, skip to next", channel.Id, *relayInfo.ChannelSetting.RetryTimes))
+				}
+				continue
+			}
 		}
 		addUsedChannel(c, channel.Id)
 		if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {

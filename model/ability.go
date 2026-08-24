@@ -210,7 +210,7 @@ func (channel *Channel) AddAbilities(tx *gorm.DB) error {
 				Model:     model,
 				ChannelId: channel.Id,
 				Enabled:   channel.Status == common.ChannelStatusEnabled,
-				Priority:  channel.Priority,
+				Priority:  channel.AbilityPriority(model),
 				Weight:    uint(channel.GetWeight()),
 				Tag:       channel.Tag,
 			}
@@ -282,7 +282,7 @@ func (channel *Channel) UpdateAbilities(tx *gorm.DB) error {
 				Model:     model,
 				ChannelId: channel.Id,
 				Enabled:   channel.Status == common.ChannelStatusEnabled,
-				Priority:  channel.Priority,
+				Priority:  channel.AbilityPriority(model),
 				Weight:    uint(channel.GetWeight()),
 				Tag:       channel.Tag,
 			}

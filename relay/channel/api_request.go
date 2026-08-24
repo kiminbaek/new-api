@@ -502,6 +502,10 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	// transparent stream retries.
 	relayClient := *client
 	relayClient.CheckRedirect = keepUpstreamRedirectResponse
+	// [CUSTOM] 需求2: 渠道级超时覆盖。仅非流式生效——http.Client.Timeout 含响应体读取时长，会掐断长流式输出。
+	if !info.IsStream && info.ChannelSetting.TimeoutSeconds != nil && *info.ChannelSetting.TimeoutSeconds > 0 {
+		relayClient.Timeout = time.Duration(*info.ChannelSetting.TimeoutSeconds) * time.Second
+	}
 	if common2.DebugEnabled && req != nil && req.URL != nil {
 		policy := service.NormalizeHTTPTransportPolicy(info.ChannelSetting)
 		logger.LogDebug(c, fmt.Sprintf(
