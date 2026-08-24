@@ -1,6 +1,8 @@
 FROM oven/bun:1@sha256:0733e50325078969732ebe3b15ce4c4be5082f18c4ac1a0f0ca4839c2e4e42a7 AS builder
 
 WORKDIR /build/web
+# [CUSTOM] 国内构建加速：bun 走 npmmirror
+ENV npm_config_registry=https://registry.npmmirror.com
 COPY web/package.json web/bun.lock ./
 RUN bun install --frozen-lockfile
 COPY ./web ./
@@ -14,6 +16,8 @@ ARG TARGETOS
 ARG TARGETARCH
 ENV GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64}
 ENV GOEXPERIMENT=greenteagc
+# [CUSTOM] 国内构建加速：go mod 走 goproxy.cn
+ENV GOPROXY=https://goproxy.cn,direct
 
 WORKDIR /build
 
