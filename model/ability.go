@@ -314,6 +314,23 @@ func UpdateAbilityStatus(channelId int, status bool) error {
 	return DB.Model(&Ability{}).Where("channel_id = ?", channelId).Select("enabled").Update("enabled", status).Error
 }
 
+// [CUSTOM] 需求4: 定点更新某渠道某模型的优先级（双向浮动调度器写入）
+func UpdateAbilityPriorityByChannelModel(chId int, model string, priority int64) error {
+	return DB.Model(&Ability{}).
+		Where("channel_id = ? AND model = ?", chId, model).
+		Update("priority", priority).Error
+}
+
+// [CUSTOM] 需求4: 读取当前值（用于跳过无变化写入）
+func GetAbilityPriorityByChannelModel(chId int, model string) (*int64, error) {
+	var rows []int64
+	err := DB.Model(&Ability{}).Where("channel_id = ? AND model = ?", chId, model).Pluck("priority", &rows).Error
+	if err != nil || len(rows) == 0 {
+		return nil, err
+	}
+	return &rows[0], nil
+}
+
 func UpdateAbilityStatusByTag(tag string, status bool) error {
 	return DB.Model(&Ability{}).Where("tag = ?", tag).Select("enabled").Update("enabled", status).Error
 }

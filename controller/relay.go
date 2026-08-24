@@ -243,6 +243,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 
 		if newAPIError == nil {
+			service.RecordRelaySuccess(channel.Id, relayInfo.OriginModelName) // [CUSTOM] 需求4
 			relayInfo.LastError = nil
 			return
 		}
@@ -250,7 +251,15 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		newAPIError = service.NormalizeViolationFeeError(newAPIError)
 		relayInfo.LastError = newAPIError
 
-		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
+		// [CUSTOM] 需求2/4: 失败记账；配置 fail_threshold 且未达阈值时压制本次自动禁用
+		service.RecordRelayFailure(channel.Id, relayInfo.OriginModelName)
+		autoBan := channel.GetAutoBan()
+		if th := relayInfo.ChannelSetting.FailThreshold; th != nil && *th > 0 {
+			if _, _, fails := service.RelayStatSample(channel.Id, relayInfo.OriginModelName); fails < *th {
+				autoBan = false
+			}
+		}
+		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), autoBan), newAPIError)
 
 		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
 			break

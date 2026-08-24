@@ -1,0 +1,178 @@
+package service
+
+// [CUSTOM] 需求4: 双向浮动自动优先级调度器。
+// eff_priority = 手动基准(尊重需求3的 model_priorities 覆盖)
+//             + clamp(round((该渠成功率 - 同模型均值) * Scale), ±MaxDelta)
+// 成功率高者相对基准上浮、低者下沉；手动配置永不覆盖，触达集落盘便于关闭后恢复。
+
+import (
+	"encoding/json"
+	"fmt"
+	"math"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/model"
+	"github.com/bytedance/gopkg/util/gopool"
+)
+
+const (
+	apStateFile    = "auto_priority_touched.json"
+	apMinInterval  = 30 * time.Second
+	apRestoreDelay = 15 * time.Second // 等待DB/缓存就绪
+)
+
+type apTouched struct {
+	Keys map[string]int64 `json:"keys"` // "chId|model" -> 最近写入的eff值
+}
+
+var (
+	apMu      sync.Mutex
+	apApplied = map[string]int64{}
+)
+
+func apSaveStateLocked() {
+	b, _ := json.Marshal(apTouched{Keys: apApplied})
+	_ = os.WriteFile(apStateFile, b, 0644)
+}
+
+func manualBasePriority(ch *model.Channel, mdl string) int64 {
+	if p := ch.AbilityPriority(mdl); p != nil {
+		return *p
+	}
+	return 0
+}
+
+func InitAutoPriorityScheduler() {
+	if !common.AutoPriorityEnabled {
+		gopool.Go(func() {
+			time.Sleep(apRestoreDelay)
+			restoreAutoPriority()
+		})
+		return
+	}
+	interval := time.Duration(common.AutoPriorityIntervalSec) * time.Second
+	if interval < apMinInterval {
+		interval = apMinInterval
+	}
+	gopool.Go(func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		common.SysLog(fmt.Sprintf("[CUSTOM] auto-priority(双向浮动) on: interval=%s min_samples=%d scale=%d max_delta=%d",
+			interval, common.AutoPriorityMinSamples, common.AutoPriorityScale, common.AutoPriorityMaxDelta))
+		for range ticker.C {
+			runAutoPriorityTick(interval)
+		}
+	})
+}
+
+func runAutoPriorityTick(interval time.Duration) {
+	byModel := map[string][]apEntry{}
+	ForEachRelayStat(func(chId int, mdl string, samples, succ int) {
+		if samples < common.AutoPriorityMinSamples {
+			return
+		}
+		byModel[mdl] = append(byModel[mdl], apEntry{ChId: chId, Samples: samples, Succ: succ})
+	})
+
+	chanCache := map[int]*model.Channel{}
+	getCh := func(id int) *model.Channel {
+		if c, ok := chanCache[id]; ok {
+			return c
+		}
+		c, err := model.GetChannelById(id, false)
+		if err != nil {
+			c = nil
+		}
+		chanCache[id] = c
+		return c
+	}
+
+	apMu.Lock()
+	defer apMu.Unlock()
+	changed := false
+	for mdl, entries := range byModel {
+		if len(entries) < 2 {
+			continue // 该模型只有一个渠道在跑，无竞争不调
+		}
+		var sum float64
+		for _, e := range entries {
+			sum += float64(e.Succ) / float64(e.Samples)
+		}
+		mean := sum / float64(len(entries))
+		for _, e := range entries {
+			ch := getCh(e.ChId)
+			if ch == nil {
+				continue
+			}
+			rate := float64(e.Succ) / float64(e.Samples)
+			delta := int(math.Round((rate - mean) * float64(common.AutoPriorityScale)))
+			if delta > common.AutoPriorityMaxDelta {
+				delta = common.AutoPriorityMaxDelta
+			} else if delta < -common.AutoPriorityMaxDelta {
+				delta = -common.AutoPriorityMaxDelta
+			}
+			base := manualBasePriority(ch, mdl)
+			eff := base + int64(delta)
+			key := fmt.Sprintf("%d|%s", e.ChId, mdl)
+			if prev, ok := apApplied[key]; ok && prev == eff {
+				continue
+			}
+			if err := model.UpdateAbilityPriorityByChannelModel(e.ChId, mdl, eff); err != nil {
+				common.SysError("[CUSTOM] auto-priority update fail: " + err.Error())
+				continue
+			}
+			apApplied[key] = eff
+			changed = true
+			common.SysLog(fmt.Sprintf("[CUSTOM] auto-priority: ch#%d %s rate=%.2f mean=%.2f prio=%d (base %d, delta %+d)",
+				e.ChId, mdl, rate, mean, eff, base, delta))
+		}
+	}
+	if changed {
+		apSaveStateLocked()
+	}
+	_ = interval
+}
+
+// restoreAutoPriority 启动时未开启调度器：把上次触达的 ability.priority 恢复为手动基准
+func restoreAutoPriority() {
+	apMu.Lock()
+	defer apMu.Unlock()
+	b, err := os.ReadFile(apStateFile)
+	if err != nil {
+		return // 从未触达过
+	}
+	var st apTouched
+	if err := json.Unmarshal(b, &st); err != nil || len(st.Keys) == 0 {
+		return
+	}
+	restored := 0
+	for key := range st.Keys {
+		var chId int
+		var mdl string
+		if _, err := fmt.Sscanf(key, "%d|%s", &chId, &mdl); err != nil {
+			continue
+		}
+		ch, err := model.GetChannelById(chId, false)
+		if err != nil {
+			continue
+		}
+		base := manualBasePriority(ch, mdl)
+		if err := model.UpdateAbilityPriorityByChannelModel(chId, mdl, base); err == nil {
+			restored++
+		}
+	}
+	if restored > 0 {
+		common.SysLog(fmt.Sprintf("[CUSTOM] auto-priority disabled: restored %d abilities to manual base", restored))
+	}
+	_ = os.Remove(apStateFile)
+	apApplied = map[string]int64{}
+}
+
+type apEntry struct {
+	ChId    int
+	Samples int
+	Succ    int
+}

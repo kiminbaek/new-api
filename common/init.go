@@ -111,6 +111,11 @@ func InitEnv() {
 	RelayTimeout = GetEnvOrDefault("RELAY_TIMEOUT", 0)
 	RelayIdleConnTimeout = GetEnvOrDefault("RELAY_IDLE_CONN_TIMEOUT", 90)
 	RelayUserAgent = GetEnvOrDefaultString("RELAY_USER_AGENT", "")
+	AutoPriorityEnabled = os.Getenv("AUTO_PRIORITY_ENABLED") == "true"
+	AutoPriorityIntervalSec = GetEnvOrDefault("AUTO_PRIORITY_INTERVAL_SEC", 300)
+	AutoPriorityMinSamples = GetEnvOrDefault("AUTO_PRIORITY_MIN_SAMPLES", 20)
+	AutoPriorityScale = GetEnvOrDefault("AUTO_PRIORITY_SCALE", 50)
+	AutoPriorityMaxDelta = GetEnvOrDefault("AUTO_PRIORITY_MAX_DELTA", 200)
 	RelayMaxIdleConns = GetEnvOrDefault("RELAY_MAX_IDLE_CONNS", 500)
 	RelayMaxIdleConnsPerHost = GetEnvOrDefault("RELAY_MAX_IDLE_CONNS_PER_HOST", 100)
 

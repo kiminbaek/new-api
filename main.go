@@ -157,6 +157,9 @@ func main() {
 		model.InitBatchUpdater()
 	}
 
+	// [CUSTOM] 需求4: 双向浮动自动优先级（关闭态下仅做触达恢复检查）
+	service.InitAutoPriorityScheduler()
+
 	if os.Getenv("ENABLE_PPROF") == "true" {
 		gopool.Go(func() {
 			log.Println(http.ListenAndServe("0.0.0.0:8005", nil))

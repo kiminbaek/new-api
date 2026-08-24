@@ -162,7 +162,15 @@ var BatchUpdateInterval int
 var RelayTimeout int // unit is second
 
 var RelayIdleConnTimeout int // unit is second
-var RelayUserAgent string // [CUSTOM] stealth: global outbound User-Agent override
+var RelayUserAgent string    // [CUSTOM] stealth: global outbound User-Agent override
+var (
+	// [CUSTOM] 需求4: 双向浮动自动优先级
+	AutoPriorityEnabled     bool
+	AutoPriorityIntervalSec int // 调档周期（秒）
+	AutoPriorityMinSamples  int // 最小样本数，防抖
+	AutoPriorityScale       int // 成功率差 -> 优先级步幅放大系数
+	AutoPriorityMaxDelta    int // 相对基准的最大偏移（上下限）
+)
 var RelayMaxIdleConns int
 var RelayMaxIdleConnsPerHost int
 
