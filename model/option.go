@@ -290,6 +290,12 @@ func updateOptionMap(key string, value string) (err error) {
 	if handleConfigUpdate(key, value) {
 		return nil // 已由配置系统处理
 	}
+	// [CUSTOM] 需求5 模型分级：{"top":["a","b"],...} 原子热更（独立于布尔/数值分支）
+	if key == "ModelGroups" {
+		if err := LoadVirtualModelGroups(value); err != nil {
+			common.SysError("Failed to load ModelGroups: " + err.Error())
+		}
+	}
 
 	// 处理传统配置项...
 	if strings.HasSuffix(key, "Permission") {
@@ -334,11 +340,6 @@ func updateOptionMap(key string, value string) (err error) {
 			common.AutomaticDisableChannelEnabled = boolValue
 		case "AutomaticEnableChannelEnabled":
 			common.AutomaticEnableChannelEnabled = boolValue
-		case "ModelGroups":
-			// [CUSTOM] 需求5 模型分级：{"top":["a","b"],...} 原子热更
-			if err := LoadVirtualModelGroups(value); err != nil {
-				common.SysError("Failed to load ModelGroups: " + err.Error())
-			}
 		case "LogConsumeEnabled":
 			common.LogConsumeEnabled = boolValue
 		case "DisplayInCurrencyEnabled":
