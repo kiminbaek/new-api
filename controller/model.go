@@ -253,17 +253,18 @@ func ListModels(c *gin.Context, modelType int) {
 		userModelNames = append(userModelNames, modelName)
 	}
 
+	// [CUSTOM] 需求5 模型分级：/v1/models 注入虚拟模型组名（不受渠道存在性影响，受令牌模型限制约束）
+	for _, vg := range model.VirtualGroupNames() {
+		if modelLimitEnable {
+			if _, ok := tokenModelLimit[vg]; !ok {
+				continue
+			}
+		}
+		userModelNames = append(userModelNames, vg)
+	}
+
 	ownerByModel := map[string]string{}
 	if len(ownerGroups) > 0 {
-		// [CUSTOM] 需求5 模型分级：/v1/models 注入虚拟模型组名（受令牌模型限制约束）
-		for _, vg := range model.VirtualGroupNames() {
-			if modelLimitEnable {
-				if _, ok := tokenModelLimit[vg]; !ok {
-					continue
-				}
-			}
-			userModelNames = append(userModelNames, vg)
-		}
 		ownerByModel = getPreferredModelOwners(userModelNames, ownerGroups)
 	}
 	userOpenAiModels := make([]dto.OpenAIModels, 0, len(userModelNames))
