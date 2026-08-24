@@ -691,19 +691,18 @@ func detectErrorMessageFromJSONBytes(jsonBytes []byte) string {
 }
 
 func buildTestRequest(model string, endpointType string, channel *model.Channel, isStream bool) dto.Request {
+	// [CUSTOM] stealth: every test payload below is randomized per request
+	// so upstreams cannot fingerprint new-api by fixed health-check prompts.
 	testResponsesInput := StealthMessagesRaw()
 
-	// 根据端点类型构建不同的测试请求
 	if endpointType != "" {
 		switch constant.EndpointType(endpointType) {
 		case constant.EndpointTypeEmbeddings:
-			// 返回 EmbeddingRequest
 			return &dto.EmbeddingRequest{
 				Model: model,
 				Input: []any{StealthEmbeddingInput()},
 			}
 		case constant.EndpointTypeImageGeneration:
-			// 返回 ImageRequest
 			return &dto.ImageRequest{
 				Model:  model,
 				Prompt: StealthImagePrompt(),
@@ -711,22 +710,20 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 				Size:   "1024x1024",
 			}
 		case constant.EndpointTypeJinaRerank:
-			// 返回 RerankRequest
+			rq, rdocs := StealthRerank()
 			return &dto.RerankRequest{
 				Model:     model,
-				Query:     "What is Deep Learning?",
-				Documents: []any{"Deep Learning is a subset of machine learning.", "Machine learning is a field of artificial intelligence."},
+				Query:     rq,
+				Documents: rdocs,
 				TopN:      lo.ToPtr(2),
 			}
 		case constant.EndpointTypeOpenAIResponse:
-			// 返回 OpenAIResponsesRequest
 			return &dto.OpenAIResponsesRequest{
 				Model:  model,
-				Input:  json.RawMessage(`[{"role":"user","content":"hi"}]`),
+				Input:  StealthMessagesRaw(),
 				Stream: lo.ToPtr(isStream),
 			}
 		case constant.EndpointTypeOpenAIResponseCompact:
-			// 返回 OpenAIResponsesCompactionRequest
 			return &dto.OpenAIResponsesCompactionRequest{
 				Model: model,
 				Input: testResponsesInput,
@@ -735,7 +732,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 			return &dto.ClaudeRequest{
 				Model:     model,
 				Stream:    lo.ToPtr(isStream),
-				MaxTokens: lo.ToPtr(StealthMaxTokens(16)),,
+				MaxTokens: lo.ToPtr(StealthMaxTokens(16)),
 				Messages: []dto.ClaudeMessage{
 					{
 						Role:    "user",
@@ -748,11 +745,11 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 				Contents: []dto.GeminiChatContent{
 					{
 						Role:  "user",
-						Parts: []dto.GeminiPart{{Text: "hi"}},
+						Parts: []dto.GeminiPart{{Text: StealthMathPrompt()}},
 					},
 				},
 				GenerationConfig: dto.GeminiChatGenerationConfig{
-					MaxOutputTokens: lo.ToPtr(uint(1500 + stealthRand(1500))),,
+					MaxOutputTokens: lo.ToPtr(uint(1500 + stealthRand(1500))),
 				},
 			}
 		case constant.EndpointTypeOpenAI:
@@ -765,7 +762,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 						Content: StealthMathPrompt(),
 					},
 				},
-				MaxTokens: lo.ToPtr(StealthMaxTokens(16)),,
+				MaxTokens: lo.ToPtr(StealthMaxTokens(16)),
 			}
 			if isStream {
 				req.StreamOptions = &dto.StreamOptions{IncludeUsage: true}
@@ -776,6 +773,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 
 	// 自动检测逻辑（保持原有行为）
 	if strings.Contains(strings.ToLower(model), "rerank") {
+		rq, rdocs := StealthRerank()
 		return &dto.RerankRequest{
 			Model:     model,
 			Query:     rq,
@@ -788,7 +786,6 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 	if strings.Contains(strings.ToLower(model), "embedding") ||
 		strings.HasPrefix(model, "m3e") ||
 		strings.Contains(model, "bge-") {
-		// 返回 EmbeddingRequest
 		return &dto.EmbeddingRequest{
 			Model: model,
 			Input: []any{StealthEmbeddingInput()},
@@ -799,7 +796,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 	if strings.Contains(strings.ToLower(model), "codex") {
 		return &dto.OpenAIResponsesRequest{
 			Model:  model,
-			Input:  json.RawMessage(`[{"role":"user","content":"hi"}]`),
+			Input:  StealthMessagesRaw(),
 			Stream: lo.ToPtr(isStream),
 		}
 	}
@@ -820,15 +817,15 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 	}
 
 	if dto.IsOpenAIReasoningOModel(model) {
-		testRequest.MaxCompletionTokens = lo.ToPtr(uint(16))
+		testRequest.MaxCompletionTokens = lo.ToPtr(StealthMaxTokens(16))
 	} else if strings.Contains(model, "thinking") {
 		if !strings.Contains(model, "claude") {
-			testRequest.MaxTokens = lo.ToPtr(uint(50))
+			testRequest.MaxTokens = lo.ToPtr(StealthMaxTokens(32))
 		}
 	} else if strings.Contains(model, "gemini") {
-		testRequest.MaxTokens = lo.ToPtr(uint(3000))
+		testRequest.MaxTokens = lo.ToPtr(uint(1500 + stealthRand(1500)))
 	} else {
-		testRequest.MaxTokens = lo.ToPtr(uint(16))
+		testRequest.MaxTokens = lo.ToPtr(StealthMaxTokens(16))
 	}
 
 	return testRequest
