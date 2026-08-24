@@ -133,6 +133,7 @@ export function ModelGroupsSection({ defaultValues }: ModelGroupsSectionProps) {
   }
 
   const handleSave = async () => {
+    // 第一遍：收集并校验组名
     const seenNames = new Set<string>()
     for (const row of rows) {
       const name = row.name.trim()
@@ -147,8 +148,25 @@ export function ModelGroupsSection({ defaultValues }: ModelGroupsSectionProps) {
         return
       }
       seenNames.add(name)
-      const members = splitMembers(row.membersText).filter((m) => m !== name)
-      if (members.length === 0) {
+    }
+    // 第二遍：校验成员——不允许嵌套引用其他组名（虚拟名不能作为成员，否则该成员永远无法命中）
+    for (const row of rows) {
+      const name = row.name.trim()
+      const members = splitMembers(row.membersText)
+      const nested = members.filter(
+        (m) => m !== name && seenNames.has(m)
+      )
+      if (nested.length > 0) {
+        toast.error(
+          t(
+            'Group {{name}} references another group as member: {{nested}}. Groups cannot be nested.',
+            { name, nested: nested.join(', ') }
+          )
+        )
+        return
+      }
+      const valid = members.filter((m) => m !== name)
+      if (valid.length === 0) {
         toast.error(
           t('Group {{name}} needs at least one valid member model', {
             name,
