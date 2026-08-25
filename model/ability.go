@@ -334,16 +334,6 @@ func UpdateAbilityPriorityByChannelModel(chId int, model string, priority int64)
 	return err
 }
 
-// [CUSTOM] 需求4: 读取当前值（用于跳过无变化写入）
-func GetAbilityPriorityByChannelModel(chId int, model string) (*int64, error) {
-	var rows []int64
-	err := DB.Model(&Ability{}).Where("channel_id = ? AND model = ?", chId, model).Pluck("priority", &rows).Error
-	if err != nil || len(rows) == 0 {
-		return nil, err
-	}
-	return &rows[0], nil
-}
-
 func UpdateAbilityStatusByTag(tag string, status bool) error {
 	return DB.Model(&Ability{}).Where("tag = ?", tag).Select("enabled").Update("enabled", status).Error
 }

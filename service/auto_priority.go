@@ -34,8 +34,15 @@ var (
 )
 
 func apSaveStateLocked() {
-	b, _ := json.Marshal(apTouched{Keys: apApplied})
-	_ = os.WriteFile(apStateFile, b, 0644)
+	b, err := json.Marshal(apTouched{Keys: apApplied})
+	if err != nil {
+		common.SysError("[CUSTOM] auto-priority state marshal fail: " + err.Error())
+		return
+	}
+	if err := os.WriteFile(apStateFile, b, 0644); err != nil {
+		// 落盘失败=关闭调度器后无法恢复手动基准，必须留痕
+		common.SysError("[CUSTOM] auto-priority state save fail: " + err.Error())
+	}
 }
 
 func manualBasePriority(ch *model.Channel, mdl string) int64 {
