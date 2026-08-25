@@ -5,6 +5,7 @@ package service
 
 import (
 	"strconv"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -88,6 +89,76 @@ func RelayStatSample(chId int, model string) (samples, succ, fail int) {
 		}
 	}
 	return r.n, succ, fail
+}
+
+// ModelSuccessSummary 模型级实时成功率聚合（跨渠道汇总滚动窗口）。
+type ModelSuccessSummary struct {
+	Model   string `json:"model"`
+	Succ    int64  `json:"succ"`
+	Samples int64  `json:"samples"`
+}
+
+// AggregateModelSuccessRates 按模型聚合所有渠道的滚动窗口统计，按成功率降序。
+func AggregateModelSuccessRates() []ModelSuccessSummary {
+	type agg struct{ succ, samples int64 }
+	byModel := map[string]*agg{}
+	statMu.RLock()
+	for key, ring := range statStore {
+		if ring == nil {
+			continue
+		}
+		parts := strings.SplitN(key, "|", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		mdl := parts[1]
+		a, ok := byModel[mdl]
+		if !ok {
+			a = &agg{}
+			byModel[mdl] = a
+		}
+		for i := 0; i < ring.n; i++ {
+			a.samples++
+			if ring.buf[i] == 1 {
+				a.succ++
+			}
+		}
+	}
+	statMu.RUnlock()
+
+	out := make([]ModelSuccessSummary, 0, len(byModel))
+	for mdl, a := range byModel {
+		out = append(out, ModelSuccessSummary{Model: mdl, Succ: a.succ, Samples: a.samples})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ri, rj := 0.0, 0.0
+		if out[i].Samples > 0 {
+			ri = float64(out[i].Succ) / float64(out[i].Samples)
+		}
+		if out[j].Samples > 0 {
+			rj = float64(out[j].Succ) / float64(out[j].Samples)
+		}
+		return ri > rj
+	})
+	return out
+}
+
+// GlobalSuccessRate 全局滚动成功率（succ/samples）。
+func GlobalSuccessRate() (succ, samples int64) {
+	statMu.RLock()
+	for _, ring := range statStore {
+		if ring == nil {
+			continue
+		}
+		for i := 0; i < ring.n; i++ {
+			samples++
+			if ring.buf[i] == 1 {
+				succ++
+			}
+		}
+	}
+	statMu.RUnlock()
+	return succ, samples
 }
 
 // ForEachRelayStat 遍历全部统计项（供自动优先级调度器使用）

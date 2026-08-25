@@ -294,6 +294,13 @@ func SetApiRouter(router *gin.Engine) {
 			systemInfoRoute.DELETE("/instances/:node_name", controller.DeleteStaleSystemInstance)
 		}
 
+		// [CUSTOM] 公开平台概览（无需鉴权，仅聚合统计，不含敏感信息）
+		publicOverviewRoute := apiRouter.Group("/public")
+		publicOverviewRoute.Use(middleware.CORS())
+		{
+			publicOverviewRoute.GET("/overview", controller.GetPublicOverview)
+		}
+
 		dataRoute := apiRouter.Group("/data")
 		dataRoute.GET("/", middleware.AdminAuth(), controller.GetAllQuotaDates)
 		dataRoute.GET("/users", middleware.AdminAuth(), controller.GetQuotaDatesByUser)
