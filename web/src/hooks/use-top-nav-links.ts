@@ -67,6 +67,9 @@ export function useTopNavLinks(): TopNavLink[] {
     links.push({ title: t('Home'), href: '/' })
   }
 
+  // [CUSTOM] 公开平台概览（实时指标 + 7 日趋势 + 模型实时成功率）
+  links.push({ title: t('概览'), href: '/overview' })
+
   // Console -> /dashboard (new console path)
   if (modules?.console !== false) {
     links.push({ title: t('Console'), href: '/dashboard' })
