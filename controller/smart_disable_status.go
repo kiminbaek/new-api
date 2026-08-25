@@ -21,7 +21,7 @@ type smartDisableStatusResponse struct {
 
 // GetSmartDisableStatus GET /api/channel/smart_disable/status
 func GetSmartDisableStatus(c *gin.Context) {
-	items := service.ListSmartDown()
+	items := service.ListSmartDownWithStats()
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].ChannelId != items[j].ChannelId {
 			return items[i].ChannelId < items[j].ChannelId

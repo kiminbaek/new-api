@@ -61,9 +61,16 @@ func runSmartProbeTick() {
 	}
 }
 
-// smartProbeUserID 返回用于探测的用户 ID（沿用渠道测试的 root 用户口径）。
+// smartProbeUserID 返回用于探测的用户 ID。
+// 复用渠道测试同一套 root 解析（查 role=RootUser），不能硬编码 id=1：
+// 多用户实例或重建过库的实例 root 未必是 1 号，硬编码会让探测全部打错账。
 func smartProbeUserID() int {
-	return 1
+	id, err := resolveChannelTestUserID(nil)
+	if err != nil || id <= 0 {
+		common.SysLog("[CUSTOM] smart-disable probe: 解析测试用户失败，回退 uid=1")
+		return 1
+	}
+	return id
 }
 
 func probeOne(st service.SmartDownState, testUserID int) {

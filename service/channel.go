@@ -62,6 +62,14 @@ func ApplyDisablePolicy(channelError types.ChannelError, modelName string, err *
 			common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用：通道「%s」（#%d）错误无法归因到模型，仅降权观察", channelError.ChannelName, channelError.ChannelId))
 			return ActionNone, true
 		}
+		// 渠道级快速隔离：整个渠道连续失败达到硬阈值时，不再等每个模型各自
+		// 攒满 8 连败（巡检随机挑模型会把失败摊薄），直接全部下线 → 自然触发
+		// L2 升级。真死的渠道几十次请求内退出调度；任一模型活着就不会累积。
+		if cs := RelayChannelConsecutiveFailures(channelError.ChannelId); cs >= smartChannelFastQuarantineStreak {
+			if quarantineWholeChannel(channelError, cs, err) {
+				return ActionDisableChannel, true
+			}
+		}
 		ok, why := ShouldDisableModelNow(channelError.ChannelId, modelName)
 		if !ok {
 			// 未达自适应阈值：交给 auto_priority 降权分流（L0）。

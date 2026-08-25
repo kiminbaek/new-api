@@ -4,8 +4,8 @@ package service
 // 同时服务：fail_threshold 门控（失败计数）与双向浮动自动优先级（成功率）。
 
 import (
-	"strconv"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -28,6 +28,15 @@ var (
 	// 才符合「失败 N 次才禁用」的直觉。
 	consecMu    sync.Mutex
 	consecStore = map[string]int{}
+
+	// [SMART_DISABLE] 渠道级连续失败计数（跨模型聚合；任一模型成功即归零）。
+	// 用途：死渠道快速隔离——健康巡检随机挑模型（防指纹设计），全死渠道的
+	// 失败会被摊薄到各个模型上，per-model 计数涨得很慢；渠道级计数不受此影响，
+	// 真死的渠道几十次请求内即可触发整渠道隔离。
+	// 单独建 map 而非塞进 consecStore：consecStore 的 key 会被
+	// ForEachRelayStat/AggregateModelSuccessRates 按 "chId|model" 解析，
+	// 混入特殊 key 会污染聚合结果。
+	chanStreakStore = map[int]int{}
 )
 
 func relayStatKey(chId int, model string) string {
@@ -55,6 +64,7 @@ func RecordRelaySuccess(chId int, model string) {
 	k := relayStatKey(chId, model)
 	consecMu.Lock()
 	consecStore[k] = 0
+	chanStreakStore[chId] = 0
 	consecMu.Unlock()
 }
 
@@ -63,6 +73,7 @@ func RecordRelayFailure(chId int, model string) {
 	k := relayStatKey(chId, model)
 	consecMu.Lock()
 	consecStore[k]++
+	chanStreakStore[chId]++
 	consecMu.Unlock()
 }
 
@@ -71,6 +82,35 @@ func RelayConsecutiveFailures(chId int, model string) int {
 	consecMu.Lock()
 	defer consecMu.Unlock()
 	return consecStore[relayStatKey(chId, model)]
+}
+
+// RelayChannelConsecutiveFailures 返回渠道级（跨模型）连续失败次数。
+// 该渠道任意一次成功即归零——多模型渠道只要还有一个模型活着就不会累积。
+func RelayChannelConsecutiveFailures(chId int) int {
+	consecMu.Lock()
+	defer consecMu.Unlock()
+	return chanStreakStore[chId]
+}
+
+// PruneRelayStatsForChannel 渠道删除后清除其全部统计残留，
+// 避免内存慢性泄漏与幽灵数据混入全局聚合。
+func PruneRelayStatsForChannel(chId int) {
+	prefix := strconv.Itoa(chId) + "|"
+	statMu.Lock()
+	for k := range statStore {
+		if strings.HasPrefix(k, prefix) {
+			delete(statStore, k)
+		}
+	}
+	statMu.Unlock()
+	consecMu.Lock()
+	for k := range consecStore {
+		if strings.HasPrefix(k, prefix) {
+			delete(consecStore, k)
+		}
+	}
+	delete(chanStreakStore, chId)
+	consecMu.Unlock()
 }
 
 // RelayStatSample 返回 (样本数, 成功数, 失败数)

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/stretchr/testify/assert"
 )
@@ -27,6 +28,7 @@ func resetSmartState() {
 	statMu.Unlock()
 	consecMu.Lock()
 	consecStore = map[string]int{}
+	chanStreakStore = map[int]int{}
 	consecMu.Unlock()
 }
 
@@ -221,4 +223,105 @@ func TestSmartDownModelsSnapshot(t *testing.T) {
 	down := SmartDownModels(7)
 	assert.True(t, down["gpt-4o"])
 	assert.Len(t, down, 1, "channel-level records must not appear as models")
+}
+
+// ===== 渠道级连续失败 / 快速隔离 / 陈旧探测回收 / 统计清理 =====
+
+func TestChannelStreakAccumulatesAcrossModelsAndResetsOnAnySuccess(t *testing.T) {
+	resetSmartState()
+	for i := 0; i < 5; i++ {
+		RecordRelayFailure(7, "m-a")
+	}
+	assert.Equal(t, 5, RelayChannelConsecutiveFailures(7))
+	RecordRelayFailure(7, "m-b")
+	assert.Equal(t, 6, RelayChannelConsecutiveFailures(7), "streak must aggregate across models")
+	// 任一模型成功即归零——部分模型挂的渠道不会被误隔离
+	RecordRelaySuccess(7, "m-b")
+	assert.Equal(t, 0, RelayChannelConsecutiveFailures(7))
+}
+
+func TestQuarantineWholeChannelOnChannelStreak(t *testing.T) {
+	resetSmartState()
+	oldFetcher := smartChannelModelsFetcher
+	oldDisable := smartDisableChannelImpl
+	defer func() { smartChannelModelsFetcher = oldFetcher; smartDisableChannelImpl = oldDisable }()
+
+	// ApplyDisablePolicy 需要「智能开关 + 上游自动禁用总开关」同时开启才生效
+	oldSmart := common.SmartAutoDisableEnabled
+	oldAutoBan := common.AutomaticDisableChannelEnabled
+	common.SmartAutoDisableEnabled = true
+	common.AutomaticDisableChannelEnabled = true
+	defer func() { common.SmartAutoDisableEnabled = oldSmart; common.AutomaticDisableChannelEnabled = oldAutoBan }()
+
+	smartChannelModelsFetcher = func(int) ([]string, error) { return []string{"m-a", "m-b"}, nil }
+	var disabledReason string
+	smartDisableChannelImpl = func(_ types.ChannelError, reason string) { disabledReason = reason }
+
+	// 渠道级连败 16 次（跨两模型摊薄），单模型只有 8 连败（刚好到 per-model 阈值）
+	for i := 0; i < 8; i++ {
+		RecordRelayFailure(7, "m-a")
+		RecordRelayFailure(7, "m-b")
+	}
+
+	err := types.NewErrorWithStatusCode(errors.New("boom"), types.ErrorCodeDoRequestFailed, 503)
+	chErr := types.ChannelError{ChannelId: 7, ChannelName: "ch7", AutoBan: true}
+	action, handled := ApplyDisablePolicy(chErr, "m-a", err)
+
+	assert.True(t, handled)
+	assert.Equal(t, ActionDisableChannel, action, "channel-level streak must fast-quarantine")
+	assert.True(t, IsSmartDown(7, "m-a"))
+	assert.True(t, IsSmartDown(7, "m-b"), "ALL models must be registered so probes can recover them")
+	assert.Contains(t, disabledReason, smartL2Marker)
+	assert.Contains(t, disabledReason, smartL2LastModelPrefix, "restore protocol marker must be present")
+}
+
+func TestQuarantineNotTriggeredWhenOneModelSucceeds(t *testing.T) {
+	resetSmartState()
+	// m-a 连败 15 次，但中间夹着 m-b 的成功 → 渠道计数被清零，不触发隔离
+	for i := 0; i < 15; i++ {
+		RecordRelayFailure(7, "m-a")
+		if i%3 == 0 {
+			RecordRelaySuccess(7, "m-b")
+		}
+	}
+	assert.Less(t, RelayChannelConsecutiveFailures(7), smartChannelFastQuarantineStreak)
+}
+
+func TestDueSmartProbesReclaimsStaleProbing(t *testing.T) {
+	resetSmartState()
+	RegisterSmartDown(7, "ch7", "gpt-test", SmartDownModel, "boom")
+	now := time.Now().Unix()
+
+	// 在途且未超时：不可认领
+	smartDownMu.Lock()
+	st := smartDown[smartDownKey(7, "gpt-test")]
+	st.Probing = true
+	st.ProbeStartedAt = now - 10
+	smartDownMu.Unlock()
+	assert.Empty(t, DueSmartProbes(5))
+
+	// 在途但已超过 smartProbeStaleSeconds：必须重新认领，不能永久卡死
+	smartDownMu.Lock()
+	st.ProbeStartedAt = now - smartProbeStaleSeconds - 10
+	smartDownMu.Unlock()
+	due := DueSmartProbes(5)
+	assert.Len(t, due, 1)
+	assert.Equal(t, int64(now), due[0].ProbeStartedAt)
+}
+
+func TestPruneRelayStatsForChannel(t *testing.T) {
+	resetSmartState()
+	RecordRelayFailure(9, "m-a")
+	RecordRelayFailure(9, "m-b")
+	RecordRelayFailure(8, "m-a")
+
+	PruneRelayStatsForChannel(9)
+
+	assert.Equal(t, 0, RelayConsecutiveFailures(9, "m-a"))
+	assert.Equal(t, 0, RelayConsecutiveFailures(9, "m-b"))
+	assert.Equal(t, 1, RelayConsecutiveFailures(8, "m-a"), "other channels must be untouched")
+	s, _, _ := RelayStatSample(9, "m-a")
+	assert.Equal(t, 0, s)
+	s8, _, _ := RelayStatSample(8, "m-a")
+	assert.Equal(t, 1, s8)
 }

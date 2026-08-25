@@ -731,8 +731,9 @@ func DeleteChannel(c *gin.Context) {
 		return
 	}
 	model.InitChannelCache()
-	// [CUSTOM] 渠道已删除：清掉其智能下线记录，避免看板残留幽灵条目
+	// [CUSTOM] 渠道已删除：清掉其智能下线记录与统计残留，避免看板幽灵条目与内存泄漏
 	service.ClearSmartDownByChannel(id)
+	service.PruneRelayStatsForChannel(id)
 	if channelLookupFailed {
 		service.ResetProxyClientCache()
 	} else {

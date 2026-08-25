@@ -45,6 +45,16 @@ type SmartDownItem = {
   attempts: number
   last_error?: string
   probing: boolean
+  recent_samples?: number
+  recent_succ?: number
+}
+
+function formatRate(item: SmartDownItem): string {
+  const samples = item.recent_samples ?? 0
+  const succ = item.recent_succ ?? 0
+  if (samples <= 0) return '—'
+  const pct = Math.round((succ / samples) * 100)
+  return `${pct}% (${succ}/${samples})`
 }
 
 type SmartDisableStatus = {
@@ -140,6 +150,7 @@ export function SmartDisableStatusPanel() {
                 <TableHead>{t('Model')}</TableHead>
                 <TableHead>{t('Scope')}</TableHead>
                 <TableHead>{t('Reason')}</TableHead>
+                <TableHead>{t('Recent success rate')}</TableHead>
                 <TableHead>{t('Next probe')}</TableHead>
                 <TableHead>{t('Probes')}</TableHead>
                 <TableHead />
@@ -170,6 +181,7 @@ export function SmartDisableStatusPanel() {
                   <TableCell className='max-w-[20rem] truncate'>
                     {item.reason}
                   </TableCell>
+                  <TableCell>{formatRate(item)}</TableCell>
                   <TableCell>
                     {item.probing
                       ? t('Probing...')

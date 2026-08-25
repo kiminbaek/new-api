@@ -22,6 +22,7 @@ package service
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -74,6 +75,13 @@ const (
 	// 探测退避：首次 1 分钟，每次失败翻倍，30 分钟封顶。
 	smartProbeBaseInterval = time.Minute
 	smartProbeMaxInterval  = 30 * time.Minute
+	// 在途探测超过该秒数视为陈旧（探测方 panic/中断未回滚标记），允许重新认领。
+	smartProbeStaleSeconds = 600
+
+	// 渠道级连续失败达到该值 → 整渠道快速隔离（全部模型一次性下线，触发 L2 升级）。
+	// 取 per-model 硬阈值(8)的 2 倍：更保守，因为爆炸半径是整个渠道。
+	// 多模型渠道只要任一模型成功就会归零，不会误伤「部分模型挂」的渠道。
+	smartChannelFastQuarantineStreak = smartHardFailStreak * 2
 )
 
 // ===== 错误分类关键词 =====
@@ -232,6 +240,14 @@ type SmartDownState struct {
 	Attempts    int            `json:"attempts"`
 	LastError   string         `json:"last_error,omitempty"`
 	Probing     bool           `json:"probing"`
+	// ProbeStartedAt 本轮探测开始时间。用于陈旧认领回收：探测方若在探测中途
+	// panic（外层 recover 兜住 worker 但不回滚标记），该项会永远停在 Probing
+	// 被后续 tick 跳过——超过 smartProbeStaleSeconds 的在途项允许重新认领。
+	ProbeStartedAt int64 `json:"probe_started_at,omitempty"`
+
+	// RecentSamples/RecentSucc 看板展示用：下线决策依据的近期滚动统计快照。
+	RecentSamples int `json:"recent_samples,omitempty"`
+	RecentSucc    int `json:"recent_succ,omitempty"`
 }
 
 var (
@@ -369,23 +385,37 @@ const (
 	smartL2LastModelPrefix = "最后一个："
 )
 
-// DueSmartProbes 取出所有到期且未在探测中的记录，并就地标记 Probing。
-// 调用方必须对每条结果调用 FinishSmartProbe，否则该项会一直停在 Probing。
+// DueSmartProbes 取出所有到期且可探测的记录，并就地标记 Probing。
+// 调用方必须对每条结果调用 FinishSmartProbe，否则该项会停在 Probing——
+// 但超过 smartProbeStaleSeconds 的在途项会被视为陈旧重新认领，不会永久卡死。
+// 返回按 NextProbeAt 升序（最饿的先探测）。
 func DueSmartProbes(limit int) []SmartDownState {
 	now := time.Now().Unix()
 	out := make([]SmartDownState, 0, limit)
 	smartDownMu.Lock()
-	defer smartDownMu.Unlock()
 	for _, st := range smartDown {
-		if st.Probing || st.NextProbeAt > now {
-			continue
+		stale := st.Probing && now-st.ProbeStartedAt >= smartProbeStaleSeconds
+		if !stale {
+			// 在途未超时：跳过
+			if st.Probing {
+				continue
+			}
+			// 未到期：跳过
+			if st.NextProbeAt > now {
+				continue
+			}
 		}
+		// 陈旧在途项直接重新认领（它当初被认领时已经赢得过探测资格），
+		// 不受 NextProbeAt 影响——否则永远轮不到它。
 		st.Probing = true
+		st.ProbeStartedAt = now
 		out = append(out, *st)
 		if limit > 0 && len(out) >= limit {
 			break
 		}
 	}
+	smartDownMu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].NextProbeAt < out[j].NextProbeAt })
 	return out
 }
 
@@ -443,4 +473,62 @@ func IsSmartDown(chId int, mdl string) bool {
 	defer smartDownMu.Unlock()
 	_, ok := smartDown[smartDownKey(chId, mdl)]
 	return ok
+}
+
+// ===== 渠道级快速隔离（智能化增强：死渠道几十次请求内退出调度） =====
+
+// smartChannelModelsFetcher 可注入的渠道模型列表获取（单测替换，避免依赖 DB）。
+var smartChannelModelsFetcher = func(chId int) ([]string, error) {
+	ch, err := model.GetChannelById(chId, false)
+	if err != nil || ch == nil {
+		return nil, fmt.Errorf("channel %d not found", chId)
+	}
+	return ch.GetModels(), nil
+}
+
+// smartDisableChannelImpl 可注入的整渠道禁用实现（单测替换，避免触碰 DB）。
+var smartDisableChannelImpl = DisableChannel
+
+// quarantineWholeChannel 渠道级快速隔离：把该渠道全部模型登记为 L1 下线，
+// 再按「全模型已下线」语义升级 L2 整渠道禁用。
+//
+// reason 必须同时包含「智能下线」和「最后一个：<model>」——那是
+// RestoreSmartDownFromDB 与 probeOne 的跨重启解析协议，改文案必须同步。
+func quarantineWholeChannel(channelError types.ChannelError, streak int, err *types.NewAPIError) bool {
+	models, gerr := smartChannelModelsFetcher(channelError.ChannelId)
+	if gerr != nil || len(models) == 0 {
+		return false
+	}
+	last := ""
+	reason := fmt.Sprintf("渠道级连续失败 %d 次，整渠道快速隔离；最后错误：%s",
+		streak, common.LocalLogPreview(err.Error()))
+	for _, m := range models {
+		m = strings.TrimSpace(m)
+		if m == "" {
+			continue
+		}
+		// 已在下线态的模型不重置退避进度，只补齐漏网的
+		if !IsSmartDown(channelError.ChannelId, m) {
+			RegisterSmartDown(channelError.ChannelId, channelError.ChannelName, m, SmartDownModel, reason)
+		}
+		last = m
+	}
+	if last == "" {
+		return false
+	}
+	common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用 L2 快速隔离：通道「%s」（#%d）渠道级连续失败 %d 次，全部模型一次性下线",
+		channelError.ChannelName, channelError.ChannelId, streak))
+	smartDisableChannelImpl(channelError, fmt.Sprintf("渠道级连续失败 %d 次，全部模型均已被智能下线（最后一个：%s）", streak, last))
+	return true
+}
+
+// ListSmartDownWithStats 看板专用：下线快照 + 近期滚动统计（成功率依据）。
+func ListSmartDownWithStats() []SmartDownState {
+	out := ListSmartDown()
+	for i := range out {
+		samples, succ, _ := RelayStatSample(out[i].ChannelId, out[i].Model)
+		out[i].RecentSamples = samples
+		out[i].RecentSucc = succ
+	}
+	return out
 }
