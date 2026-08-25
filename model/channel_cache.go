@@ -122,6 +122,29 @@ func InitChannelCache() {
 	common.SysLog("channels synced from database")
 }
 
+// RefreshAbilityPriorityCache 调优器定点写 ability 后同步内存优先级缓存（单渠道×模型，
+// 一条 SQL + 写锁内更新），替代全量 InitChannelCache 重建。
+func RefreshAbilityPriorityCache(chId int, mdl string) {
+	var rows []Ability
+	if err := DB.Where("channel_id = ? AND model = ?", chId, mdl).Find(&rows).Error; err != nil {
+		return // DB 抖动时保留旧缓存，等 SYNC_FREQUENCY 周期对齐
+	}
+	channelSyncLock.Lock()
+	defer channelSyncLock.Unlock()
+	for _, ab := range rows {
+		if ab.Priority == nil {
+			continue
+		}
+		if group2model2chanPriority[ab.Group] == nil {
+			group2model2chanPriority[ab.Group] = make(map[string]map[int]int64)
+		}
+		if group2model2chanPriority[ab.Group][ab.Model] == nil {
+			group2model2chanPriority[ab.Group][ab.Model] = make(map[int]int64)
+		}
+		group2model2chanPriority[ab.Group][ab.Model][ab.ChannelId] = *ab.Priority
+	}
+}
+
 // EffectiveAbilityPriority 返回 (group,model,channel) 的 ability 粒度优先级；无记录回落 fallback。
 // 调用方必须持有 channelSyncLock.RLock（与 group2model2chanPriority 同锁保护）。
 func EffectiveAbilityPriority(group, model string, channelId int, fallback int64) int64 {

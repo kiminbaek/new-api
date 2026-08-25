@@ -322,11 +322,16 @@ func UpdateAbilityStatus(channelId int, status bool) error {
 	return DB.Model(&Ability{}).Where("channel_id = ?", channelId).Select("enabled").Update("enabled", status).Error
 }
 
-// [CUSTOM] 需求4: 定点更新某渠道某模型的优先级（双向浮动调度器写入）
+// [CUSTOM] 需求4: 定点更新某渠道某模型的优先级（双向浮动调度器写入）；
+// 成功后同步内存优先级缓存（精准单键，避免全量重建）。
 func UpdateAbilityPriorityByChannelModel(chId int, model string, priority int64) error {
-	return DB.Model(&Ability{}).
+	err := DB.Model(&Ability{}).
 		Where("channel_id = ? AND model = ?", chId, model).
 		Update("priority", priority).Error
+	if err == nil {
+		RefreshAbilityPriorityCache(chId, model)
+	}
+	return err
 }
 
 // [CUSTOM] 需求4: 读取当前值（用于跳过无变化写入）

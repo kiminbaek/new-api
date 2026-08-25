@@ -67,7 +67,15 @@ func InitAutoPriorityScheduler() {
 					continue
 				}
 				lastRun = time.Now()
-				runAutoPriorityTick(interval)
+				// [CUSTOM S5] 单次 tick panic 不允许杀死 watchdog（gopool 捕获后不会重启闭包）
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							common.SysError(fmt.Sprintf("[CUSTOM] auto-priority tick panic (watchdog survives): %v", r))
+						}
+					}()
+					runAutoPriorityTick(interval)
+				}()
 			} else if !restoredOnDisable {
 				// 关闭（或刚启动时未开）：恢复一次手动基准
 				restoreAutoPriority()
@@ -145,9 +153,8 @@ func runAutoPriorityTick(interval time.Duration) {
 	}
 	if changed {
 		apSaveStateLocked()
-		// [CUSTOM-fix P0] 缓存路径选择器读 group2model2chanPriority（InitChannelCache 构建），
-		// 不主动刷新则 MEMORY_CACHE_ENABLED=true 时调档要等 SYNC_FREQUENCY(默认60s) 才生效。
-		model.InitChannelCache()
+		// [CUSTOM-fix P0→S7] 缓存同步已下沉到 UpdateAbilityPriorityByChannelModel
+		// （RefreshAbilityPriorityCache 精准单键更新），不再全量重建。
 	}
 	_ = interval
 }
