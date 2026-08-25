@@ -351,6 +351,14 @@ func RetrieveModel(c *gin.Context, modelType int) {
 		default:
 			c.JSON(200, aiModel)
 		}
+	} else if model.IsVirtualModel(modelId) {
+		// [CUSTOM] 需求5: 虚拟模型组名详情可检索（与 /v1/models 列表注入对齐，不再 404）
+		c.JSON(200, dto.OpenAIModels{
+			Id:      modelId,
+			Object:  "model",
+			Created: 1700000000,
+			OwnedBy: "custom",
+		})
 	} else {
 		openAIError := types.OpenAIError{
 			Message: fmt.Sprintf("The model '%s' does not exist", modelId),

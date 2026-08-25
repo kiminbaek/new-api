@@ -50,8 +50,12 @@ func ApplyUpstreamBodyMetadata(req *http.Request, body io.Reader) {
 
 func SetupApiRequestHeader(info *common.RelayInfo, c *gin.Context, req *http.Header) {
 	// [CUSTOM] stealth: configurable outbound User-Agent (empty keeps Go default).
+	// [CUSTOM] stealth: Go 默认发空 Accept 头，与 UA 一样是网关特征——伪装 UA 时一并补常规客户端 Accept。
 	if common2.RelayUserAgent != "" {
 		req.Set("User-Agent", common2.RelayUserAgent)
+		if req.Get("Accept") == "" {
+			req.Set("Accept", "application/json")
+		}
 	}
 	if info.RelayMode == constant.RelayModeAudioTranscription || info.RelayMode == constant.RelayModeAudioTranslation {
 		// multipart/form-data

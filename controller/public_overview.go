@@ -2,14 +2,35 @@ package controller
 
 import (
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 )
 
+// [CUSTOM] 公开概览服务端 30s TTL 缓存：每请求 4 次 SQL + 2 次 statStore 全遍历，
+// 前端 30s 自动刷新会把聚合查询放大；缓存整个 data 载荷，错误结果不缓存。
+const overviewCacheTTL = 30 * time.Second
+
+var (
+	overviewCacheMu sync.Mutex
+	overviewCache   gin.H
+	overviewCacheAt time.Time
+)
+
 // GetPublicOverview [CUSTOM] 公开平台概览（无需鉴权）：核心指标 + 近7日趋势 + 模型实时成功率
 func GetPublicOverview(c *gin.Context) {
+	overviewCacheMu.Lock()
+	if overviewCache != nil && time.Since(overviewCacheAt) < overviewCacheTTL {
+		data := overviewCache
+		overviewCacheMu.Unlock()
+		c.JSON(http.StatusOK, gin.H{"success": true, "data": data})
+		return
+	}
+	overviewCacheMu.Unlock()
+
 	stats, err := model.GetPublicOverviewStats()
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
@@ -40,18 +61,23 @@ func GetPublicOverview(c *gin.Context) {
 		}
 		rates = append(rates, modelRateView{Model: m.Model, SuccessRate: rate, Succ: m.Succ, Samples: m.Samples})
 	}
+	data := gin.H{
+		"total_users":      stats.TotalUsers,
+		"total_requests":   stats.TotalRequests,
+		"today_requests":   stats.TodayRequests,
+		"active_users_30d": stats.ActiveUsers30d,
+		"success_rate":     successRate,
+		"succ":             succ,
+		"samples":          samples,
+		"trend":            trend,
+		"model_rates":      rates,
+	}
+	overviewCacheMu.Lock()
+	overviewCache = data
+	overviewCacheAt = time.Now()
+	overviewCacheMu.Unlock()
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"data": gin.H{
-			"total_users":      stats.TotalUsers,
-			"total_requests":   stats.TotalRequests,
-			"today_requests":   stats.TodayRequests,
-			"active_users_30d": stats.ActiveUsers30d,
-			"success_rate":     successRate,
-			"succ":             succ,
-			"samples":          samples,
-			"trend":            trend,
-			"model_rates":      rates,
-		},
+		"data":    data,
 	})
 }
