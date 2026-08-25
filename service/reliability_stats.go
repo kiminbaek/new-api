@@ -20,6 +20,13 @@ type statRing struct {
 var (
 	statMu    sync.RWMutex
 	statStore = map[string]*statRing{}
+
+	// [CUSTOM O1] 连续失败计数（仅真实 relay 流量维护；成功归零）。
+	// fail_threshold 语义从「滚动窗口累计」改为「连续失败」——窗口累计会被
+	// 历史成功记录稀释（长期 50% 成功率的渠道永远达不到阈值），连续计数
+	// 才符合「失败 N 次才禁用」的直觉。
+	consecMu    sync.Mutex
+	consecStore = map[string]int{}
 )
 
 func relayStatKey(chId int, model string) string {
@@ -42,8 +49,28 @@ func recordRelayOutcome(chId int, model string, ok int8) {
 	statMu.Unlock()
 }
 
-func RecordRelaySuccess(chId int, model string) { recordRelayOutcome(chId, model, 1) }
-func RecordRelayFailure(chId int, model string) { recordRelayOutcome(chId, model, 0) }
+func RecordRelaySuccess(chId int, model string) {
+	recordRelayOutcome(chId, model, 1)
+	k := relayStatKey(chId, model)
+	consecMu.Lock()
+	consecStore[k] = 0
+	consecMu.Unlock()
+}
+
+func RecordRelayFailure(chId int, model string) {
+	recordRelayOutcome(chId, model, 0)
+	k := relayStatKey(chId, model)
+	consecMu.Lock()
+	consecStore[k]++
+	consecMu.Unlock()
+}
+
+// RelayConsecutiveFailures 返回该渠道×模型当前连续失败次数（成功即归零）。
+func RelayConsecutiveFailures(chId int, model string) int {
+	consecMu.Lock()
+	defer consecMu.Unlock()
+	return consecStore[relayStatKey(chId, model)]
+}
 
 // RelayStatSample 返回 (样本数, 成功数, 失败数)
 func RelayStatSample(chId int, model string) (samples, succ, fail int) {

@@ -106,11 +106,15 @@ func runAutoPriorityTick(interval time.Duration) {
 		if len(entries) < 2 {
 			continue // 该模型只有一个渠道在跑，无竞争不调
 		}
-		var sum float64
+		// [CUSTOM O2] 按样本数加权均值：20 样本的小渠道与 128 样本的大渠道
+		// 不应同权，否则低流量渠道的噪声会拉偏整体基准。
+		var wsum, wcount float64
 		for _, e := range entries {
-			sum += float64(e.Succ) / float64(e.Samples)
+			r := float64(e.Succ) / float64(e.Samples)
+			wsum += r * float64(e.Samples)
+			wcount += float64(e.Samples)
 		}
-		mean := sum / float64(len(entries))
+		mean := wsum / wcount
 		for _, e := range entries {
 			ch := getCh(e.ChId)
 			if ch == nil {

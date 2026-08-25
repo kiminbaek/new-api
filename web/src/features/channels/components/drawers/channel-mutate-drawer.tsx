@@ -4446,7 +4446,7 @@ export function ChannelMutateDrawer({
                                     />
                                   </FormControl>
                                   <FormDescription>
-                                    {t('Failures required within the rolling window before auto-disable applies. Empty = immediate on qualifying errors.')}
+                                    {t('Consecutive failures required before auto-disable applies. Each success resets the count. Empty = immediate on qualifying errors.')}
                                   </FormDescription>
                                   <FormMessage />
                                 </FormItem>

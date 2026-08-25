@@ -8,6 +8,8 @@ package service
 
 import (
 	"sort"
+	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -15,12 +17,47 @@ import (
 
 const neutralSuccessRate = 0.5
 
+// [CUSTOM O3] 排序结果 TTL 缓存：OrderedVirtualMembers 原实现每请求全表遍历
+// statStore（渠道×模型键数可达数千）且持 RLock，高 QPS 下锁竞争明显。
+// 缓存键含配置版本号，ModelGroups 配置变更即自然失效。
+const vgOrderTTL = 5 * time.Second
+
+type vgOrderCacheEntry struct {
+	members []string
+	version uint64
+	at      time.Time
+}
+
+var (
+	vgOrderMu    sync.Mutex
+	vgOrderCache = map[string]vgOrderCacheEntry{}
+)
+
 // OrderedVirtualMembers 返回按滚动成功率动态插队后的成员模型列表（含配置顺序兜底）。
+// [CUSTOM O3] 结果带 5s TTL 缓存；配置版本变更立即失效。
 func OrderedVirtualMembers(virtualName string) []string {
 	base := model.VirtualGroupConfigOrder(virtualName)
 	if len(base) <= 1 {
 		return base
 	}
+
+	version := model.VirtualGroupVersion()
+	vgOrderMu.Lock()
+	if hit, ok := vgOrderCache[virtualName]; ok && hit.version == version && time.Since(hit.at) < vgOrderTTL {
+		members := hit.members
+		vgOrderMu.Unlock()
+		return members
+	}
+	vgOrderMu.Unlock()
+
+	ordered := vgOrderCompute(virtualName, base)
+	vgOrderMu.Lock()
+	vgOrderCache[virtualName] = vgOrderCacheEntry{members: ordered, version: version, at: time.Now()}
+	vgOrderMu.Unlock()
+	return ordered
+}
+
+func vgOrderCompute(virtualName string, base []string) []string {
 
 	type agg struct{ succ, samples int }
 	stats := make(map[string]*agg)

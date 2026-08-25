@@ -2648,7 +2648,6 @@
     "Channel Timeout (seconds)": "渠道超时（秒）",
     "Upstream timeout for non-stream requests only. Empty = global default.": "仅对非流式请求生效的上游超时时间；留空 = 跟随全局默认。",
     "Fail Threshold Before Disable": "触发禁用的失败阈值",
-    "Failures required within the rolling window before auto-disable applies. Empty = immediate on qualifying errors.": "在滚动窗口内累计达到该失败次数后才触发自动禁用；留空 = 命中符合条件的错误立即禁用。",
     "Per-Model Priority Overrides": "分模型优先级覆盖",
     "JSON map of model name to priority override. Models not listed use the channel default priority.": "模型名 → 优先级覆盖值的 JSON 映射；未列出的模型使用渠道默认优先级。",
     "Max Success": "最大成功数",
@@ -5361,6 +5360,7 @@
     "Health Check Interval (minutes)": "存活检测间隔（分钟）",
     "Per-channel probe interval override. Empty = follow global. Random jitter is applied for stealth.": "覆盖该渠道的检测间隔。留空 = 跟随全局。为隐蔽性会施加随机抖动。",
     "Health-check interval jitter": "检测间隔随机抖动",
-    "Randomly jitter each channel health-check cadence by ±15% and shuffle probe order, so upstreams cannot fingerprint a fixed testing pattern. Recommended on.": "每个渠道的检测节奏随机抖动 ±15%，并打乱探测顺序，避免上游识别出固定测试模式。建议开启。"
+    "Randomly jitter each channel health-check cadence by ±15% and shuffle probe order, so upstreams cannot fingerprint a fixed testing pattern. Recommended on.": "每个渠道的检测节奏随机抖动 ±15%，并打乱探测顺序，避免上游识别出固定测试模式。建议开启。",
+    "Consecutive failures required before auto-disable applies. Each success resets the count. Empty = immediate on qualifying errors.": "连续失败达到该次数后才触发自动禁用（成功一次即重新计数）；留空 = 命中符合条件的错误立即禁用。"
   }
 }

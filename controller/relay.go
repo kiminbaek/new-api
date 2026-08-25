@@ -272,7 +272,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		autoBan := channel.GetAutoBan()
 		if cs2, ok2 := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting); ok2 && cs2.FailThreshold != nil && *cs2.FailThreshold > 0 {
 			th := cs2.FailThreshold
-			if _, _, fails := service.RelayStatSample(channel.Id, relayInfo.OriginModelName); fails < *th {
+			if fails := service.RelayConsecutiveFailures(channel.Id, relayInfo.OriginModelName); fails < *th {
 				autoBan = false
 			}
 		}

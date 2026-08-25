@@ -5334,7 +5334,6 @@
     "Channel Timeout (seconds)": "Channel Timeout (seconds)",
     "Upstream timeout for non-stream requests only. Empty = global default.": "Upstream timeout for non-stream requests only. Empty = global default.",
     "Fail Threshold Before Disable": "Fail Threshold Before Disable",
-    "Failures required within the rolling window before auto-disable applies. Empty = immediate on qualifying errors.": "Failures required within the rolling window before auto-disable applies. Empty = immediate on qualifying errors.",
     "Outbound stealth": "Outbound stealth",
     "Outbound User-Agent": "Outbound User-Agent",
     "e.g. Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...": "e.g. Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...",
@@ -5361,6 +5360,7 @@
     "Health Check Interval (minutes)": "Health Check Interval (minutes)",
     "Per-channel probe interval override. Empty = follow global. Random jitter is applied for stealth.": "Per-channel probe interval override. Empty = follow global. Random jitter is applied for stealth.",
     "Health-check interval jitter": "Health-check interval jitter",
-    "Randomly jitter each channel health-check cadence by ±15% and shuffle probe order, so upstreams cannot fingerprint a fixed testing pattern. Recommended on.": "Randomly jitter each channel health-check cadence by ±15% and shuffle probe order, so upstreams cannot fingerprint a fixed testing pattern. Recommended on."
+    "Randomly jitter each channel health-check cadence by ±15% and shuffle probe order, so upstreams cannot fingerprint a fixed testing pattern. Recommended on.": "Randomly jitter each channel health-check cadence by ±15% and shuffle probe order, so upstreams cannot fingerprint a fixed testing pattern. Recommended on.",
+    "Consecutive failures required before auto-disable applies. Each success resets the count. Empty = immediate on qualifying errors.": "Consecutive failures required before auto-disable applies. Each success resets the count. Empty = immediate on qualifying errors."
   }
 }

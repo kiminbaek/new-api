@@ -14,6 +14,9 @@ import (
 
 var virtualGroupStore atomic.Pointer[map[string][]string]
 
+// [CUSTOM O3] 配置版本号：每次 LoadVirtualModelGroups 递增，供上层缓存失效判断。
+var virtualGroupVersion atomic.Uint64
+
 func init() {
 	empty := map[string][]string{}
 	virtualGroupStore.Store(&empty)
@@ -46,8 +49,12 @@ func LoadVirtualModelGroups(value string) error {
 		}
 	}
 	virtualGroupStore.Store(&clean)
+	virtualGroupVersion.Add(1)
 	return nil
 }
+
+// VirtualGroupVersion 返回当前配置版本（每次配置变更 +1）。
+func VirtualGroupVersion() uint64 { return virtualGroupVersion.Load() }
 
 // IsVirtualModel 判断是否为已配置的虚拟模型名。
 func IsVirtualModel(name string) bool {
