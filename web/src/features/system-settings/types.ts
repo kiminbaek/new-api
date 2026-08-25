@@ -236,6 +236,7 @@ export type ModelSettings = {
   AutoPriorityMinSamples: number // [CUSTOM] 需求4 最小样本数
   AutoPriorityScale: number // [CUSTOM] 需求4 成功率差放大系数
   AutoPriorityMaxDelta: number // [CUSTOM] 需求4 最大偏移
+  SmartAutoDisableEnabled: boolean // [CUSTOM] 智能自动禁用总开关
   AutomaticDisableChannelEnabled: boolean
   AutomaticEnableChannelEnabled: boolean
   AutomaticDisableKeywords: string

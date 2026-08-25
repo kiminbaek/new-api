@@ -96,6 +96,7 @@ const MODELS_SECTIONS = [
           AutoPriorityMinSamples: settings.AutoPriorityMinSamples,
           AutoPriorityScale: settings.AutoPriorityScale,
           AutoPriorityMaxDelta: settings.AutoPriorityMaxDelta,
+          SmartAutoDisableEnabled: settings.SmartAutoDisableEnabled,
         }}
       />
     ),

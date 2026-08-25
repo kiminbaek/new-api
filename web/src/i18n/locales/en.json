@@ -5385,6 +5385,19 @@
     "加载失败": "Failed to load",
     "网络错误，正在重试…": "Network error, retrying…",
     "chat → responses auto-convert": "chat → responses auto-convert",
-    "For upstreams that ONLY support the Responses API: chat completions requests on this channel are converted to responses automatically (streaming supported).": "For upstreams that ONLY support the Responses API: chat completions requests on this channel are converted to responses automatically (streaming supported)."
+    "For upstreams that ONLY support the Responses API: chat completions requests on this channel are converted to responses automatically (streaming supported).": "For upstreams that ONLY support the Responses API: chat completions requests on this channel are converted to responses automatically (streaming supported).",
+    "Smart auto-disable": "Smart auto-disable",
+    "Grade failures instead of disabling the whole channel: transient errors only lower priority, repeated failures take just that model offline, and only account-level errors (balance, suspension, quota) disable the channel. Recovery is driven by real probe requests, fully automatic.": "Grade failures instead of disabling the whole channel: transient errors only lower priority, repeated failures take just that model offline, and only account-level errors (balance, suspension, quota) disable the channel. Recovery is driven by real probe requests, fully automatic.",
+    "Smart auto-disable status": "Smart auto-disable status",
+    "Live view of channel-model pairs currently taken offline. Recovery is automatic once a probe request succeeds; manual restore is only a shortcut.": "Live view of channel-model pairs currently taken offline. Recovery is automatic once a probe request succeeds; manual restore is only a shortcut.",
+    "Smart auto-disable is currently off.": "Smart auto-disable is currently off.",
+    "All channels and models are healthy.": "All channels and models are healthy.",
+    "Next probe": "Next probe",
+    "Probes": "Probes",
+    "Probing...": "Probing...",
+    "Restore now": "Restore now",
+    "Restored": "Restored",
+    "Whole channel": "Whole channel",
+    "Single model": "Single model"
   }
 }

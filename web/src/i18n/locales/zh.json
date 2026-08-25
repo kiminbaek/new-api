@@ -5386,6 +5386,19 @@
     "网络错误，正在重试…": "网络错误，正在重试…",
     "概览": "概览",
     "chat → responses auto-convert": "chat → responses 自动转换",
-    "For upstreams that ONLY support the Responses API: chat completions requests on this channel are converted to responses automatically (streaming supported).": "适用于仅支持 Responses API 的上游：该渠道收到的 chat completions 请求将自动转换为 responses 格式（支持流式）。"
+    "For upstreams that ONLY support the Responses API: chat completions requests on this channel are converted to responses automatically (streaming supported).": "适用于仅支持 Responses API 的上游：该渠道收到的 chat completions 请求将自动转换为 responses 格式（支持流式）。",
+    "Smart auto-disable": "智能自动禁用",
+    "Grade failures instead of disabling the whole channel: transient errors only lower priority, repeated failures take just that model offline, and only account-level errors (balance, suspension, quota) disable the channel. Recovery is driven by real probe requests, fully automatic.": "分级处置故障，不再一律禁用整个渠道：偶发错误仅降低优先级，连续失败只把该渠道的该模型下线，仅账号级错误（余额不足/账号封禁/配额耗尽）才禁用整个渠道。恢复由真实探测请求驱动，全自动无需人工。",
+    "Smart auto-disable status": "智能自动禁用状态",
+    "Live view of channel-model pairs currently taken offline. Recovery is automatic once a probe request succeeds; manual restore is only a shortcut.": "实时查看当前被下线的「渠道 × 模型」。探测请求成功后会自动恢复，手动恢复只是快捷方式。",
+    "Smart auto-disable is currently off.": "智能自动禁用当前已关闭。",
+    "All channels and models are healthy.": "所有渠道与模型均正常。",
+    "Next probe": "下次探测",
+    "Probes": "探测次数",
+    "Probing...": "探测中…",
+    "Restore now": "立即恢复",
+    "Restored": "已恢复",
+    "Whole channel": "整个渠道",
+    "Single model": "单个模型"
   }
 }

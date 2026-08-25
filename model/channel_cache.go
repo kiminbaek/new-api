@@ -195,6 +195,9 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 		channels = kept
 	}
 
+	// [CUSTOM] 智能自动禁用：剔除模型级下线的渠道（全部下线时 fail-open 放行）
+	channels = filterSmartDownChannels(channels, model)
+
 	if len(channels) == 0 {
 		return nil, nil
 	}

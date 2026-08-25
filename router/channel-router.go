@@ -76,4 +76,7 @@ var channelPermissionRoutes = []permissionRoute{
 	{method: http.MethodPost, path: "/upstream_updates/apply_all", permission: authz.ChannelWrite, handler: controller.ApplyAllChannelUpstreamModelUpdates},
 	{method: http.MethodPost, path: "/upstream_updates/detect", permission: authz.ChannelOperate, handler: controller.DetectChannelUpstreamModelUpdates},
 	{method: http.MethodPost, path: "/upstream_updates/detect_all", permission: authz.ChannelOperate, handler: controller.DetectAllChannelUpstreamModelUpdates},
+	// [CUSTOM] 智能自动禁用只读看板 + 手动清除
+	{method: http.MethodGet, path: "/smart_disable/status", permission: authz.ChannelRead, handler: controller.GetSmartDisableStatus},
+	{method: http.MethodPost, path: "/smart_disable/clear", permission: authz.ChannelOperate, handler: controller.ClearSmartDisableStatus},
 }

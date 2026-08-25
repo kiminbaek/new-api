@@ -56,6 +56,7 @@ import { SettingsSection } from '../components/settings-section'
 import { useResetForm } from '../hooks/use-reset-form'
 import { useUpdateOption } from '../hooks/use-update-option'
 import { safeNumberFieldProps } from '../utils/numeric-field'
+import { SmartDisableStatusPanel } from './smart-disable-status-panel'
 
 const numericString = z.string().refine((value) => {
   const trimmed = value.trim()
@@ -83,6 +84,7 @@ const createRoutingReliabilitySchema = (
       RetryTimes: z.coerce.number().min(0).max(10),
       ChannelDisableThreshold: numericString,
       AutomaticDisableChannelEnabled: z.boolean(),
+      SmartAutoDisableEnabled: z.boolean(), // [CUSTOM] 智能自动禁用总开关
       AutomaticEnableChannelEnabled: z.boolean(),
       AutomaticDisableKeywords: z.string(),
       AutomaticDisableStatusCodes: z.string(),
@@ -183,6 +185,7 @@ type RoutingReliabilitySectionProps = {
     AutoPriorityMinSamples: number
     AutoPriorityScale: number
     AutoPriorityMaxDelta: number
+    SmartAutoDisableEnabled: boolean // [CUSTOM] 智能自动禁用
   }
 }
 
@@ -206,6 +209,7 @@ type NormalizedRoutingReliabilityValues = {
   AutoPriorityMinSamples: number
   AutoPriorityScale: number
   AutoPriorityMaxDelta: number
+  SmartAutoDisableEnabled: boolean // [CUSTOM] 智能自动禁用
   'monitor_setting.auto_test_channel_enabled': boolean
   'monitor_setting.auto_test_channel_minutes': number
   'monitor_setting.channel_test_concurrency': number
@@ -239,6 +243,7 @@ const buildFormDefaults = (
   AutoPriorityMinSamples: defaults.AutoPriorityMinSamples ?? 20,
   AutoPriorityScale: defaults.AutoPriorityScale ?? 50,
   AutoPriorityMaxDelta: defaults.AutoPriorityMaxDelta ?? 200,
+  SmartAutoDisableEnabled: defaults.SmartAutoDisableEnabled ?? true,
   monitor_setting: {
     auto_test_channel_enabled:
       defaults['monitor_setting.auto_test_channel_enabled'],
@@ -276,6 +281,7 @@ const normalizeDefaults = (
   AutoPriorityMinSamples: defaults.AutoPriorityMinSamples ?? 20,
   AutoPriorityScale: defaults.AutoPriorityScale ?? 50,
   AutoPriorityMaxDelta: defaults.AutoPriorityMaxDelta ?? 200,
+  SmartAutoDisableEnabled: defaults.SmartAutoDisableEnabled ?? true,
   'monitor_setting.auto_test_channel_enabled':
     defaults['monitor_setting.auto_test_channel_enabled'],
   'monitor_setting.auto_test_channel_minutes':
@@ -311,6 +317,7 @@ const normalizeFormValues = (
   AutoPriorityMinSamples: values.AutoPriorityMinSamples,
   AutoPriorityScale: values.AutoPriorityScale,
   AutoPriorityMaxDelta: values.AutoPriorityMaxDelta,
+  SmartAutoDisableEnabled: values.SmartAutoDisableEnabled,
   'monitor_setting.auto_test_channel_enabled':
     values.monitor_setting.auto_test_channel_enabled,
   'monitor_setting.auto_test_channel_minutes':
@@ -656,6 +663,29 @@ export function RoutingReliabilitySection({
 
               <FormField
                 control={form.control}
+                name='SmartAutoDisableEnabled'
+                render={({ field }) => (
+                  <SettingsSwitchItem>
+                    <SettingsSwitchContent>
+                      <FormLabel>{t('Smart auto-disable')}</FormLabel>
+                      <FormDescription>
+                        {t(
+                          'Grade failures instead of disabling the whole channel: transient errors only lower priority, repeated failures take just that model offline, and only account-level errors (balance, suspension, quota) disable the channel. Recovery is driven by real probe requests, fully automatic.'
+                        )}
+                      </FormDescription>
+                    </SettingsSwitchContent>
+                    <FormControl>
+                      <Switch
+                        checked={field.value}
+                        onCheckedChange={field.onChange}
+                      />
+                    </FormControl>
+                  </SettingsSwitchItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
                 name='ChannelDisableThreshold'
                 render={({ field }) => (
                   <FormItem>
@@ -921,6 +951,10 @@ export function RoutingReliabilitySection({
               />
             </div>
           </div>
+
+          <Separator />
+
+          <SmartDisableStatusPanel />
         </SettingsForm>
       </Form>
     </SettingsSection>

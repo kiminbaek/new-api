@@ -127,6 +127,12 @@ var QuotaForInvitee = 0
 var ChannelDisableThreshold = 5.0
 var AutomaticDisableChannelEnabled = false
 var AutomaticEnableChannelEnabled = false
+
+// SmartAutoDisableEnabled [CUSTOM] 智能自动禁用总开关（默认开）。
+// 开启后自动禁用改为分级处置：偶发故障只降权、连续崩溃只下线该渠道的该模型、
+// 仅账号级错误（余额/封号/配额）才整渠道禁用；恢复由真实请求探测驱动，全自动。
+// 关闭则完全回落上游原行为（任何判定禁用的错误一律整渠道枪毙）。
+var SmartAutoDisableEnabled = true
 var QuotaRemindThreshold = 1000
 var PreConsumedQuota = 500
 

@@ -165,6 +165,9 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Set("channel", channel.Type)
 	c.Set("base_url", channel.GetBaseURL())
+	// [CUSTOM] 智能自动禁用：把测试模型写入 context，使 processChannelError 能把
+	// 健康检测失败归因到具体模型（否则 modelName 为空只能降权，无法做 L1 下线）。
+	c.Set("original_model", testModel)
 	group, _ := model.GetUserGroup(testUserID, false)
 	c.Set("group", group)
 
@@ -931,6 +934,20 @@ func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, test
 		shouldBanChannel = service.ShouldDisableChannel(result.newAPIError)
 	}
 
+	// [CUSTOM] 智能自动禁用：健康检测结果也计入渠道×模型滚动统计，
+	// 否则自适应阈值只能看到 relay 流量，纯巡检渠道永远攒不够样本。
+	// 模型名取 testChannel 内实际解析出的那个（写在 context 的 original_model），
+	// healthTestModel 为空时代表渠道自带 TestModel，不能拿空串记账。
+	if service.SmartDisableEnabled() && result.context != nil {
+		if probedModel := result.context.GetString("original_model"); probedModel != "" {
+			if newAPIError == nil {
+				service.RecordRelaySuccess(channel.Id, probedModel)
+			} else {
+				service.RecordRelayFailure(channel.Id, probedModel)
+			}
+		}
+	}
+
 	if common.AutomaticDisableChannelEnabled && !shouldBanChannel {
 		if milliseconds > disableThreshold {
 			err := fmt.Errorf("响应时间 %.2fs 超过阈值 %.2fs", float64(milliseconds)/1000.0, float64(disableThreshold)/1000.0)
@@ -945,7 +962,22 @@ func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, test
 		summary.Failed++
 	}
 
-	if allowDisableFn(channel) && isChannelEnabled && shouldBanChannel && channel.GetAutoBan() {
+	// [CUSTOM] 智能模式下由 ApplyDisablePolicy 分级判定（超时/5xx 只做模型级下线）。
+	// 有意不走 processChannelError：那个函数会顺带把错误写进错误日志表，
+	// 而巡检里「不够格禁用」的失败以前从不入表，走过去会凭空放大日志量。
+	if service.SmartDisableEnabled() {
+		if allowDisableFn(channel) && isChannelEnabled && newAPIError != nil && channel.GetAutoBan() {
+			probedModel := ""
+			if result.context != nil {
+				probedModel = result.context.GetString("original_model")
+			}
+			chErr := types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey,
+				common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan())
+			if action, _ := service.ApplyDisablePolicy(*chErr, probedModel, newAPIError); action == service.ActionDisableChannel {
+				summary.Disabled++
+			}
+		}
+	} else if allowDisableFn(channel) && isChannelEnabled && shouldBanChannel && channel.GetAutoBan() {
 		processChannelError(result.context, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 		summary.Disabled++
 	}

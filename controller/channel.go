@@ -731,6 +731,8 @@ func DeleteChannel(c *gin.Context) {
 		return
 	}
 	model.InitChannelCache()
+	// [CUSTOM] 渠道已删除：清掉其智能下线记录，避免看板残留幽灵条目
+	service.ClearSmartDownByChannel(id)
 	if channelLookupFailed {
 		service.ResetProxyClientCache()
 	} else {
@@ -1089,6 +1091,9 @@ func UpdateChannel(c *gin.Context) {
 		return
 	}
 	model.InitChannelCache()
+	// [CUSTOM] 渠道配置已改（可能换 key / 改模型列表 / 改地址）：旧的智能下线判断不再可信。
+	// L2 禁用态渠道要原地重建探测记录，否则改完配置就没人恢复它了。
+	service.RefreshSmartDownAfterChannelEdit(channel.Id)
 	if proxyChanged {
 		service.InvalidateProxyClient(originProxy)
 	}
@@ -1139,6 +1144,8 @@ func UpdateChannelStatus(c *gin.Context) {
 	if changed {
 		model.InitChannelCache()
 	}
+	// [CUSTOM] 手动改状态即人工接管：清掉智能下线记录，避免自动机制与人工意图冲突
+	service.ClearSmartDownByChannel(id)
 	recordManageAudit(c, "channel.status_update", map[string]interface{}{
 		"id":      id,
 		"status":  req.Status,
@@ -1162,6 +1169,8 @@ func BatchUpdateChannelStatus(c *gin.Context) {
 		if model.UpdateChannelStatus(id, "", req.Status, "manual batch operation") {
 			changedCount++
 		}
+		// [CUSTOM] 手动改状态即人工接管：清掉智能下线记录
+		service.ClearSmartDownByChannel(id)
 	}
 	if changedCount > 0 {
 		model.InitChannelCache()

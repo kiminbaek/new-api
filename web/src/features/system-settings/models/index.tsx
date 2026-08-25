@@ -73,6 +73,7 @@ const defaultModelSettings: ModelSettings = {
   AutoPriorityMinSamples: 20, // [CUSTOM]
   AutoPriorityScale: 50, // [CUSTOM]
   AutoPriorityMaxDelta: 200, // [CUSTOM]
+  SmartAutoDisableEnabled: true, // [CUSTOM] 智能自动禁用（默认开）
   AutomaticDisableChannelEnabled: false,
   AutomaticEnableChannelEnabled: false,
   AutomaticDisableKeywords: '',
