@@ -5383,6 +5383,8 @@
     "样本数": "Samples",
     "暂无调用数据，发起请求后此处将展示各模型实时成功率": "No request data yet. Model success rates will appear here after traffic.",
     "加载失败": "Failed to load",
-    "网络错误，正在重试…": "Network error, retrying…"
+    "网络错误，正在重试…": "Network error, retrying…",
+    "chat → responses auto-convert": "chat → responses auto-convert",
+    "For upstreams that ONLY support the Responses API: chat completions requests on this channel are converted to responses automatically (streaming supported).": "For upstreams that ONLY support the Responses API: chat completions requests on this channel are converted to responses automatically (streaming supported)."
   }
 }

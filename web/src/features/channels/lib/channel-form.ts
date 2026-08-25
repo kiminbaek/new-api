@@ -274,6 +274,8 @@ export const channelFormSchema = z
       .enum(['', 'default', 'scheduled', 'passive'])
       .optional(),
     health_check_minutes: z.number().min(0).max(10080).optional(),
+    // [CUSTOM] chat→responses 自动转换
+    chat_to_responses: z.boolean().optional(),
     pass_through_body_enabled: z.boolean().optional(),
     system_prompt: z.string().optional(),
     system_prompt_override: z.boolean().optional(),
@@ -497,6 +499,7 @@ export function transformChannelToFormDefaults(
     retry_times: undefined,
     health_check_mode: '',
     health_check_minutes: undefined,
+    chat_to_responses: undefined,
     timeout_seconds: undefined,
     fail_threshold: undefined,
   }
@@ -525,6 +528,7 @@ export function transformChannelToFormDefaults(
         fail_threshold: parsed.fail_threshold ?? undefined,
         health_check_mode: parsed.health_check_mode ?? '',
         health_check_minutes: parsed.health_check_minutes ?? undefined,
+        chat_to_responses: parsed.chat_to_responses ?? undefined,
       }
     } catch (error) {
       // eslint-disable-next-line no-console
@@ -679,6 +683,10 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
   }
   if (formData.health_check_minutes != null) {
     settingObj.health_check_minutes = formData.health_check_minutes
+  }
+  // [CUSTOM] chat→responses 自动转换（false 不写入保持 JSON 等价）
+  if (formData.chat_to_responses) {
+    settingObj.chat_to_responses = true
   }
 
   // Omit defaults so unchanged channels keep equivalent JSON.

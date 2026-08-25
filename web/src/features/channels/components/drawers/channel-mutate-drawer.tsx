@@ -4524,6 +4524,29 @@ export function ChannelMutateDrawer({
 
 <FormField
                               control={form.control}
+                              name='chat_to_responses'
+                              render={({ field }) => (
+                                <FormItem className='flex flex-row items-center justify-between rounded-lg border p-3'>
+                                  <div className='space-y-0.5'>
+                                    <FormLabel>
+                                      {t('chat → responses auto-convert')}
+                                    </FormLabel>
+                                    <FormDescription>
+                                      {t('For upstreams that ONLY support the Responses API: chat completions requests on this channel are converted to responses automatically (streaming supported).')}
+                                    </FormDescription>
+                                  </div>
+                                  <FormControl>
+                                    <Switch
+                                      checked={field.value === true}
+                                      onCheckedChange={field.onChange}
+                                    />
+                                  </FormControl>
+                                </FormItem>
+                              )}
+                            />
+
+<FormField
+                              control={form.control}
                               name='system_prompt'
                               render={({ field }) => (
                                 <FormItem>

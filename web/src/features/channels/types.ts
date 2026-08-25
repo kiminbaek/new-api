@@ -96,6 +96,8 @@ export interface ChannelSettings {
   // [CUSTOM] 分渠道存活检测
   health_check_mode?: '' | 'default' | 'scheduled' | 'passive'
   health_check_minutes?: number
+  // [CUSTOM] chat→responses 自动转换
+  chat_to_responses?: boolean
 }
 
 export interface ChannelOtherSettings {

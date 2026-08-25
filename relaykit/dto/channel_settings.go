@@ -31,6 +31,10 @@ type ChannelSettings struct {
 	// [CUSTOM] 分渠道存活检测（nil/空=继承全局监控设置）
 	HealthCheckMode    string   `json:"health_check_mode,omitempty"`     // ""|default=跟随全局; scheduled=定时检测; passive=仅被动恢复(仅被自动禁用后才探测)
 	HealthCheckMinutes *float64 `json:"health_check_minutes,omitempty"`  // 检测间隔覆盖(分钟)，nil=跟随全局
+	// [CUSTOM] chat→responses 自动转换：仅 responses-only 渠道开启。
+	// 开启后该渠道收到 /v1/chat/completions（及 Claude /v1/messages）请求时，
+	// 无论全局 ChatCompletionsToResponsesPolicy 是否命中，都走 chatCompletionsViaResponses 转换链。
+	ChatToResponses *bool `json:"chat_to_responses,omitempty"`
 }
 
 const (

@@ -5384,6 +5384,8 @@
     "暂无调用数据，发起请求后此处将展示各模型实时成功率": "暂无调用数据，发起请求后此处将展示各模型实时成功率",
     "加载失败": "加载失败",
     "网络错误，正在重试…": "网络错误，正在重试…",
-    "概览": "概览"
+    "概览": "概览",
+    "chat → responses auto-convert": "chat → responses 自动转换",
+    "For upstreams that ONLY support the Responses API: chat completions requests on this channel are converted to responses automatically (streaming supported).": "适用于仅支持 Responses API 的上游：该渠道收到的 chat completions 请求将自动转换为 responses 格式（支持流式）。"
   }
 }
