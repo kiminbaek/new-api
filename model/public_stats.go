@@ -1,7 +1,6 @@
 package model
 
 import (
-	"fmt"
 	"time"
 )
 
@@ -47,21 +46,23 @@ func GetDailyRequestTrend(days int) ([]map[string]interface{}, error) {
 	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, cst)
 	start := todayStart.AddDate(0, 0, -(days - 1)).Unix()
 
+	// [CUSTOM-fix] 跨库兼容：不在 SQL 里做整数除法（MySQL 的 / 是真除法返回小数，
+	// SQLite 是整除——方言差异会导致 Scan 报错）。按小时粒度取回，Go 侧分桶。
 	var rows []struct {
-		Day   int64 `json:"day"`
-		Count int64 `json:"count"`
+		CreatedAt int64 `json:"created_at"`
+		Count     int64 `json:"count"`
 	}
-	// created_at 为秒级时间戳；按东八区日界分组
 	err := DB.Model(&QuotaData{}).
-		Select(fmt.Sprintf("((created_at + 28800) / 86400) AS day, COALESCE(SUM(count),0) AS count")).
+		Select("created_at, COALESCE(SUM(count),0) AS count").
 		Where("created_at >= ?", start).
-		Group("day").Order("day ASC").Scan(&rows).Error
+		Group("created_at").Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
 	byDay := map[int64]int64{}
 	for _, r := range rows {
-		byDay[r.Day] = r.Count
+		dayIdx := (r.CreatedAt + 28800) / 86400
+		byDay[dayIdx] += r.Count
 	}
 	out := make([]map[string]interface{}, 0, days)
 	for i := days - 1; i >= 0; i-- {
