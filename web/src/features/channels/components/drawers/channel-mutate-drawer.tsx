@@ -293,6 +293,8 @@ const SENSITIVE_FORM_FIELDS = [
   'retry_times',
   'timeout_seconds',
   'fail_threshold',
+  'health_check_mode',
+  'health_check_minutes',
   'pass_through_body_enabled',
   'system_prompt',
   'system_prompt_override',
@@ -354,6 +356,10 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.retry_times != null ||
     values.timeout_seconds != null ||
     values.fail_threshold != null ||
+    (values.health_check_mode != null &&
+      values.health_check_mode !== '' &&
+      values.health_check_mode !== 'default') ||
+    values.health_check_minutes != null ||
     (values.model_priorities_text != null &&
       values.model_priorities_text.trim() !== '') ||
     values.claude_beta_query ||
@@ -4441,6 +4447,75 @@ export function ChannelMutateDrawer({
                                   </FormControl>
                                   <FormDescription>
                                     {t('Failures required within the rolling window before auto-disable applies. Empty = immediate on qualifying errors.')}
+                                  </FormDescription>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+
+                            <FormField
+                              control={form.control}
+                              name='health_check_mode'
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>{t('Health Check Mode')}</FormLabel>
+                                  <Select
+                                    onValueChange={field.onChange}
+                                    value={field.value || 'default'}
+                                  >
+                                    <FormControl>
+                                      <SelectTrigger>
+                                        <SelectValue
+                                          placeholder={t('Follow global settings')}
+                                        />
+                                      </SelectTrigger>
+                                    </FormControl>
+                                    <SelectContent alignItemWithTrigger={false}>
+                                      <SelectGroup>
+                                        <SelectItem value='default'>
+                                          {t('Follow global settings')}
+                                        </SelectItem>
+                                        <SelectItem value='scheduled'>
+                                          {t('Scheduled probing')}
+                                        </SelectItem>
+                                        <SelectItem value='passive'>
+                                          {t('Passive recovery only')}
+                                        </SelectItem>
+                                      </SelectGroup>
+                                    </SelectContent>
+                                  </Select>
+                                  <FormDescription>
+                                    {t('Scheduled: probed on the health-check cadence. Passive recovery: zero probe requests while healthy; probed only after auto-disable until it recovers.')}
+                                  </FormDescription>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+
+                            <FormField
+                              control={form.control}
+                              name='health_check_minutes'
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>{t('Health Check Interval (minutes)')}</FormLabel>
+                                  <FormControl>
+                                    <Input
+                                      type='number'
+                                      min={0}
+                                      max={10080}
+                                      placeholder='留空 = 跟随全局'
+                                      value={field.value ?? ''}
+                                      onChange={(e) =>
+                                        field.onChange(
+                                          e.target.value === ''
+                                            ? undefined
+                                            : Number(e.target.value)
+                                        )
+                                      }
+                                    />
+                                  </FormControl>
+                                  <FormDescription>
+                                    {t('Per-channel probe interval override. Empty = follow global. Random jitter is applied for stealth.')}
                                   </FormDescription>
                                   <FormMessage />
                                 </FormItem>

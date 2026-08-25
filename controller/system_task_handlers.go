@@ -40,6 +40,10 @@ func (channelTestHandler) Interval() time.Duration {
 	if minutes <= 0 {
 		minutes = 10
 	}
+	// [CUSTOM] 渠道级更小间隔覆盖时加快巡检 tick（内部 60s 缓存查询）
+	if m := minHealthCheckOverrideMinutes(); m > 0 && m < minutes {
+		minutes = m
+	}
 	return time.Duration(minutes * float64(time.Minute))
 }
 
@@ -61,7 +65,7 @@ func (channelTestHandler) Run(ctx context.Context, task *model.SystemTask, runne
 		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
 		return
 	}
-	summary, err := runChannelTestTask(ctx, payload.Mode, payload.Notify, service.NewSystemTaskProgressReporter(task, runnerID))
+	summary, err := runChannelTestTask(ctx, payload.Mode, payload.Notify, payload.Mode == "", service.NewSystemTaskProgressReporter(task, runnerID))
 	if err != nil {
 		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
 		return

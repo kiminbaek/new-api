@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -905,11 +906,18 @@ type channelTestSummary struct {
 	Enabled   int `json:"enabled"`
 }
 
-func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, testUserID int, allowDisable bool, disableThreshold int64) channelTestSummary {
+func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, testUserID int, allowDisableFn func(*model.Channel) bool, disableThreshold int64) channelTestSummary {
 	summary := channelTestSummary{}
 	isChannelEnabled := channel.Status == common.ChannelStatusEnabled
 	tik := time.Now()
-	result := testChannel(ctx, channel, testUserID, "", "", shouldUseStreamForAutomaticChannelTest(channel))
+	// [CUSTOM] 隐蔽性：未显式指定测试模型时，从渠道模型列表随机挑选（固定 models[0] 是指纹）
+	healthTestModel := ""
+	if channel.TestModel == nil || strings.TrimSpace(*channel.TestModel) == "" {
+		if models := channel.GetModels(); len(models) > 0 {
+			healthTestModel = strings.TrimSpace(models[rand.Intn(len(models))])
+		}
+	}
+	result := testChannel(ctx, channel, testUserID, healthTestModel, "", shouldUseStreamForAutomaticChannelTest(channel))
 	milliseconds := time.Since(tik).Milliseconds()
 	if ctx.Err() != nil {
 		return summary
@@ -937,7 +945,7 @@ func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, test
 		summary.Failed++
 	}
 
-	if allowDisable && isChannelEnabled && shouldBanChannel && channel.GetAutoBan() {
+	if allowDisableFn(channel) && isChannelEnabled && shouldBanChannel && channel.GetAutoBan() {
 		processChannelError(result.context, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 		summary.Disabled++
 	}
@@ -1047,7 +1055,7 @@ func runChannelTestWorkers(
 // performChannelTests runs channel health checks with the configured bounded
 // concurrency and honors cancellation when a system-task runner loses its
 // lease.
-func performChannelTests(ctx context.Context, channels []*model.Channel, testUserID int, allowDisable bool, concurrency int, report func(processed, total int)) channelTestSummary {
+func performChannelTests(ctx context.Context, channels []*model.Channel, testUserID int, allowDisableFn func(*model.Channel) bool, concurrency int, report func(processed, total int)) channelTestSummary {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1060,7 +1068,7 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 		channels,
 		concurrency,
 		func(ctx context.Context, channel *model.Channel) channelTestSummary {
-			return testChannelForHealthCheck(ctx, channel, testUserID, allowDisable, disableThreshold)
+			return testChannelForHealthCheck(ctx, channel, testUserID, allowDisableFn, disableThreshold)
 		},
 		report,
 	)
@@ -1074,7 +1082,7 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 // trigger passes ChannelTestModeScheduledAll to test every channel. When notify
 // is set the root user is notified on completion. Cross-instance execution is
 // guarded by the system task per-type lock, so no process-local guard is needed.
-func runChannelTestTask(ctx context.Context, mode string, notify bool, report func(processed, total int)) (channelTestSummary, error) {
+func runChannelTestTask(ctx context.Context, mode string, notify bool, isScheduled bool, report func(processed, total int)) (channelTestSummary, error) {
 	testUserID, err := resolveChannelTestUserID(nil)
 	if err != nil {
 		return channelTestSummary{}, err
@@ -1087,9 +1095,21 @@ func runChannelTestTask(ctx context.Context, mode string, notify bool, report fu
 		mode = operation_setting.GetMonitorSetting().ChannelTestMode
 	}
 	selected := selectChannelsForAutomaticTest(channels, mode)
-	allowDisable := mode != operation_setting.ChannelTestModePassiveRecovery
+	if isScheduled {
+		// [CUSTOM] 自动巡检：分渠道间隔覆盖 + 随机抖动过滤 + 乱序（隐蔽性）
+		selected = filterChannelsByHealthCheckDue(selected)
+		shuffleChannelsForTest(selected)
+	}
+	allowDisableFn := func(channel *model.Channel) bool {
+		// [CUSTOM] 被动恢复渠道的恢复探测不触发再禁用
+		if channel.GetSetting().EffectiveHealthCheckMode() == dto.HealthCheckModePassive {
+			return false
+		}
+		return mode != operation_setting.ChannelTestModePassiveRecovery
+	}
 	concurrency := operation_setting.GetMonitorSetting().ChannelTestConcurrency
-	summary := performChannelTests(ctx, selected, testUserID, allowDisable, concurrency, report)
+	recordChannelTestRun(selected)
+	summary := performChannelTests(ctx, selected, testUserID, allowDisableFn, concurrency, report)
 	if notify && (ctx == nil || ctx.Err() == nil) {
 		service.NotifyRootUser(dto.NotifyTypeChannelTest, "通道测试完成", "所有通道测试已完成")
 	}
@@ -1102,6 +1122,20 @@ func selectChannelsForAutomaticTest(channels []*model.Channel, mode string) []*m
 		if channel.Status == common.ChannelStatusManuallyDisabled {
 			continue
 		}
+		// [CUSTOM] 渠道级检测模式覆盖（空/default=跟随全局 mode）
+		effective := channel.GetSetting().EffectiveHealthCheckMode()
+		switch effective {
+		case dto.HealthCheckModeScheduled:
+			selected = append(selected, channel) // 强制定时巡检，无视全局 mode
+			continue
+		case dto.HealthCheckModePassive:
+			// 仅被动恢复：健康时零探测请求，仅被自动禁用后参与恢复探测
+			if channel.Status != common.ChannelStatusAutoDisabled {
+				continue
+			}
+			selected = append(selected, channel)
+			continue
+		}
 		if mode == operation_setting.ChannelTestModeAutoBanOnly && !channel.GetAutoBan() {
 			continue
 		}
@@ -1111,6 +1145,88 @@ func selectChannelsForAutomaticTest(channels []*model.Channel, mode string) []*m
 		selected = append(selected, channel)
 	}
 	return selected
+}
+
+// [CUSTOM] ===== 分渠道存活检测：间隔覆盖 + 抖动 + 乱序（隐蔽性） =====
+
+var channelTestLastRun sync.Map // channelID(int) -> time.Time（本进程最近一次被巡检时刻）
+
+type healthCheckOverrideCacheEntry struct {
+	minutes   float64
+	fetchedAt time.Time
+}
+
+var (
+	healthCheckOverrideMu    sync.Mutex
+	healthCheckOverrideCache healthCheckOverrideCacheEntry
+)
+
+// minHealthCheckOverrideMinutes 返回「定时检测」渠道的最小间隔覆盖（分钟）；无覆盖返回 0。60s 缓存。
+func minHealthCheckOverrideMinutes() float64 {
+	healthCheckOverrideMu.Lock()
+	defer healthCheckOverrideMu.Unlock()
+	if time.Since(healthCheckOverrideCache.fetchedAt) < time.Minute {
+		return healthCheckOverrideCache.minutes
+	}
+	minMinutes := 0.0
+	if channels, err := model.GetAllChannels(0, 0, true, false); err == nil {
+		for _, ch := range channels {
+			st := ch.GetSetting()
+			if st.EffectiveHealthCheckMode() == dto.HealthCheckModeScheduled && st.HealthCheckMinutes != nil && *st.HealthCheckMinutes > 0 {
+				if minMinutes == 0 || *st.HealthCheckMinutes < minMinutes {
+					minMinutes = *st.HealthCheckMinutes
+				}
+			}
+		}
+	}
+	healthCheckOverrideCache = healthCheckOverrideCacheEntry{minutes: minMinutes, fetchedAt: time.Now()}
+	return minMinutes
+}
+
+// channelHealthCheckDue 判断该渠道本轮是否到期。被动恢复渠道始终到期（尽快恢复优先）。
+func channelHealthCheckDue(channel *model.Channel, globalMinutes float64) bool {
+	st := channel.GetSetting()
+	if st.EffectiveHealthCheckMode() == dto.HealthCheckModePassive {
+		return true
+	}
+	baseMinutes := globalMinutes
+	if st.HealthCheckMinutes != nil && *st.HealthCheckMinutes > 0 {
+		baseMinutes = *st.HealthCheckMinutes
+	}
+	if baseMinutes <= 0 {
+		return true
+	}
+	// [CUSTOM] 隐蔽性：±15% 随机抖动，避免所有渠道呈现统一固定周期
+	if common.HealthCheckJitterEnabled {
+		baseMinutes *= 1 + (rand.Float64()*0.3 - 0.15)
+	}
+	lastAny, ok := channelTestLastRun.Load(channel.Id)
+	if !ok {
+		return true
+	}
+	return time.Since(lastAny.(time.Time)).Minutes() >= baseMinutes
+}
+
+func filterChannelsByHealthCheckDue(channels []*model.Channel) []*model.Channel {
+	globalMinutes := operation_setting.GetMonitorSetting().AutoTestChannelMinutes
+	due := make([]*model.Channel, 0, len(channels))
+	for _, ch := range channels {
+		if channelHealthCheckDue(ch, globalMinutes) {
+			due = append(due, ch)
+		}
+	}
+	return due
+}
+
+func recordChannelTestRun(channels []*model.Channel) {
+	now := time.Now()
+	for _, ch := range channels {
+		channelTestLastRun.Store(ch.Id, now)
+	}
+}
+
+func shuffleChannelsForTest(channels []*model.Channel) {
+	rand.Shuffle(len(channels), func(i, j int) { channels[i], channels[j] = channels[j], channels[i] })
 }
 
 // TestAllChannels enqueues a channel_test system task instead of running the

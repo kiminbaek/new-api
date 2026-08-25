@@ -163,6 +163,7 @@ var RelayTimeout int // unit is second
 
 var RelayIdleConnTimeout int // unit is second
 var RelayUserAgent string    // [CUSTOM] stealth: global outbound User-Agent override
+var HealthCheckJitterEnabled = true // [CUSTOM] stealth: 存活检测间隔随机抖动(±15%)，默认开
 var (
 	// [CUSTOM] 需求4: 双向浮动自动优先级
 	AutoPriorityEnabled     bool

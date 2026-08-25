@@ -5353,6 +5353,14 @@
     "Auto-priority interval must be between 30 and 86400 seconds": "Auto-priority interval must be between 30 and 86400 seconds",
     "Auto-priority min samples must be between 1 and 10000": "Auto-priority min samples must be between 1 and 10000",
     "Auto-priority scale must be between 1 and 10000": "Auto-priority scale must be between 1 and 10000",
-    "Auto-priority max delta must be between 1 and 100000": "Auto-priority max delta must be between 1 and 100000"
+    "Auto-priority max delta must be between 1 and 100000": "Auto-priority max delta must be between 1 and 100000",
+    "Health Check Mode": "Health Check Mode",
+    "Follow global settings": "Follow global settings",
+    "Scheduled probing": "Scheduled probing",
+    "Scheduled: probed on the health-check cadence. Passive recovery: zero probe requests while healthy; probed only after auto-disable until it recovers.": "Scheduled: probed on the health-check cadence. Passive recovery: zero probe requests while healthy; probed only after auto-disable until it recovers.",
+    "Health Check Interval (minutes)": "Health Check Interval (minutes)",
+    "Per-channel probe interval override. Empty = follow global. Random jitter is applied for stealth.": "Per-channel probe interval override. Empty = follow global. Random jitter is applied for stealth.",
+    "Health-check interval jitter": "Health-check interval jitter",
+    "Randomly jitter each channel health-check cadence by ±15% and shuffle probe order, so upstreams cannot fingerprint a fixed testing pattern. Recommended on.": "Randomly jitter each channel health-check cadence by ±15% and shuffle probe order, so upstreams cannot fingerprint a fixed testing pattern. Recommended on."
   }
 }

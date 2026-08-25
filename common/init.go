@@ -111,6 +111,7 @@ func InitEnv() {
 	RelayTimeout = GetEnvOrDefault("RELAY_TIMEOUT", 0)
 	RelayIdleConnTimeout = GetEnvOrDefault("RELAY_IDLE_CONN_TIMEOUT", 90)
 	RelayUserAgent = GetEnvOrDefaultString("RELAY_USER_AGENT", "")
+	HealthCheckJitterEnabled = GetEnvOrDefaultBool("HEALTH_CHECK_JITTER_ENABLED", true)
 	AutoPriorityEnabled = os.Getenv("AUTO_PRIORITY_ENABLED") == "true"
 	AutoPriorityIntervalSec = GetEnvOrDefault("AUTO_PRIORITY_INTERVAL_SEC", 300)
 	AutoPriorityMinSamples = GetEnvOrDefault("AUTO_PRIORITY_MIN_SAMPLES", 20)

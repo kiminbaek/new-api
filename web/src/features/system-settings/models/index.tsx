@@ -67,6 +67,7 @@ const defaultModelSettings: ModelSettings = {
   ModelGroups: '{}',
   ChannelDisableThreshold: '',
   RelayUserAgent: '', // [CUSTOM]
+  HealthCheckJitterEnabled: true, // [CUSTOM] 检测抖动默认开
   AutoPriorityEnabled: false, // [CUSTOM]
   AutoPriorityIntervalSec: 300, // [CUSTOM]
   AutoPriorityMinSamples: 20, // [CUSTOM]

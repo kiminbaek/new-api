@@ -159,6 +159,7 @@ func InitOptionMap() {
 	// [CUSTOM] 需求1/4 隐蔽化 UA + 自动调优：env 作为初始默认值，Option 可在管理界面热改
 	common.OptionMap["RelayUserAgent"] = common.RelayUserAgent
 	common.OptionMap["AutoPriorityEnabled"] = strconv.FormatBool(common.AutoPriorityEnabled)
+	common.OptionMap["HealthCheckJitterEnabled"] = strconv.FormatBool(common.HealthCheckJitterEnabled) // [CUSTOM] 检测抖动开关
 	common.OptionMap["AutoPriorityIntervalSec"] = strconv.Itoa(common.AutoPriorityIntervalSec)
 	common.OptionMap["AutoPriorityMinSamples"] = strconv.Itoa(common.AutoPriorityMinSamples)
 	common.OptionMap["AutoPriorityScale"] = strconv.Itoa(common.AutoPriorityScale)
@@ -567,6 +568,8 @@ func updateOptionMap(key string, value string) (err error) {
 		common.RelayUserAgent = value
 	case "AutoPriorityEnabled": // [CUSTOM] 需求4 自动调优开关（UI 热更，调度器每 tick 重读）
 		common.AutoPriorityEnabled = value == "true"
+	case "HealthCheckJitterEnabled": // [CUSTOM] 存活检测间隔抖动开关（隐蔽性，默认开）
+		common.HealthCheckJitterEnabled = value == "true"
 	case "AutoPriorityIntervalSec":
 		common.AutoPriorityIntervalSec, _ = strconv.Atoi(value)
 	case "AutoPriorityMinSamples":

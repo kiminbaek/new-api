@@ -89,6 +89,7 @@ const createRoutingReliabilitySchema = (
       AutomaticRetryStatusCodes: z.string(),
       // [CUSTOM] 需求1/4
       RelayUserAgent: z.string(),
+      HealthCheckJitterEnabled: z.boolean(), // [CUSTOM] 检测抖动
       AutoPriorityEnabled: z.boolean(),
       AutoPriorityIntervalSec: nonNegInt(
         30,
@@ -176,6 +177,7 @@ type RoutingReliabilitySectionProps = {
     'monitor_setting.channel_test_mode': ChannelTestMode
     // [CUSTOM] 需求1/4
     RelayUserAgent: string
+    HealthCheckJitterEnabled: boolean
     AutoPriorityEnabled: boolean
     AutoPriorityIntervalSec: number
     AutoPriorityMinSamples: number
@@ -198,6 +200,7 @@ type NormalizedRoutingReliabilityValues = {
   AutomaticRetryStatusCodes: string
   // [CUSTOM] 需求1/4
   RelayUserAgent: string
+  HealthCheckJitterEnabled: boolean
   AutoPriorityEnabled: boolean
   AutoPriorityIntervalSec: number
   AutoPriorityMinSamples: number
@@ -230,6 +233,7 @@ const buildFormDefaults = (
   AutomaticRetryStatusCodes: defaults.AutomaticRetryStatusCodes ?? '',
   // [CUSTOM] 需求1/4
   RelayUserAgent: defaults.RelayUserAgent ?? '',
+  HealthCheckJitterEnabled: defaults.HealthCheckJitterEnabled ?? true,
   AutoPriorityEnabled: defaults.AutoPriorityEnabled ?? false,
   AutoPriorityIntervalSec: defaults.AutoPriorityIntervalSec ?? 300,
   AutoPriorityMinSamples: defaults.AutoPriorityMinSamples ?? 20,
@@ -266,6 +270,7 @@ const normalizeDefaults = (
   ).normalized,
   // [CUSTOM] 需求1/4
   RelayUserAgent: (defaults.RelayUserAgent ?? '').trim(),
+  HealthCheckJitterEnabled: defaults.HealthCheckJitterEnabled ?? true,
   AutoPriorityEnabled: defaults.AutoPriorityEnabled ?? false,
   AutoPriorityIntervalSec: defaults.AutoPriorityIntervalSec ?? 300,
   AutoPriorityMinSamples: defaults.AutoPriorityMinSamples ?? 20,
@@ -300,6 +305,7 @@ const normalizeFormValues = (
   ).normalized,
   // [CUSTOM] 需求1/4
   RelayUserAgent: values.RelayUserAgent.trim(),
+  HealthCheckJitterEnabled: values.HealthCheckJitterEnabled,
   AutoPriorityEnabled: values.AutoPriorityEnabled,
   AutoPriorityIntervalSec: values.AutoPriorityIntervalSec,
   AutoPriorityMinSamples: values.AutoPriorityMinSamples,
@@ -766,6 +772,29 @@ export function RoutingReliabilitySection({
 
           {/* [CUSTOM] 需求4 自动调优：双向浮动优先级 */}
           <Separator />
+
+          <FormField
+            control={form.control}
+            name='HealthCheckJitterEnabled'
+            render={({ field }) => (
+              <SettingsSwitchItem>
+                <SettingsSwitchContent>
+                  <FormLabel>{t('Health-check interval jitter')}</FormLabel>
+                  <FormDescription>
+                    {t(
+                      'Randomly jitter each channel health-check cadence by ±15% and shuffle probe order, so upstreams cannot fingerprint a fixed testing pattern. Recommended on.'
+                    )}
+                  </FormDescription>
+                </SettingsSwitchContent>
+                <FormControl>
+                  <Switch
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                  />
+                </FormControl>
+              </SettingsSwitchItem>
+            )}
+          />
 
           <div className='flex min-w-0 flex-col gap-4'>
             <div className='flex flex-col gap-1'>

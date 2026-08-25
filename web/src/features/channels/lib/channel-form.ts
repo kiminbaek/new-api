@@ -269,6 +269,11 @@ export const channelFormSchema = z
     retry_times: z.number().int().min(0).max(99).optional(),
     timeout_seconds: z.number().int().min(1).max(3600).optional(),
     fail_threshold: z.number().int().min(1).max(999).optional(),
+    // [CUSTOM] 分渠道存活检测
+    health_check_mode: z
+      .enum(['', 'default', 'scheduled', 'passive'])
+      .optional(),
+    health_check_minutes: z.number().min(0).max(10080).optional(),
     pass_through_body_enabled: z.boolean().optional(),
     system_prompt: z.string().optional(),
     system_prompt_override: z.boolean().optional(),
@@ -490,6 +495,8 @@ export function transformChannelToFormDefaults(
     system_prompt_override: false,
     model_priorities_text: '',
     retry_times: undefined,
+    health_check_mode: '',
+    health_check_minutes: undefined,
     timeout_seconds: undefined,
     fail_threshold: undefined,
   }
@@ -516,6 +523,8 @@ export function transformChannelToFormDefaults(
         retry_times: parsed.retry_times ?? undefined,
         timeout_seconds: parsed.timeout_seconds ?? undefined,
         fail_threshold: parsed.fail_threshold ?? undefined,
+        health_check_mode: parsed.health_check_mode ?? '',
+        health_check_minutes: parsed.health_check_minutes ?? undefined,
       }
     } catch (error) {
       // eslint-disable-next-line no-console
@@ -660,6 +669,17 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     settingObj.timeout_seconds = formData.timeout_seconds
   if (formData.fail_threshold != null)
     settingObj.fail_threshold = formData.fail_threshold
+  // [CUSTOM] 分渠道存活检测（空/default 不写入保持 JSON 等价）
+  if (
+    formData.health_check_mode &&
+    formData.health_check_mode !== '' &&
+    formData.health_check_mode !== 'default'
+  ) {
+    settingObj.health_check_mode = formData.health_check_mode
+  }
+  if (formData.health_check_minutes != null) {
+    settingObj.health_check_minutes = formData.health_check_minutes
+  }
 
   // Omit defaults so unchanged channels keep equivalent JSON.
   if (protocol === HTTP_PROTOCOL_HTTP1) {

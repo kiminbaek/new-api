@@ -230,6 +230,7 @@ export type ModelSettings = {
   ModelGroups: string
   ChannelDisableThreshold: string
   RelayUserAgent: string // [CUSTOM] 需求1 隐蔽化 UA
+  HealthCheckJitterEnabled: boolean // [CUSTOM] 存活检测间隔抖动（隐蔽性）
   AutoPriorityEnabled: boolean // [CUSTOM] 需求4 自动调优开关
   AutoPriorityIntervalSec: number // [CUSTOM] 需求4 调档周期(秒)
   AutoPriorityMinSamples: number // [CUSTOM] 需求4 最小样本数

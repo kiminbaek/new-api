@@ -93,6 +93,9 @@ export interface ChannelSettings {
   retry_times?: number
   timeout_seconds?: number
   fail_threshold?: number
+  // [CUSTOM] 分渠道存活检测
+  health_check_mode?: '' | 'default' | 'scheduled' | 'passive'
+  health_check_minutes?: number
 }
 
 export interface ChannelOtherSettings {

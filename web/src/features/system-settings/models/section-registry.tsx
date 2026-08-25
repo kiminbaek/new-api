@@ -90,6 +90,7 @@ const MODELS_SECTIONS = [
             settings['monitor_setting.channel_test_mode'],
           // [CUSTOM] 需求1/4
           RelayUserAgent: settings.RelayUserAgent,
+          HealthCheckJitterEnabled: settings.HealthCheckJitterEnabled,
           AutoPriorityEnabled: settings.AutoPriorityEnabled,
           AutoPriorityIntervalSec: settings.AutoPriorityIntervalSec,
           AutoPriorityMinSamples: settings.AutoPriorityMinSamples,

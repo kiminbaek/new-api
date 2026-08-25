@@ -28,6 +28,44 @@ type ChannelSettings struct {
 	RetryTimes      *int            `json:"retry_times,omitempty"`      // 该渠道每次请求最多被选中的次数(0=单次机会)
 	TimeoutSeconds  *int            `json:"timeout_seconds,omitempty"`  // 仅非流式请求生效
 	FailThreshold   *int            `json:"fail_threshold,omitempty"`   // 连续窗口内失败达到N次才自动禁用(nil=沿用即时禁用)
+	// [CUSTOM] 分渠道存活检测（nil/空=继承全局监控设置）
+	HealthCheckMode    string   `json:"health_check_mode,omitempty"`     // ""|default=跟随全局; scheduled=定时检测; passive=仅被动恢复(仅被自动禁用后才探测)
+	HealthCheckMinutes *float64 `json:"health_check_minutes,omitempty"`  // 检测间隔覆盖(分钟)，nil=跟随全局
+}
+
+const (
+	HealthCheckModeDefault   = "default"
+	HealthCheckModeScheduled = "scheduled"
+	HealthCheckModePassive   = "passive"
+)
+
+// EffectiveHealthCheckMode 返回渠道级有效检测模式（空值归一化为 default=跟随全局）。
+func (s ChannelSettings) EffectiveHealthCheckMode() string {
+	switch s.HealthCheckMode {
+	case HealthCheckModeScheduled, HealthCheckModePassive:
+		return s.HealthCheckMode
+	default:
+		return HealthCheckModeDefault
+	}
+}
+
+// ValidateHealthCheck 校验保存时分渠道检测设置。
+func (s *ChannelSettings) ValidateHealthCheck() error {
+	if s == nil {
+		return nil
+	}
+	switch s.HealthCheckMode {
+	case "", HealthCheckModeDefault, HealthCheckModeScheduled, HealthCheckModePassive:
+	default:
+		return fmt.Errorf("invalid health_check_mode: %s", s.HealthCheckMode)
+	}
+	if s.HealthCheckMinutes != nil {
+		m := *s.HealthCheckMinutes
+		if m < 0 || m > 10080 { // 上限 7 天
+			return fmt.Errorf("health_check_minutes must be between 0 and 10080")
+		}
+	}
+	return nil
 }
 
 const (
