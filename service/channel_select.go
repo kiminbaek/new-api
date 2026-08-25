@@ -17,6 +17,16 @@ type RetryParam struct {
 	RequestPath  string
 	Retry        *int
 	resetNextTry bool
+	// [CUSTOM-fix P1] 本请求内已被渠道级重试帽(retry_times)排除的渠道集合
+	Excluded map[int]bool
+}
+
+// Exclude 标记某渠道在本请求剩余重试中不再参与选择。
+func (p *RetryParam) Exclude(channelId int) {
+	if p.Excluded == nil {
+		p.Excluded = make(map[int]bool)
+	}
+	p.Excluded[channelId] = true
 }
 
 func (p *RetryParam) GetRetry() int {
@@ -115,7 +125,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			}
 			logger.LogDebug(param.Ctx, "Auto selecting group: %s, priorityRetry: %d", autoGroup, priorityRetry)
 
-			channel, _ = model.GetRandomSatisfiedChannel(autoGroup, param.ModelName, priorityRetry, param.RequestPath)
+			channel, _ = model.GetRandomSatisfiedChannel(autoGroup, param.ModelName, priorityRetry, param.RequestPath, param.Excluded)
 			if channel == nil {
 				// Current group has no available channel for this model, try next group
 				// 当前分组没有该模型的可用渠道，尝试下一个分组
@@ -153,7 +163,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			break
 		}
 	} else {
-		channel, err = model.GetRandomSatisfiedChannel(param.TokenGroup, param.ModelName, param.GetRetry(), param.RequestPath)
+		channel, err = model.GetRandomSatisfiedChannel(param.TokenGroup, param.ModelName, param.GetRetry(), param.RequestPath, param.Excluded)
 		if err != nil {
 			return nil, param.TokenGroup, err
 		}

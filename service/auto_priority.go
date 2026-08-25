@@ -141,6 +141,9 @@ func runAutoPriorityTick(interval time.Duration) {
 	}
 	if changed {
 		apSaveStateLocked()
+		// [CUSTOM-fix P0] 缓存路径选择器读 group2model2chanPriority（InitChannelCache 构建），
+		// 不主动刷新则 MEMORY_CACHE_ENABLED=true 时调档要等 SYNC_FREQUENCY(默认60s) 才生效。
+		model.InitChannelCache()
 	}
 	_ = interval
 }

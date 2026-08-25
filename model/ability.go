@@ -105,13 +105,21 @@ func getChannelQuery(group string, model string, retry int) (*gorm.DB, error) {
 	return channelQuery, nil
 }
 
-func GetChannel(group string, model string, retry int, requestPath string) (*Channel, error) {
+func GetChannel(group string, model string, retry int, requestPath string, exclude map[int]bool) (*Channel, error) {
 	var abilities []Ability
 
 	var err error = nil
 	channelQuery, err := getChannelQuery(group, model, retry)
 	if err != nil {
 		return nil, err
+	}
+	// [CUSTOM-fix P1] 排除本请求已被重试帽排除的渠道
+	if len(exclude) > 0 {
+		ids := make([]int, 0, len(exclude))
+		for id := range exclude {
+			ids = append(ids, id)
+		}
+		channelQuery = channelQuery.Where("channel_id NOT IN ?", ids)
 	}
 	if common.UsingMainDatabase(common.DatabaseTypeSQLite) || common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
 		err = channelQuery.Order("weight DESC").Find(&abilities).Error

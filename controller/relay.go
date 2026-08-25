@@ -224,6 +224,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 					capWarned[channel.Id] = true
 					logger.LogWarn(c, fmt.Sprintf("[CUSTOM] channel #%d hit retry_times=%d cap, skip to next", channel.Id, *cs.RetryTimes))
 				}
+				// [CUSTOM-fix P1] 加入排除集，避免选择器再次命中该渠道空耗重试预算
+				retryParam.Exclude(channel.Id)
 				continue
 			}
 		}

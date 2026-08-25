@@ -23,6 +23,11 @@ var channelsIDM map[int]*Channel                     // all channels include dis
 var channel2advancedCustomConfig map[int]*dto.AdvancedCustomConfig
 var channelSyncLock sync.RWMutex
 
+// [CUSTOM-fix P0] group2model2chanPriority: ability 表的渠道×模型粒度优先级缓存。
+// 需求3(model_priorities)/需求4(自动调优)写 ability.priority；此前缓存选择路径只看
+// 渠道级 Priority 字段，导致 MEMORY_CACHE_ENABLED=true 时二者全部无效。
+var group2model2chanPriority map[string]map[string]map[int]int64
+
 func InitChannelCache() {
 	if !common.MemoryCacheEnabled {
 		InvalidatePricingCache()
@@ -49,6 +54,19 @@ func InitChannelCache() {
 	newGroup2model2channels := make(map[string]map[string][]int)
 	for group := range groups {
 		newGroup2model2channels[group] = make(map[string][]int)
+	}
+	// [CUSTOM-fix P0] 同步构建 ability 粒度优先级缓存（含 disabled，查询侧以候选为准）
+	newGroup2model2chanPriority := make(map[string]map[string]map[int]int64)
+	for _, ab := range abilities {
+		if newGroup2model2chanPriority[ab.Group] == nil {
+			newGroup2model2chanPriority[ab.Group] = make(map[string]map[int]int64)
+		}
+		if newGroup2model2chanPriority[ab.Group][ab.Model] == nil {
+			newGroup2model2chanPriority[ab.Group][ab.Model] = make(map[int]int64)
+		}
+		if ab.Priority != nil {
+			newGroup2model2chanPriority[ab.Group][ab.Model][ab.ChannelId] = *ab.Priority
+		}
 	}
 	for _, channel := range channels {
 		if channel.Status != common.ChannelStatusEnabled {
@@ -78,6 +96,7 @@ func InitChannelCache() {
 
 	channelSyncLock.Lock()
 	group2model2channels = newGroup2model2channels
+	group2model2chanPriority = newGroup2model2chanPriority
 	//channelsIDM = newChannelId2channel
 	for i, channel := range newChannelId2channel {
 		if channel.ChannelInfo.IsMultiKey {
@@ -103,6 +122,19 @@ func InitChannelCache() {
 	common.SysLog("channels synced from database")
 }
 
+// EffectiveAbilityPriority 返回 (group,model,channel) 的 ability 粒度优先级；无记录回落 fallback。
+// 调用方必须持有 channelSyncLock.RLock（与 group2model2chanPriority 同锁保护）。
+func EffectiveAbilityPriority(group, model string, channelId int, fallback int64) int64 {
+	if m2 := group2model2chanPriority[group]; m2 != nil {
+		if m3 := m2[model]; m3 != nil {
+			if p, ok := m3[channelId]; ok {
+				return p
+			}
+		}
+	}
+	return fallback
+}
+
 func SyncChannelCache(frequency int) {
 	for {
 		time.Sleep(time.Duration(frequency) * time.Second)
@@ -111,10 +143,10 @@ func SyncChannelCache(frequency int) {
 	}
 }
 
-func GetRandomSatisfiedChannel(group string, model string, retry int, requestPath string) (*Channel, error) {
+func GetRandomSatisfiedChannel(group string, model string, retry int, requestPath string, exclude map[int]bool) (*Channel, error) {
 	// if memory cache is disabled, get channel directly from database
 	if !common.MemoryCacheEnabled {
-		return GetChannel(group, model, retry, requestPath)
+		return GetChannel(group, model, retry, requestPath, exclude)
 	}
 
 	channelSyncLock.RLock()
@@ -127,6 +159,17 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 	if len(channels) == 0 {
 		normalizedModel := ratio_setting.FormatMatchingModelName(model)
 		channels = filterChannelsByRequestPathAndModel(group2model2channels[group][normalizedModel], requestPath, model)
+	}
+
+	// [CUSTOM-fix P1] 剔除本请求已被重试帽排除的渠道
+	if len(exclude) > 0 && len(channels) > 0 {
+		kept := channels[:0]
+		for _, id := range channels {
+			if !exclude[id] {
+				kept = append(kept, id)
+			}
+		}
+		channels = kept
 	}
 
 	if len(channels) == 0 {
@@ -143,7 +186,8 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 	uniquePriorities := make(map[int]bool)
 	for _, channelId := range channels {
 		if channel, ok := channelsIDM[channelId]; ok {
-			uniquePriorities[int(channel.GetPriority())] = true
+			// [CUSTOM-fix P0] 渠道×模型粒度优先级（ability 表），无记录回落渠道级
+			uniquePriorities[int(EffectiveAbilityPriority(group, model, channelId, channel.GetPriority()))] = true
 		} else {
 			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
 		}
@@ -164,7 +208,7 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 	var targetChannels []*Channel
 	for _, channelId := range channels {
 		if channel, ok := channelsIDM[channelId]; ok {
-			if channel.GetPriority() == targetPriority {
+			if EffectiveAbilityPriority(group, model, channelId, channel.GetPriority()) == targetPriority {
 				sumWeight += channel.GetWeight()
 				targetChannels = append(targetChannels, channel)
 			}
