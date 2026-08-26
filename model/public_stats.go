@@ -1,6 +1,7 @@
 package model
 
 import (
+	"sync"
 	"time"
 )
 
@@ -78,6 +79,31 @@ func GetDailyRequestTrend(days int) ([]map[string]interface{}, error) {
 
 // [CUSTOM] 从 logs 表按模型聚合最近N天的成功/失败数（type 2=成功消费, 5=错误）。
 // 概览页专用：持久化、重启不丢，与内存环（门控/降权实时用）解耦。
+// [CUSTOM-fix P1] 概览页缓存：logs 聚合查询较重（7 天窗口 GROUP BY），
+// 页面每次刷新都打 DB 没必要。60s TTL 内存缓存，进程内单例。
+var (
+	overviewRateCacheMu   sync.Mutex
+	overviewRateCacheData []map[string]interface{}
+	overviewRateCacheAt   time.Time
+)
+
+const overviewRateCacheTTL = 60 * time.Second
+
+func GetModelSuccessRatesCached(days int) ([]map[string]interface{}, error) {
+	overviewRateCacheMu.Lock()
+	defer overviewRateCacheMu.Unlock()
+	if overviewRateCacheData != nil && time.Since(overviewRateCacheAt) < overviewRateCacheTTL {
+		return overviewRateCacheData, nil
+	}
+	rows, err := GetModelSuccessRatesFromLogs(days)
+	if err != nil {
+		return nil, err
+	}
+	overviewRateCacheData = rows
+	overviewRateCacheAt = time.Now()
+	return rows, nil
+}
+
 func GetModelSuccessRatesFromLogs(days int) ([]map[string]interface{}, error) {
 	since := time.Now().AddDate(0, 0, -days).Unix()
 	var rows []struct {

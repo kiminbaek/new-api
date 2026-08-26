@@ -42,7 +42,7 @@ func GetPublicOverview(c *gin.Context) {
 	}
 	// [CUSTOM] 概览页成功率改从 logs 表查（持久化、重启不丢），不再读内存环。
 	// 内存环仅保留给 fail_threshold 门控与 L0 自动降权调度器（它们需要实时状态）。
-	modelRateMaps, err := model.GetModelSuccessRatesFromLogs(7)
+	modelRateMaps, err := model.GetModelSuccessRatesCached(7)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "failed to query success rates: " + err.Error()})
 		return

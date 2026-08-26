@@ -63,7 +63,14 @@ func SetupApiRequestHeader(info *common.RelayInfo, c *gin.Context, req *http.Hea
 		// websocket
 	} else {
 		req.Set("Content-Type", c.Request.Header.Get("Content-Type"))
-		req.Set("Accept", c.Request.Header.Get("Accept"))
+		// [CUSTOM-fix P0] 仅在客户端显式携带 Accept 时覆盖；否则保留上方 stealth fill
+		// 的 application/json——否则非流式+客户端无 Accept 时出站头为空，
+		// UA 伪装成 OpenAI/Python 却不带 SDK 必带的 Accept，反而成了可疑特征。
+		if accept := c.Request.Header.Get("Accept"); accept != "" {
+			req.Set("Accept", accept)
+		} else if req.Get("Accept") == "" {
+			req.Set("Accept", "application/json")
+		}
 		if info.IsStream && c.Request.Header.Get("Accept") == "" {
 			req.Set("Accept", "text/event-stream")
 		}

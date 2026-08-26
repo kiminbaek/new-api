@@ -251,7 +251,7 @@ type SmartDownState struct {
 }
 
 var (
-	smartDownMu sync.Mutex
+	smartDownMu sync.RWMutex
 	smartDown   = map[string]*SmartDownState{}
 )
 
@@ -445,8 +445,8 @@ func FinishSmartProbe(chId int, mdl string, ok bool, errMsg string) {
 
 // ListSmartDown 返回全部下线记录快照（只读看板用）。
 func ListSmartDown() []SmartDownState {
-	smartDownMu.Lock()
-	defer smartDownMu.Unlock()
+	smartDownMu.RLock()
+	defer smartDownMu.RUnlock()
 	out := make([]SmartDownState, 0, len(smartDown))
 	for _, st := range smartDown {
 		out = append(out, *st)
@@ -456,8 +456,8 @@ func ListSmartDown() []SmartDownState {
 
 // SmartDownModels 返回某渠道当前处于模型级下线的模型集合。
 func SmartDownModels(chId int) map[string]bool {
-	smartDownMu.Lock()
-	defer smartDownMu.Unlock()
+	smartDownMu.RLock()
+	defer smartDownMu.RUnlock()
 	out := map[string]bool{}
 	for _, st := range smartDown {
 		if st.ChannelId == chId && st.Level == SmartDownModel && st.Model != "" {
@@ -469,10 +469,22 @@ func SmartDownModels(chId int) map[string]bool {
 
 // IsSmartDown 该 (channel, model) 是否处于下线态。
 func IsSmartDown(chId int, mdl string) bool {
-	smartDownMu.Lock()
-	defer smartDownMu.Unlock()
+	// [CUSTOM-fix P1] 选路热路径每请求×每候选都会调用：RWMutex 读锁 + 空表快路径，
+	// 避免与探测 worker 的写锁互相卡。
+	if smartDownLen() == 0 {
+		return false
+	}
+	smartDownMu.RLock()
+	defer smartDownMu.RUnlock()
 	_, ok := smartDown[smartDownKey(chId, mdl)]
 	return ok
+}
+
+// smartDownLen 无锁近似：仅用于空表快路径判断（0 或非 0 都安全）。
+func smartDownLen() int {
+	smartDownMu.RLock()
+	defer smartDownMu.RUnlock()
+	return len(smartDown)
 }
 
 // ===== 渠道级快速隔离（智能化增强：死渠道几十次请求内退出调度） =====

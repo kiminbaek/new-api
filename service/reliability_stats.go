@@ -6,11 +6,14 @@ package service
 import (
 	"encoding/json"
 	"os"
+	"os/signal"
+	"syscall"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"github.com/bytedance/gopkg/util/gopool"
 	"time"
 )
 
@@ -254,6 +257,14 @@ func statPersistPath() string {
 func InitRelayStatsPersistence() {
 	go restoreRelayStats()
 	go persistLoop()
+	// [CUSTOM-fix P1] 进程退出前强制刷一次快照，避免 SIGTERM 丢最多 5 分钟数据。
+	gopool.Go(func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+		<-sig
+		saveRelayStatsSnapshot()
+		println("[CUSTOM] reliability stats flushed on shutdown")
+	})
 }
 
 func restoreRelayStats() {

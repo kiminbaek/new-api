@@ -1011,9 +1011,11 @@ func (channel *Channel) GetSetting() dto.ChannelSettings {
 	if channel.Setting != nil && *channel.Setting != "" {
 		err := common.Unmarshal([]byte(*channel.Setting), &setting)
 		if err != nil {
-			common.SysLog(fmt.Sprintf("failed to unmarshal setting: channel_id=%d, error=%v", channel.Id, err))
-			channel.Setting = nil // 清空设置以避免后续错误
-			_ = channel.Save()    // 保存修改
+			// [CUSTOM-fix P0] 只降级为空设置并留痕，绝不破坏性清空 DB 字段：
+			// 上游原逻辑读到坏 JSON 会 Setting=nil+Save()，一次读操作就把
+			// 该渠道全部高级配置（超时/阈值/UA指纹等）永久抹掉。
+			common.SysError(fmt.Sprintf("[CUSTOM] channel #%d setting unmarshal failed (kept on disk, returning empty): %v; raw=%s",
+				channel.Id, err, common.LocalLogPreview(*channel.Setting)))
 		}
 	}
 	return setting
