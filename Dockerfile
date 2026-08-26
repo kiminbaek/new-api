@@ -1,4 +1,5 @@
-FROM oven/bun:1 AS builder
+FROM oven/bun:1.4.0@sha256:5ff609364c049b54eb0ff560ec96319729a972078ef2c755d758f0c6ef89c2d6 AS builder
+
 
 WORKDIR /build/web
 # [CUSTOM] 国内构建加速：bun 走 npmmirror
