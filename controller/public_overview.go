@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/model"
-	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 )
 
@@ -41,26 +40,28 @@ func GetPublicOverview(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	succ, samples := service.GlobalSuccessRate()
+	// [CUSTOM] 概览页成功率改从 logs 表查（持久化、重启不丢），不再读内存环。
+	// 内存环仅保留给 fail_threshold 门控与 L0 自动降权调度器（它们需要实时状态）。
+	modelRateMaps, err := model.GetModelSuccessRatesFromLogs(7)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "failed to query success rates: " + err.Error()})
+		return
+	}
+	globalSucc := int64(0)
+	globalSamples := int64(0)
+	rates := make([]gin.H, 0, len(modelRateMaps))
+	for _, m := range modelRateMaps {
+		globalSucc += m["succ"].(int64)
+		globalSamples += m["samples"].(int64)
+		rates = append(rates, gin.H{"model": m["model"], "success_rate": m["success_rate"], "succ": m["succ"], "samples": m["samples"]})
+	}
 	successRate := 0.0
-	if samples > 0 {
-		successRate = float64(succ) / float64(samples) * 100
+	if globalSamples > 0 {
+		successRate = float64(globalSucc) / float64(globalSamples) * 100
 	}
-	modelRates := service.AggregateModelSuccessRates()
-	type modelRateView struct {
-		Model       string  `json:"model"`
-		SuccessRate float64 `json:"success_rate"`
-		Succ        int64   `json:"succ"`
-		Samples     int64   `json:"samples"`
-	}
-	rates := make([]modelRateView, 0, len(modelRates))
-	for _, m := range modelRates {
-		rate := 0.0
-		if m.Samples > 0 {
-			rate = float64(m.Succ) / float64(m.Samples) * 100
-		}
-		rates = append(rates, modelRateView{Model: m.Model, SuccessRate: rate, Succ: m.Succ, Samples: m.Samples})
-	}
+	var succ, samples int64
+	succ = globalSucc
+	samples = globalSamples
 	data := gin.H{
 		"total_users":      stats.TotalUsers,
 		"total_requests":   stats.TotalRequests,

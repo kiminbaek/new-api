@@ -75,3 +75,42 @@ func GetDailyRequestTrend(days int) ([]map[string]interface{}, error) {
 	}
 	return out, nil
 }
+
+// [CUSTOM] 从 logs 表按模型聚合最近N天的成功/失败数（type 2=成功消费, 5=错误）。
+// 概览页专用：持久化、重启不丢，与内存环（门控/降权实时用）解耦。
+func GetModelSuccessRatesFromLogs(days int) ([]map[string]interface{}, error) {
+	since := time.Now().AddDate(0, 0, -days).Unix()
+	var rows []struct {
+		ModelName string `json:"model_name"`
+		Succ      int64  `json:"succ"`
+		Fail      int64  `json:"fail"`
+	}
+	err := DB.Model(&Log{}).
+		Select("model_name, "+
+			"SUM(CASE WHEN type = ? THEN 1 ELSE 0 END) AS succ, "+
+			"SUM(CASE WHEN type = ? THEN 1 ELSE 0 END) AS fail",
+			LogTypeConsume, LogTypeError).
+		Where("type IN (?,?) AND created_at >= ?", LogTypeConsume, LogTypeError, since).
+		Group("model_name").
+		Having("succ + fail > 0").
+		Order("succ DESC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]interface{}, 0, len(rows))
+	for _, r := range rows {
+		total := r.Succ + r.Fail
+		rate := 0.0
+		if total > 0 {
+			rate = float64(r.Succ) / float64(total) * 100
+		}
+		out = append(out, map[string]interface{}{
+			"model":        r.ModelName,
+			"success_rate": rate,
+			"succ":         r.Succ,
+			"samples":      total,
+		})
+	}
+	return out, nil
+}
