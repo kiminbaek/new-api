@@ -411,3 +411,30 @@ func FixAbility() (int, int, error) {
 	InitChannelCache()
 	return successCount, failCount, nil
 }
+
+// [CUSTOM] 哨兵：统计某模型当前可用（enabled）渠道数。
+func CountAliveChannelsForModel(mdl string) int {
+	var n int64
+	DB.Model(&Ability{}).Where("model = ? AND enabled = ?", mdl, true).Distinct("channel_id").Count(&n)
+	return int(n)
+}
+
+// [CUSTOM] 哨兵每日一报：列出可用渠道数 <= threshold 的模型名。
+func ListModelsWithFewChannels(threshold int) []string {
+	var rows []struct {
+		Model string `json:"model"`
+		N     int    `json:"n"`
+	}
+	DB.Model(&Ability{}).
+		Select("model, COUNT(DISTINCT channel_id) AS n").
+		Where("enabled = ?", true).
+		Group("model").
+		Having("COUNT(DISTINCT channel_id) <= ?", threshold).
+		Order("n ASC").Limit(10).
+		Scan(&rows)
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, fmt.Sprintf("%s(%d)", r.Model, r.N))
+	}
+	return out
+}

@@ -51,6 +51,9 @@ func ApplyDisablePolicy(channelError types.ChannelError, modelName string, err *
 		return ActionNone, true
 	}
 
+	// [CUSTOM] 404 特殊通道：归类为 None 但单独计数，达阈值触发「疑似下架」。
+	checkModelMissing(channelError, modelName, err)
+
 	action := ClassifyChannelError(err, channelError.IsMultiKey)
 	switch action {
 	case ActionNone:
@@ -99,6 +102,7 @@ func disableModelOnChannel(channelError types.ChannelError, modelName string, wh
 	}
 	reason := fmt.Sprintf("%s；最后错误：%s", why, common.LocalLogPreview(err.Error()))
 	RegisterSmartDown(channelError.ChannelId, channelError.ChannelName, modelName, SmartDownModel, reason)
+	NotifyChannelDown(channelError.ChannelId, channelError.ChannelName, "L1", modelName, why)
 	common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用 L1：通道「%s」（#%d）模型 %s 已下线，%s", channelError.ChannelName, channelError.ChannelId, modelName, reason))
 
 	// 该渠道所有模型都被下线 → 渠道自己等于死了，升级 L2。
@@ -119,6 +123,7 @@ func disableKeyOnChannel(channelError types.ChannelError, err *types.NewAPIError
 	reason := fmt.Sprintf("上游判定该密钥无效：%s", common.LocalLogPreview(err.Error()))
 	if model.UpdateChannelStatus(channelError.ChannelId, channelError.UsingKey, common.ChannelStatusAutoDisabled, reason) {
 		common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用 KEY：通道「%s」（#%d）一个密钥已下线，%s", channelError.ChannelName, channelError.ChannelId, reason))
+		NotifyChannelDown(channelError.ChannelId, channelError.ChannelName, "KEY", "", "上游判定该密钥无效")
 		subject := fmt.Sprintf("通道「%s」（#%d）一个密钥已被禁用", channelError.ChannelName, channelError.ChannelId)
 		NotifyRootUser(formatNotifyType(channelError.ChannelId, common.ChannelStatusAutoDisabled), subject, subject+"，原因："+reason)
 	}

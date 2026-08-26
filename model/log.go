@@ -735,3 +735,42 @@ func DeleteOldLogBatch(ctx context.Context, targetTimestamp int64, limit int) (i
 	}
 	return result.RowsAffected, nil
 }
+
+// [CUSTOM] 哨兵每日一报：统计 [start,end) 区间的成功(type=2)/失败(type=5)日志条数。
+func CountLogsBetween(start, end int64) (int64, int64) {
+	var succ, fail int64
+	DB.Model(&Log{}).Where("type = ? AND created_at >= ? AND created_at < ?", LogTypeConsume, start, end).Count(&succ)
+	DB.Model(&Log{}).Where("type = ? AND created_at >= ? AND created_at < ?", LogTypeError, start, end).Count(&fail)
+	return succ, fail
+}
+
+// [CUSTOM] 哨兵每日一报：昨日失败最多的前 limit 个模型。
+func GetWorstModelsByFail(start, end int64, limit int) []map[string]interface{} {
+	var rows []struct {
+		ModelName string `json:"model_name"`
+		Succ      int64  `json:"succ"`
+		Fail      int64  `json:"fail"`
+	}
+	DB.Model(&Log{}).
+		Select("model_name, "+
+			"SUM(CASE WHEN type = ? THEN 1 ELSE 0 END) AS succ, "+
+			"SUM(CASE WHEN type = ? THEN 1 ELSE 0 END) AS fail",
+			LogTypeConsume, LogTypeError).
+		Where("type IN (?,?) AND created_at >= ? AND created_at < ?", LogTypeConsume, LogTypeError, start, end).
+		Group("model_name").
+		Having("fail > 0").
+		Order("fail DESC").Limit(limit).
+		Scan(&rows)
+	out := make([]map[string]interface{}, 0, len(rows))
+	for _, r := range rows {
+		total := r.Succ + r.Fail
+		rate := 100.0
+		if total > 0 {
+			rate = float64(r.Succ) / float64(total) * 100
+		}
+		out = append(out, map[string]interface{}{
+			"model": r.ModelName, "fail": float64(r.Fail), "samples": total, "rate": rate,
+		})
+	}
+	return out
+}

@@ -12,10 +12,12 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/gin-gonic/gin"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/bytedance/gopkg/util/gopool"
@@ -115,6 +117,7 @@ func probeOne(st service.SmartDownState, testUserID int) {
 	if result.newAPIError == nil && result.localErr == nil {
 		service.FinishSmartProbe(st.ChannelId, st.Model, true, "")
 		service.RecordRelaySuccess(st.ChannelId, st.Model)
+		service.NotifyChannelRecovered(st.ChannelId, ch.Name, string(st.Level), st.Model, time.Unix(st.DisabledAt, 0), st.Attempts)
 		// L2 升级导致整渠道被禁的场景：模型已实测恢复 → 把渠道也重新启用
 		if ch.Status != common.ChannelStatusEnabled {
 			service.EnableChannel(ch.Id, "", ch.Name)
@@ -134,4 +137,28 @@ func probeOne(st service.SmartDownState, testUserID int) {
 	service.FinishSmartProbe(st.ChannelId, st.Model, false, errMsg)
 	common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用探测未通过：通道「%s」（#%d）模型 %s，%s（第 %d 次，退避后重试）",
 		ch.Name, ch.Id, st.Model, common.LocalLogPreview(errMsg), st.Attempts+1))
+}
+
+// [CUSTOM] 哨兵测试推送：走真实推送链路发一条测试消息（AdminAuth 路由）。
+func SentinelTestPush(c *gin.Context) {
+	title := "🔔 哨兵测试推送"
+	content := fmt.Sprintf("这是一条测试通知。\n时间：%s\n如果你收到了它，说明哨兵通道配置正确。", time.Now().Format("2006-01-02 15:04:05"))
+	cfg := service.LoadSentinelConfigPublic()
+	if !cfg.Enabled {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "哨兵开关未开启"})
+		return
+	}
+	if cfg.WebhookURL == "" && cfg.EmailTo == "" {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "未配置任何推送通道（webhook 与邮箱均为空）"})
+		return
+	}
+	go func() {
+		if cfg.WebhookURL != "" {
+			_ = service.SentinelPostWebhookPublic(cfg.WebhookURL, cfg.WebhookAuth, title, content)
+		}
+		if cfg.EmailTo != "" {
+			_ = common.SendEmail(title, cfg.EmailTo, strings.ReplaceAll(content, "\n", "<br>"))
+		}
+	}()
+	c.JSON(http.StatusOK, gin.H{"success": true})
 }

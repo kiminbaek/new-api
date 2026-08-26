@@ -25,6 +25,7 @@ import { ClaudeSettingsCard } from './claude-settings-card'
 import { GeminiSettingsCard } from './gemini-settings-card'
 import { GlobalSettingsCard } from './global-settings-card'
 import { GrokSettingsCard } from './grok-settings-card'
+import { SentinelSection } from './sentinel-section'
 import { RoutingReliabilitySection } from './routing-reliability-section'
 
 function formatJsonForEditor(value: string, fallback: string) {
@@ -101,7 +102,22 @@ const MODELS_SECTIONS = [
       />
     ),
   },
+
   {
+    id: 'sentinel',
+    titleKey: 'Sentinel Push',
+    build: (settings: ModelSettings) => (
+      <SentinelSection
+        defaultValues={{
+          SentinelEnabled: settings['SentinelEnabled'],
+          SentinelWebhookURL: settings['SentinelWebhookURL'],
+          SentinelWebhookAuth: settings['SentinelWebhookAuth'],
+          SentinelEmailTo: settings['SentinelEmailTo'],
+          SentinelDailyHour: settings['SentinelDailyHour'],
+        }}
+      />
+    ),
+  },  {
     id: 'model-groups',
     titleKey: 'Model Groups',
     build: (settings: ModelSettings) => (

@@ -162,6 +162,11 @@ func InitOptionMap() {
 	common.OptionMap["RelayUserAgent"] = common.RelayUserAgent
 	common.OptionMap["AutoPriorityEnabled"] = strconv.FormatBool(common.AutoPriorityEnabled)
 	common.OptionMap["HealthCheckJitterEnabled"] = strconv.FormatBool(common.HealthCheckJitterEnabled) // [CUSTOM] 检测抖动开关
+	common.OptionMap["SentinelEnabled"] = strconv.FormatBool(common.SentinelEnabled)                   // [CUSTOM] 哨兵推送总开关
+	common.OptionMap["SentinelWebhookURL"] = common.SentinelWebhookURL                                 // [CUSTOM] 哨兵 webhook（QQ 网关等）
+	common.OptionMap["SentinelWebhookAuth"] = common.SentinelWebhookAuth                             // [CUSTOM] 哨兵 webhook Bearer token
+	common.OptionMap["SentinelEmailTo"] = common.SentinelEmailTo                                       // [CUSTOM] 哨兵邮件收件人
+	common.OptionMap["SentinelDailyHour"] = strconv.Itoa(common.SentinelDailyHour)                     // [CUSTOM] 每日一报小时点
 	common.OptionMap["AutoPriorityIntervalSec"] = strconv.Itoa(common.AutoPriorityIntervalSec)
 	common.OptionMap["AutoPriorityMinSamples"] = strconv.Itoa(common.AutoPriorityMinSamples)
 	common.OptionMap["AutoPriorityScale"] = strconv.Itoa(common.AutoPriorityScale)
@@ -572,6 +577,18 @@ func updateOptionMap(key string, value string) (err error) {
 		common.RelayUserAgent = value
 	case "AutoPriorityEnabled": // [CUSTOM] 需求4 自动调优开关（UI 热更，调度器每 tick 重读）
 		common.AutoPriorityEnabled = value == "true"
+	case "SentinelEnabled":
+		common.SentinelEnabled = value == "true"
+	case "SentinelWebhookURL":
+		common.SentinelWebhookURL = value
+	case "SentinelWebhookAuth":
+		common.SentinelWebhookAuth = value
+	case "SentinelEmailTo":
+		common.SentinelEmailTo = value
+	case "SentinelDailyHour":
+		if h, err := strconv.Atoi(value); err == nil && h >= 0 && h <= 23 {
+			common.SentinelDailyHour = h
+		}
 	case "HealthCheckJitterEnabled": // [CUSTOM] 存活检测间隔抖动开关（隐蔽性，默认开）
 		common.HealthCheckJitterEnabled = value == "true"
 	case "AutoPriorityIntervalSec":

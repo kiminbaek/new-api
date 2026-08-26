@@ -218,6 +218,52 @@ func ShouldDisableModelNow(chId int, mdl string) (bool, string) {
 	return false, ""
 }
 
+
+// ===== [CUSTOM] 模型疑似下架检测：同渠道×模型连续 404 达阈值 → L1 下线 + 哨兵 =====
+
+var (
+	missingMu    sync.Mutex
+	missingStore = map[string]int{}
+)
+
+const smartMissingStreak = 10
+
+func recordModelMissing(chId int, mdl string) int {
+	k := fmt.Sprintf("%d|%s", chId, mdl)
+	missingMu.Lock()
+	defer missingMu.Unlock()
+	missingStore[k]++
+	return missingStore[k]
+}
+
+// ResetModelMissing 导出：relay 成功时清零计数。
+func ResetModelMissing(chId int, mdl string) {
+	k := fmt.Sprintf("%d|%s", chId, mdl)
+	missingMu.Lock()
+	delete(missingStore, k)
+	missingMu.Unlock()
+}
+
+// checkModelMissing 在分级处置前置调用：404 归类为 ActionNone 不惩罚，
+// 但连续多次说明模型可能被上游下架——达阈值触发「疑似下架」L1 + 哨兵。
+func checkModelMissing(channelError types.ChannelError, modelName string, err *types.NewAPIError) {
+	if err.StatusCode != 404 || modelName == "" {
+		return
+	}
+	streak := recordModelMissing(channelError.ChannelId, modelName)
+	if streak < smartMissingStreak {
+		return
+	}
+	ResetModelMissing(channelError.ChannelId, modelName)
+	if !IsSmartDown(channelError.ChannelId, modelName) {
+		reason := fmt.Sprintf("疑似下架：连续 %d 次 404，已临时下线等待探测确认", streak)
+		RegisterSmartDown(channelError.ChannelId, channelError.ChannelName, modelName, SmartDownModel, reason)
+		NotifyModelMissing(channelError.ChannelId, channelError.ChannelName, modelName, streak)
+		common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用 MISSING：通道「%s」（#%d）模型 %s %s",
+			channelError.ChannelName, channelError.ChannelId, modelName, reason))
+	}
+}
+
 // ===== 下线登记 + 探测队列 =====
 
 // SmartDownLevel 下线级别（用于看板展示与探测分派）。
@@ -530,6 +576,7 @@ func quarantineWholeChannel(channelError types.ChannelError, streak int, err *ty
 	}
 	common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用 L2 快速隔离：通道「%s」（#%d）渠道级连续失败 %d 次，全部模型一次性下线",
 		channelError.ChannelName, channelError.ChannelId, streak))
+	NotifyChannelDown(channelError.ChannelId, channelError.ChannelName, "L2", "全部模型", fmt.Sprintf("渠道级连续失败 %d 次，快速隔离", streak))
 	smartDisableChannelImpl(channelError, fmt.Sprintf("渠道级连续失败 %d 次，全部模型均已被智能下线（最后一个：%s）", streak, last))
 	return true
 }

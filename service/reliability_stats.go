@@ -74,6 +74,7 @@ func recordRelayOutcome(chId int, model string, ok int8) {
 
 func RecordRelaySuccess(chId int, model string) {
 	recordRelayOutcome(chId, model, 1)
+	ResetModelMissing(chId, model)
 	k := relayStatKey(chId, model)
 	consecMu.Lock()
 	consecStore[k] = 0

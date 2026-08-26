@@ -300,6 +300,12 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			publicOverviewRoute.GET("/overview", controller.GetPublicOverview)
 		}
+		// [CUSTOM] 哨兵测试推送（管理员）
+		sentinelRoute := apiRouter.Group("/sentinel")
+		sentinelRoute.Use(middleware.AdminAuth())
+		{
+			sentinelRoute.POST("/test", controller.SentinelTestPush)
+		}
 
 		dataRoute := apiRouter.Group("/data")
 		dataRoute.GET("/", middleware.AdminAuth(), controller.GetAllQuotaDates)

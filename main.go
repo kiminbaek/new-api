@@ -160,6 +160,8 @@ func main() {
 	// [CUSTOM] 需求4: 双向浮动自动优先级（关闭态下仅做触达恢复检查）
 	service.InitRelayStatsPersistence()
 	service.InitAutoPriorityScheduler()
+	service.InitSentinelDailyReport()
+	service.InitLogCleanupScheduler()
 
 	// [CUSTOM] 智能自动禁用：安装选路过滤钩子 + 重建 L2 探测队列 + 启动探测恢复 worker
 	service.InitSmartDisable()
