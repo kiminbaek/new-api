@@ -4,13 +4,23 @@ package service
 // 同时服务：fail_threshold 门控（失败计数）与双向浮动自动优先级（成功率）。
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const relayStatWindowSize = 128
+
+// [CUSTOM] 统计数据持久化：定期落盘 + 启动恢复，解决重启清零问题。
+const (
+	statPersistInterval = 5 * time.Minute
+	statPersistFileName = "reliability_stats_snapshot.json"
+)
 
 type statRing struct {
 	buf [relayStatWindowSize]int8 // 1=success, 0=failure
@@ -221,5 +231,79 @@ func ForEachRelayStat(fn func(chId int, model string, samples, succ int)) {
 			}
 		}
 		fn(id, parts[1], r.n, succ)
+	}
+}
+
+// ==================== [CUSTOM] 统计持久化：定期落盘 + 启动恢复 ====================
+
+type statPersistEntry struct {
+	Buf []int8 `json:"buf"`
+	N   int    `json:"n"`
+	Idx int    `json:"idx"`
+}
+
+func statPersistPath() string {
+	dir := os.Getenv("SYNC_DATA_DIR")
+	if dir == "" {
+		dir = "./data"
+	}
+	return filepath.Join(dir, statPersistFileName)
+}
+
+// InitRelayStatsPersistence 启动时恢复 + 挂载定期落盘 goroutine。
+func InitRelayStatsPersistence() {
+	go restoreRelayStats()
+	go persistLoop()
+}
+
+func restoreRelayStats() {
+	data, err := os.ReadFile(statPersistPath())
+	if err != nil || len(data) == 0 {
+		return
+	}
+	var snapshot map[string]statPersistEntry
+	if json.Unmarshal(data, &snapshot) != nil {
+		return
+	}
+	statMu.Lock()
+	for k, e := range snapshot {
+		if e.N <= 0 || e.N > relayStatWindowSize {
+			continue
+		}
+		r := &statRing{n: e.N, idx: e.Idx}
+		copy(r.buf[:], e.Buf)
+		statStore[k] = r
+	}
+	statMu.Unlock()
+	println("[CUSTOM] reliability stats restored:", len(snapshot), "keys")
+}
+
+func saveRelayStatsSnapshot() {
+	statMu.RLock()
+	snapshot := make(map[string]statPersistEntry, len(statStore))
+	for k, r := range statStore {
+		e := statPersistEntry{N: r.n, Idx: r.idx}
+		e.Buf = make([]int8, relayStatWindowSize)
+		copy(e.Buf, r.buf[:])
+		snapshot[k] = e
+	}
+	statMu.RUnlock()
+
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return
+	}
+	p := statPersistPath()
+	os.MkdirAll(filepath.Dir(p), 0755)
+	tmp := p + ".tmp"
+	os.WriteFile(tmp, data, 0644)
+	os.Rename(tmp, p)
+}
+
+func persistLoop() {
+	ticker := time.NewTicker(statPersistInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		saveRelayStatsSnapshot()
 	}
 }
