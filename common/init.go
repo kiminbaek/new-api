@@ -110,7 +110,9 @@ func InitEnv() {
 	BatchUpdateInterval = GetEnvOrDefault("BATCH_UPDATE_INTERVAL", 5)
 	RelayTimeout = GetEnvOrDefault("RELAY_TIMEOUT", 0)
 	RelayIdleConnTimeout = GetEnvOrDefault("RELAY_IDLE_CONN_TIMEOUT", 90)
-	RelayUserAgent = GetEnvOrDefaultString("RELAY_USER_AGENT", "")
+	// [CUSTOM] 需求1 隐蔽化：默认 UA 兜底开启（空值会暴露 Go-http-client 网关指纹）。
+	// DB options 表 RelayUserAgent 存在时覆盖此默认；渠道级 header_override 再覆盖全局。
+	RelayUserAgent = GetEnvOrDefaultString("RELAY_USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 	HealthCheckJitterEnabled = GetEnvOrDefaultBool("HEALTH_CHECK_JITTER_ENABLED", true)
 	AutoPriorityEnabled = os.Getenv("AUTO_PRIORITY_ENABLED") == "true"
 	AutoPriorityIntervalSec = GetEnvOrDefault("AUTO_PRIORITY_INTERVAL_SEC", 300)
