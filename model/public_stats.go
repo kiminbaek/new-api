@@ -1,6 +1,7 @@
 package model
 
 import (
+	"sort"
 	"sync"
 	"time"
 )
@@ -89,13 +90,22 @@ var (
 
 const overviewRateCacheTTL = 60 * time.Second
 
+// InvalidateOverviewRateCache 渠道删除等 mutation 后调用，让概览成功率立即重算
+// 而不是等 60s TTL 过期（对齐 uptime-kuma「删除监控项立即从状态页消失」体验）。
+func InvalidateOverviewRateCache() {
+	overviewRateCacheMu.Lock()
+	overviewRateCacheData = nil
+	overviewRateCacheAt = time.Time{}
+	overviewRateCacheMu.Unlock()
+}
+
 func GetModelSuccessRatesCached(days int) ([]map[string]interface{}, error) {
 	overviewRateCacheMu.Lock()
 	defer overviewRateCacheMu.Unlock()
 	if overviewRateCacheData != nil && time.Since(overviewRateCacheAt) < overviewRateCacheTTL {
 		return overviewRateCacheData, nil
 	}
-	rows, err := GetModelSuccessRatesFromLogs(days)
+	rows, err := GetModelSuccessRatesFromPerfMetrics(days)
 	if err != nil {
 		return nil, err
 	}
@@ -104,39 +114,91 @@ func GetModelSuccessRatesCached(days int) ([]map[string]interface{}, error) {
 	return rows, nil
 }
 
-func GetModelSuccessRatesFromLogs(days int) ([]map[string]interface{}, error) {
+// GetModelSuccessRatesFromPerfMetrics 概览页成功率数据源。
+// [CUSTOM 2026-08-27] 行集改为「现役模型集合为主表」LEFT JOIN 统计桶：
+// 已删模型立即消失、新模型立即出现（零样本显示「—」，对齐 uptime-kuma 零心跳显示）。
+//
+// 🔴 为什么不用 logs 表（2026-08-27 修正）：
+// logs 表的失败侧（LogTypeError）由 constant.ErrorLogEnabled 门控，该开关
+// 默认 false（common/init.go: GetEnvOrDefaultBool("ERROR_LOG_ENABLED", false)），
+// 生产从未开启 → logs 里 type=5 恒为 0 条 → 成功率恒等于 100%，是假数据。
+// perf_metrics 表由 relay 主链路无条件写入（成功走 service/quota.go，
+// 失败走 controller/relay.go 的 RecordRelaySample(info,false,0)），
+// request_count/success_count 都是真实计数，与「模型分析」页同源，数字自然一致。
+// GetLiveModelNames 当前仍在服务的模型名集合（概览页行集真值来源）：
+// 启用渠道上的模型 ∪ 虚拟分组别名。
+// [CUSTOM 2026-08-27] 对齐 uptime-kuma「实体表驱动列表」语义
+// （status-page-router.js 先查 monitor 配置拿 ID 列表，再查 heartbeat）。
+// perf_metrics 是纯历史事件桶（model_name = 请求原始名，虚拟组请求会以组名落桶），
+// 渠道删除后旧桶仍留在时间窗口内 → 直接 GROUP BY 会显示幽灵模型、新模型不出现。
+func GetLiveModelNames() ([]string, error) {
+	var names []string
+	err := DB.Table("abilities").Where("enabled = ?", true).Distinct("model").Pluck("model", &names).Error
+	if err != nil {
+		return nil, err
+	}
+	names = append(names, VirtualGroupNames()...)
+	seen := make(map[string]bool, len(names))
+	uniq := make([]string, 0, len(names))
+	for _, n := range names {
+		if n == "" || seen[n] {
+			continue
+		}
+		seen[n] = true
+		uniq = append(uniq, n)
+	}
+	return uniq, nil
+}
+
+func GetModelSuccessRatesFromPerfMetrics(days int) ([]map[string]interface{}, error) {
 	since := time.Now().AddDate(0, 0, -days).Unix()
 	var rows []struct {
 		ModelName string `json:"model_name"`
+		Reqs      int64  `json:"reqs"`
 		Succ      int64  `json:"succ"`
-		Fail      int64  `json:"fail"`
 	}
-	err := DB.Model(&Log{}).
-		Select("model_name, "+
-			"SUM(CASE WHEN type = ? THEN 1 ELSE 0 END) AS succ, "+
-			"SUM(CASE WHEN type = ? THEN 1 ELSE 0 END) AS fail",
-			LogTypeConsume, LogTypeError).
-		Where("type IN (?,?) AND created_at >= ?", LogTypeConsume, LogTypeError, since).
+	err := DB.Model(&PerfMetric{}).
+		Select("model_name, SUM(request_count) AS reqs, SUM(success_count) AS succ").
+		Where("bucket_ts >= ?", since).
 		Group("model_name").
-		Having("succ + fail > 0").
-		Order("succ DESC").
+		Having("SUM(request_count) > 0").
 		Find(&rows).Error
 	if err != nil {
 		return nil, err
 	}
-	out := make([]map[string]interface{}, 0, len(rows))
+	buckets := make(map[string][2]int64, len(rows))
 	for _, r := range rows {
-		total := r.Succ + r.Fail
+		buckets[r.ModelName] = [2]int64{r.Reqs, r.Succ}
+	}
+
+	live, err := GetLiveModelNames()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]interface{}, 0, len(live))
+	for _, name := range live {
+		reqs, succ := buckets[name][0], buckets[name][1]
 		rate := 0.0
-		if total > 0 {
-			rate = float64(r.Succ) / float64(total) * 100
+		if reqs > 0 {
+			rate = float64(succ) / float64(reqs) * 100
 		}
 		out = append(out, map[string]interface{}{
-			"model":        r.ModelName,
+			"model":        name,
 			"success_rate": rate,
-			"succ":         r.Succ,
-			"samples":      total,
+			"succ":         succ,
+			"samples":      reqs,
 		})
 	}
+	// 有流量的在前，同流量按模型名稳定排序；零样本行跟随其后（前端显示「—」）
+	sort.Slice(out, func(i, j int) bool {
+		si, _ := out[i]["samples"].(int64)
+		sj, _ := out[j]["samples"].(int64)
+		if si != sj {
+			return si > sj
+		}
+		mi, _ := out[i]["model"].(string)
+		mj, _ := out[j]["model"].(string)
+		return mi < mj
+	})
 	return out, nil
 }

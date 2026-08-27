@@ -122,6 +122,22 @@ func DeletePerfMetricsBefore(cutoffTs int64) error {
 	return DB.Where("bucket_ts < ?", cutoffTs).Delete(&PerfMetric{}).Error
 }
 
+// DeleteOrphanPerfMetrics 清理「幽灵模型」聚合桶：模型名已不在任何启用渠道
+// 且不是虚拟分组别名时删除其桶。对齐 uptime-kuma 的 monitor 删除级联
+// heartbeat 语义（knex_init_db.js heartbeat.monitor_id onDelete CASCADE；
+// Monitor.deleteMonitor 只删实体行，事件数据自动跟随）。
+// perf_metrics 不参与计费（账单在 logs/quota_data），可安全清理；
+// 渠道删除/批量删/删禁用渠道路径调用（controller/channel.go）。
+func DeleteOrphanPerfMetrics() (int64, error) {
+	q := DB.Where("model_name NOT IN (?)",
+		DB.Table("abilities").Select("DISTINCT model").Where("enabled = ?", true))
+	if vg := VirtualGroupNames(); len(vg) > 0 {
+		q = q.Where("model_name NOT IN ?", vg)
+	}
+	res := q.Delete(&PerfMetric{})
+	return res.RowsAffected, res.Error
+}
+
 func PerfMetricStartTime(hours int) int64 {
 	if hours <= 0 {
 		hours = 24

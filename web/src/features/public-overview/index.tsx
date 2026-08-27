@@ -246,8 +246,8 @@ export function PublicOverview() {
                           <div className='flex items-center gap-2'>
                             <div className='h-2 flex-1 overflow-hidden rounded-full bg-muted'>
                               <div
-                                className={`h-full rounded-full ${rateColor(m.success_rate)}`}
-                                style={{ width: `${Math.max(m.success_rate, 2)}%` }}
+                                className={`h-full rounded-full ${m.samples > 0 ? rateColor(m.success_rate) : 'bg-muted-foreground/25'}`}
+                                style={{ width: m.samples > 0 ? `${Math.max(m.success_rate, 2)}%` : '2%' }}
                               />
                             </div>
                             <span className='w-14 text-right tabular-nums'>

@@ -438,3 +438,32 @@ func ListModelsWithFewChannels(threshold int) []string {
 	}
 	return out
 }
+
+// [CUSTOM] 模型优先级看板数据：abilities join channels，返回有效优先级/基准/偏移/渠道名
+type ModelPriorityRow struct {
+	ChannelID    int     `json:"channel_id"`
+	ChannelName  string  `json:"channel_name"`
+	Model        string  `json:"model"`
+	Group        string  `json:"group"`
+	Enabled      bool    `json:"enabled"`
+	BasePriority int64   `json:"base_priority"`   // channels.priority（手动基准，UI 原值）
+	EffPriority   int64   `json:"eff_priority"`   // abilities.priority（当前有效值，含自动浮动）
+	Delta        int64   `json:"delta"`           // eff - base
+	Weight       uint    `json:"weight"`
+}
+
+func GetModelPriorityBoard() ([]ModelPriorityRow, error) {
+	var rows []ModelPriorityRow
+	err := DB.Table("abilities").
+		Select("abilities.channel_id, channels.name as channel_name, abilities.model, abilities.`group`, abilities.enabled, channels.priority as base_priority, abilities.priority as eff_priority, abilities.weight").
+		Joins("JOIN channels ON channels.id = abilities.channel_id").
+		Order("abilities.model, abilities.channel_id").
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	for i := range rows {
+		rows[i].Delta = rows[i].EffPriority - rows[i].BasePriority
+	}
+	return rows, nil
+}

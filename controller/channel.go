@@ -734,6 +734,11 @@ func DeleteChannel(c *gin.Context) {
 	// [CUSTOM] 渠道已删除：清掉其智能下线记录与统计残留，避免看板幽灵条目与内存泄漏
 	service.ClearSmartDownByChannel(id)
 	service.PruneRelayStatsForChannel(id)
+	// [CUSTOM] 清理幽灵模型性能桶 + 概览成功率立即重算（对齐 uptime-kuma 删除级联语义）
+	if n, perr := model.DeleteOrphanPerfMetrics(); perr == nil && n > 0 {
+		common.SysLog(fmt.Sprintf("channel %d deleted: pruned %d orphan perf metric buckets", id, n))
+	}
+	model.InvalidateOverviewRateCache()
 	if channelLookupFailed {
 		service.ResetProxyClientCache()
 	} else {
@@ -759,6 +764,13 @@ func DeleteDisabledChannel(c *gin.Context) {
 	model.InitChannelCache()
 	if rows > 0 {
 		service.ResetProxyClientCache()
+	}
+	// [CUSTOM] 删禁用渠道同样可能让模型彻底下线：清理幽灵桶 + 概览缓存失效
+	if rows > 0 {
+		if n, perr := model.DeleteOrphanPerfMetrics(); perr == nil && n > 0 {
+			common.SysLog(fmt.Sprintf("disabled channels deleted: pruned %d orphan perf metric buckets", n))
+		}
+		model.InvalidateOverviewRateCache()
 	}
 	recordManageAudit(c, "channel.delete_disabled", map[string]interface{}{
 		"count": rows,
@@ -918,6 +930,11 @@ func DeleteChannelBatch(c *gin.Context) {
 	model.InitChannelCache()
 	if deletedCount > 0 {
 		service.ResetProxyClientCache()
+		// [CUSTOM] 批量删渠道：清理幽灵桶 + 概览缓存失效
+		if n, perr := model.DeleteOrphanPerfMetrics(); perr == nil && n > 0 {
+			common.SysLog(fmt.Sprintf("channels batch deleted: pruned %d orphan perf metric buckets", n))
+		}
+		model.InvalidateOverviewRateCache()
 	}
 	recordManageAudit(c, "channel.delete_batch", map[string]interface{}{
 		"count": deletedCount,
@@ -2234,5 +2251,21 @@ func OllamaVersion(c *gin.Context) {
 		"data": gin.H{
 			"version": version,
 		},
+	})
+}
+
+// [CUSTOM] GetModelPriorityBoard 返回所有渠道×模型的有效优先级看板数据
+func GetModelPriorityBoard(c *gin.Context) {
+	rows, err := model.GetModelPriorityBoard()
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"data":    rows,
 	})
 }

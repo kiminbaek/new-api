@@ -34,6 +34,9 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 			route.handler,
 		)
 	}
+
+	// [CUSTOM] 模型优先级看板
+	channelRoute.GET("/model-priority", controller.GetModelPriorityBoard)
 }
 
 var channelPermissionRoutes = []permissionRoute{
