@@ -193,13 +193,15 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	// [CUSTOM] 需求2: 渠道级尝试计数（retry_times 语义B）
 	tried := map[int]int{}
 	capWarned := map[int]bool{}
+	// [CUSTOM P0-fix] 需求5 容灾链修复：虚拟组成员列表提升到循环外，轮转与降级共用
+	vgMembers := common.GetContextKeyStringSlice(c, constant.ContextKeyVirtualMembers)
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
 		relayInfo.RetryIndex = retryParam.GetRetry()
 		// [CUSTOM] 需求5 模型分级：重试预算内轮转虚拟组成员（选渠/计费随成员切换）
 		if idx := retryParam.GetRetry(); idx > 0 {
-			if vmembers := common.GetContextKeyStringSlice(c, constant.ContextKeyVirtualMembers); len(vmembers) > 0 {
-				nextMember := vmembers[idx%len(vmembers)]
+			if len(vgMembers) > 0 {
+				nextMember := vgMembers[idx%len(vgMembers)]
 				retryParam.ModelName = nextMember
 				relayInfo.OriginModelName = nextMember
 				relayInfo.UpstreamModelName = nextMember
@@ -211,6 +213,16 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
+			// [CUSTOM P0-fix] 需求5 容灾链修复：轮转中命中"成员无可用渠道"
+			//（该模型已被 L1 模型级下线 / 所有渠道禁用 → get_channel_failed + SkipRetry）
+			// 时改为继续切下一个成员，不再提前终止整条虚拟组容灾链。
+			// 注意：临时写入 newAPIError 保证预算耗尽时错误可正确返回与退费；
+			// 后续成员一旦成功即被 return 覆盖。
+			if len(vgMembers) > 1 && channelErr.GetErrorCode() == types.ErrorCodeGetChannelFailed {
+				logger.LogWarn(c, fmt.Sprintf("[CUSTOM] virtual member %q has no available channel (%s), rotating to next member", relayInfo.OriginModelName, channelErr.Error()))
+				newAPIError = channelErr
+				continue
+			}
 			logger.LogError(c, channelErr.Error())
 			newAPIError = channelErr
 			break

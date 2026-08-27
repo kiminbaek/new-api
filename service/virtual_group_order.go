@@ -71,6 +71,17 @@ func vgOrderCompute(virtualName string, base []string) []string {
 		a.samples += samples
 	})
 
+	// [CUSTOM P0-fix] 需求5 容灾链修复：无任何启用渠道的成员沉底。
+	// 成员被 L1 模型级下线 / 渠道全部禁用后，若仍排在队首，
+	// distributor 会对"首发成员"直接 503，且 relay 轮转遇到
+	// "成员无可用渠道"(get_channel_failed) 会因 SkipRetry 提前终止——
+	// 两处叠加曾导致整条虚拟组容灾链被击穿。排序阶段把这类成员排到
+	// 活成员之后（同"死"保持配置顺序），保证队首恒为可用成员。
+	live := make(map[string]bool)
+	for _, ab := range model.GetAllEnableAbilities() {
+		live[ab.Model] = true
+	}
+
 	rate := func(m string) float64 {
 		if a := stats[m]; a != nil && a.samples >= common.AutoPriorityMinSamples {
 			return float64(a.succ) / float64(a.samples)
@@ -80,6 +91,10 @@ func vgOrderCompute(virtualName string, base []string) []string {
 
 	sorted := append([]string(nil), base...)
 	sort.SliceStable(sorted, func(i, j int) bool {
+		di, dj := !live[sorted[i]], !live[sorted[j]]
+		if di != dj {
+			return !di // live 在前，dead 沉底
+		}
 		return rate(sorted[i]) > rate(sorted[j])
 	})
 	return sorted
