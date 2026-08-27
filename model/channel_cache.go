@@ -131,6 +131,11 @@ func RefreshAbilityPriorityCache(chId int, mdl string) {
 	}
 	channelSyncLock.Lock()
 	defer channelSyncLock.Unlock()
+	// [CUSTOM P0-fix] 首次全量缓存构建(InitChannelCache)完成前全局可能仍为 nil，
+	// 此处自愈建表，避免启动早期被调时 assign panic（nil map write）。
+	if group2model2chanPriority == nil {
+		group2model2chanPriority = make(map[string]map[string]map[int]int64)
+	}
 	for _, ab := range rows {
 		if ab.Priority == nil {
 			continue

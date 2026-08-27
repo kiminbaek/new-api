@@ -12,6 +12,7 @@ import (
 	"os"
 	"sync"
 	"time"
+	"runtime/debug"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -78,7 +79,8 @@ func InitAutoPriorityScheduler() {
 				func() {
 					defer func() {
 						if r := recover(); r != nil {
-							common.SysError(fmt.Sprintf("[CUSTOM] auto-priority tick panic (watchdog survives): %v", r))
+							// [CUSTOM diag] 附带完整堆栈定位 nil map 写入点
+							common.SysError(fmt.Sprintf("[CUSTOM] auto-priority tick panic (watchdog survives): %v\n%s", r, debug.Stack()))
 						}
 					}()
 					runAutoPriorityTick(interval)
