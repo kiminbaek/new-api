@@ -16,20 +16,26 @@ func SetRouter(router *gin.Engine, assets WebAssets) {
 	SetApiRouter(router)
 	SetDashboardRouter(router)
 	SetRelayRouter(router)
+	SetTaskPluginProtocolRouter(router)
 	SetVideoRouter(router)
-	RegisterModelPriorityPage(router)   // [CUSTOM] 模型优先级看板页面
+	SetTaskRouter(router)
+	pluginDispatcher := SetPluginRouter(router)
+	RegisterModelPriorityPage(router) // [CUSTOM] 模型优先级看板页面
 	frontendBaseUrl := os.Getenv("FRONTEND_BASE_URL")
 	if common.IsMasterNode && frontendBaseUrl != "" {
 		frontendBaseUrl = ""
 		common.SysLog("FRONTEND_BASE_URL is ignored on master node")
 	}
 	if frontendBaseUrl == "" {
-		SetWebRouter(router, assets)
+		SetWebRouter(router, assets, pluginDispatcher)
 	} else {
 		frontendBaseUrl = strings.TrimSuffix(frontendBaseUrl, "/")
-		router.NoRoute(func(c *gin.Context) {
-			c.Set(middleware.RouteTagKey, "web")
-			c.Redirect(http.StatusMovedPermanently, fmt.Sprintf("%s%s", frontendBaseUrl, c.Request.RequestURI))
-		})
+		router.NoRoute(
+			pluginDispatcher,
+			middleware.RouteTag("web"),
+			func(c *gin.Context) {
+				c.Redirect(http.StatusMovedPermanently, fmt.Sprintf("%s%s", frontendBaseUrl, c.Request.RequestURI))
+			},
+		)
 	}
 }
