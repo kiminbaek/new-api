@@ -5399,6 +5399,26 @@
     "Restored": "Restored",
     "Whole channel": "Whole channel",
     "Single model": "Single model",
-    "Recent success rate": "Recent success rate"
+    "Recent success rate": "Recent success rate",
+    "Base Priority": "Base Priority",
+    "Smart Routing": "Smart Routing",
+    "Quarantined": "Quarantined",
+    "Restore Auto-Disabled": "Restore Auto-Disabled",
+    "Choose live channel models instead of typing names. Missing members are marked and never deleted without confirmation.": "Choose live channel models instead of typing names. Missing members are marked and never deleted without confirmation.",
+    "Failed to load models": "Failed to load models",
+    "Fetch upstream models": "Fetch upstream models",
+    "Loaded {{count}} upstream models": "Loaded {{count}} upstream models",
+    "Manual model name, comma separated": "Manual model name, comma separated",
+    "Move down": "Move down",
+    "Move up": "Move up",
+    "No matching models": "No matching models",
+    "No model groups yet.": "No model groups yet.",
+    "Remove group": "Remove group",
+    "Remove unavailable": "Remove unavailable",
+    "Remove {{model}}": "Remove {{model}}",
+    "Search available models": "Search available models",
+    "Select a channel": "Select a channel",
+    "Unavailable members stay saved but do not route. Review before removing them.": "Unavailable members stay saved but do not route. Review before removing them.",
+    "unavailable": "unavailable"
   }
 }

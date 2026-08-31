@@ -706,6 +706,32 @@ func handlerMultiKeyUpdate(channel *Channel, usingKey string, status int, reason
 	}
 }
 
+// RestoreAutoDisabledMultiKeys clears only system-created key disables.
+// Manually disabled keys (status=2) are deliberately preserved.
+func RestoreAutoDisabledMultiKeys(channel *Channel) int {
+	if channel == nil || !channel.ChannelInfo.IsMultiKey {
+		return 0
+	}
+	restored := 0
+	for index, status := range channel.ChannelInfo.MultiKeyStatusList {
+		if status != common.ChannelStatusAutoDisabled {
+			continue
+		}
+		delete(channel.ChannelInfo.MultiKeyStatusList, index)
+		delete(channel.ChannelInfo.MultiKeyDisabledReason, index)
+		delete(channel.ChannelInfo.MultiKeyDisabledTime, index)
+		restored++
+	}
+	if restored > 0 && channel.Status == common.ChannelStatusAutoDisabled && hasEnabledMultiKey(channel.GetKeys(), channel.ChannelInfo.MultiKeyStatusList) {
+		channel.Status = common.ChannelStatusEnabled
+		info := channel.GetOtherInfo()
+		delete(info, "status_reason")
+		delete(info, "status_time")
+		channel.SetOtherInfo(info)
+	}
+	return restored
+}
+
 func hasEnabledMultiKey(keys []string, statusList map[int]int) bool {
 	for i := range keys {
 		if statusList == nil {

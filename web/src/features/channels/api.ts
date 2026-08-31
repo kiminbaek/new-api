@@ -434,6 +434,23 @@ export async function deleteMultiKey(
 /**
  * Enable all keys in multi-key channel
  */
+export async function restoreAutoDisabledMultiKeys(
+  channelId: number
+): Promise<{
+  success: boolean
+  message?: string
+  data?: { restored_count: number }
+}> {
+  return manageMultiKeys({
+    channel_id: channelId,
+    action: 'restore_auto_disabled_keys',
+  }) as Promise<{
+    success: boolean
+    message?: string
+    data?: { restored_count: number }
+  }>
+}
+
 export async function enableAllMultiKeys(
   channelId: number
 ): Promise<{ success: boolean; message?: string }> {

@@ -42,3 +42,5 @@ service/openaicompat/chat_responses_live_local_test.go
 go.work
 go.work.sum
 SMART_DISABLE_TODO.md
+
+NEWAPI_CHANNEL_UX_TODO.md

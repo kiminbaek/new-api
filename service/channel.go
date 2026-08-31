@@ -25,7 +25,13 @@ func DisableChannel(channelError types.ChannelError, reason string) {
 		return
 	}
 
-	success := model.UpdateChannelStatus(channelError.ChannelId, channelError.UsingKey, common.ChannelStatusAutoDisabled, reason)
+	usingKey := channelError.UsingKey
+	if SmartDisableEnabled() {
+		// Smart mode never persists hidden per-key disables. A channel-level
+		// decision must remain visible and recoverable through channel health.
+		usingKey = ""
+	}
+	success := model.UpdateChannelStatus(channelError.ChannelId, usingKey, common.ChannelStatusAutoDisabled, reason)
 	if success {
 		subject := fmt.Sprintf("通道「%s」（#%d）已被禁用", channelError.ChannelName, channelError.ChannelId)
 		content := fmt.Sprintf("通道「%s」（#%d）已被禁用，原因：%s", channelError.ChannelName, channelError.ChannelId, reason)
@@ -80,9 +86,6 @@ func ApplyDisablePolicy(channelError types.ChannelError, modelName string, err *
 		}
 		return disableModelOnChannel(channelError, modelName, why, err), true
 
-	case ActionDisableKey:
-		return disableKeyOnChannel(channelError, err), true
-
 	case ActionDisableChannel:
 		DisableChannel(channelError, err.ErrorWithStatusCode())
 		// 整渠道已禁：模型级记录失去意义，换成一条渠道级记录用于看板展示。
@@ -112,22 +115,6 @@ func disableModelOnChannel(channelError types.ChannelError, modelName string, wh
 		return ActionDisableChannel
 	}
 	return ActionDisableModel
-}
-
-// disableKeyOnChannel 只处置当次使用的 key；单 Key 渠道等价于整渠道。
-func disableKeyOnChannel(channelError types.ChannelError, err *types.NewAPIError) DisableAction {
-	if !channelError.IsMultiKey || channelError.UsingKey == "" {
-		DisableChannel(channelError, err.ErrorWithStatusCode())
-		return ActionDisableChannel
-	}
-	reason := fmt.Sprintf("上游判定该密钥无效：%s", common.LocalLogPreview(err.Error()))
-	if model.UpdateChannelStatus(channelError.ChannelId, channelError.UsingKey, common.ChannelStatusAutoDisabled, reason) {
-		common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用 KEY：通道「%s」（#%d）一个密钥已下线，%s", channelError.ChannelName, channelError.ChannelId, reason))
-		NotifyChannelDown(channelError.ChannelId, channelError.ChannelName, "KEY", "", "上游判定该密钥无效")
-		subject := fmt.Sprintf("通道「%s」（#%d）一个密钥已被禁用", channelError.ChannelName, channelError.ChannelId)
-		NotifyRootUser(formatNotifyType(channelError.ChannelId, common.ChannelStatusAutoDisabled), subject, subject+"，原因："+reason)
-	}
-	return ActionDisableKey
 }
 
 // allModelsDownOnChannel 判断该渠道配置的模型是否已全部处于模型级下线态。

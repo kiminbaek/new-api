@@ -1489,7 +1489,7 @@ func CopyChannel(c *gin.Context) {
 // MultiKeyManageRequest represents the request for multi-key management operations
 type MultiKeyManageRequest struct {
 	ChannelId int    `json:"channel_id"`
-	Action    string `json:"action"`              // "disable_key", "enable_key", "delete_key", "delete_disabled_keys", "get_key_status"
+	Action    string `json:"action"`              // key status and recovery actions
 	KeyIndex  *int   `json:"key_index,omitempty"` // for disable_key, enable_key, and delete_key actions
 	Page      int    `json:"page,omitempty"`      // for get_key_status pagination
 	PageSize  int    `json:"page_size,omitempty"` // for get_key_status pagination
@@ -1759,6 +1759,24 @@ func ManageMultiKeys(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"success": true,
 			"message": "密钥已启用",
+		})
+		return
+
+	case "restore_auto_disabled_keys":
+		restoredCount := model.RestoreAutoDisabledMultiKeys(channel)
+		if restoredCount == 0 {
+			c.JSON(http.StatusOK, gin.H{"success": true, "message": "没有需要恢复的自动禁用密钥", "data": gin.H{"restored_count": 0}})
+			return
+		}
+		if err = channel.Update(); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		model.InitChannelCache()
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": fmt.Sprintf("已恢复 %d 个历史自动禁用密钥，手工禁用项保持不变", restoredCount),
+			"data":    gin.H{"restored_count": restoredCount},
 		})
 		return
 
@@ -2254,18 +2272,46 @@ func OllamaVersion(c *gin.Context) {
 	})
 }
 
-// [CUSTOM] GetModelPriorityBoard 返回所有渠道×模型的有效优先级看板数据
+type modelPriorityView struct {
+	model.ModelPriorityRow
+	HealthScore   float64                  `json:"health_score"`
+	Confidence    float64                  `json:"confidence"`
+	RoutingStatus string                   `json:"routing_status"`
+	CanaryPercent int                      `json:"canary_percent"`
+	Attribution   service.FaultAttribution `json:"attribution"`
+}
+
+// [CUSTOM] GetModelPriorityBoard returns effective priority together with the
+// health decision that produced it, so the channel page is not a black box.
 func GetModelPriorityBoard(c *gin.Context) {
 	rows, err := model.GetModelPriorityBoard()
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"data":    rows,
-	})
+	down := make(map[string]service.SmartDownState)
+	for _, state := range service.ListSmartDownWithStats() {
+		down[fmt.Sprintf("%d|%s", state.ChannelId, state.Model)] = state
+	}
+	views := make([]modelPriorityView, 0, len(rows))
+	for _, row := range rows {
+		health := service.AssessRelayHealth(row.ChannelID, row.Model, time.Now())
+		view := modelPriorityView{
+			ModelPriorityRow: row,
+			HealthScore:      health.Score,
+			Confidence:       health.Confidence,
+			RoutingStatus:    health.Decision,
+		}
+		if state, exists := down[fmt.Sprintf("%d|%s", row.ChannelID, row.Model)]; exists {
+			view.Attribution = state.Attribution
+			view.CanaryPercent = state.CanaryPercent
+			if state.CanaryStage > 0 {
+				view.RoutingStatus = "canary"
+			} else {
+				view.RoutingStatus = "quarantined"
+			}
+		}
+		views = append(views, view)
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": views})
 }

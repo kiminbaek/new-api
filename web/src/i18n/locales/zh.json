@@ -5400,6 +5400,26 @@
     "Restored": "已恢复",
     "Whole channel": "整个渠道",
     "Single model": "单个模型",
-    "Recent success rate": "近期成功率"
+    "Recent success rate": "近期成功率",
+    "Base Priority": "基础优先级",
+    "Smart Routing": "智能调度",
+    "Quarantined": "已隔离",
+    "Restore Auto-Disabled": "恢复自动禁用项",
+    "Choose live channel models instead of typing names. Missing members are marked and never deleted without confirmation.": "优先从当前渠道模型中选择，不必手填名称。失效成员会被标记，未经确认绝不自动删除。",
+    "Failed to load models": "加载模型失败",
+    "Fetch upstream models": "获取上游模型",
+    "Loaded {{count}} upstream models": "已加载 {{count}} 个上游模型",
+    "Manual model name, comma separated": "手工输入模型名，多个用逗号分隔",
+    "Move down": "下移",
+    "Move up": "上移",
+    "No matching models": "没有匹配的模型",
+    "No model groups yet.": "尚未创建虚拟模型组。",
+    "Remove group": "删除分组",
+    "Remove unavailable": "移除失效成员",
+    "Remove {{model}}": "移除 {{model}}",
+    "Search available models": "搜索可用模型",
+    "Select a channel": "选择渠道",
+    "Unavailable members stay saved but do not route. Review before removing them.": "失效成员会保留在配置中，但不会参与路由；请确认后再移除。",
+    "unavailable": "失效"
   }
 }

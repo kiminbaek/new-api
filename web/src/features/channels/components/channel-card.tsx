@@ -74,6 +74,7 @@ function ChannelCardComponent({
   const actionsCell = renderCell('actions')
   const priorityCell = renderCell('priority')
   const weightCell = renderCell('weight')
+  const smartRoutingCell = renderCell('smart_routing')
   const balanceCell = renderCell('balance')
   const responseCell = renderCell('response_time')
   const testCell = renderCell('test_time')
@@ -155,6 +156,13 @@ function ChannelCardComponent({
             </div>
           </div>
         </div>
+
+        {!isTagRow && smartRoutingCell ? (
+          <div className='bg-muted/20 min-w-0 rounded-lg border p-2'>
+            <div className={cn('mb-1', labelClass)}>{t('Smart Routing')}</div>
+            {smartRoutingCell}
+          </div>
+        ) : null}
 
         {/* Last row: groups span the full width, showing every group (no label) */}
         <div className='min-w-0'>

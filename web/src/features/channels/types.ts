@@ -244,6 +244,7 @@ export type MultiKeyConfirmAction = {
     | 'enable-all'
     | 'disable-all'
     | 'delete-disabled'
+    | 'restore-auto-disabled'
   keyIndex?: number
 }
 
@@ -321,6 +322,7 @@ export interface MultiKeyManageParams {
     | 'disable_all_keys'
     | 'delete_key'
     | 'delete_disabled_keys'
+    | 'restore_auto_disabled_keys'
   key_index?: number
   page?: number
   page_size?: number

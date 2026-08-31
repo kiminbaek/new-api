@@ -10,6 +10,16 @@ export interface ModelPriorityRow {
   eff_priority: number
   delta: number
   weight: number
+  health_score: number
+  confidence: number
+  routing_status: 'observe' | 'healthy' | 'canary' | 'quarantined'
+  canary_percent: number
+  attribution?: {
+    category: string
+    confidence: number
+    action: string
+    summary: string
+  }
 }
 
 export async function getModelPriority(): Promise<ModelPriorityRow[]> {

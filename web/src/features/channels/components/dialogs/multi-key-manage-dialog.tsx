@@ -51,6 +51,7 @@ import {
   enableAllMultiKeys,
   disableAllMultiKeys,
   deleteDisabledMultiKeys,
+  restoreAutoDisabledMultiKeys,
 } from '../../api'
 import { MULTI_KEY_FILTER_OPTIONS } from '../../constants'
 import {
@@ -149,7 +150,7 @@ export function MultiKeyManageDialog({
   }
 
   const handleStatusFilterChange = (value: string) => {
-    const newFilter = value === 'all' ? null : parseInt(value)
+    const newFilter = value === 'all' ? null : Number.parseInt(value)
     setStatusFilter(newFilter)
     setCurrentPage(1)
     loadKeyStatus(1, pageSize, newFilter)
@@ -189,6 +190,8 @@ export function MultiKeyManageDialog({
         response = await disableAllMultiKeys(currentRow.id)
       } else if (type === 'delete-disabled') {
         response = await deleteDisabledMultiKeys(currentRow.id)
+      } else if (type === 'restore-auto-disabled') {
+        response = await restoreAutoDisabledMultiKeys(currentRow.id)
       }
 
       if (response?.success) {
@@ -294,12 +297,10 @@ export function MultiKeyManageDialog({
           {/* Toolbar */}
           <div className='flex shrink-0 items-center justify-between'>
             <Select
-              items={[
-                ...MULTI_KEY_FILTER_OPTIONS.map((option) => ({
-                  value: option.value,
-                  label: t(option.label),
-                })),
-              ]}
+              items={MULTI_KEY_FILTER_OPTIONS.map((option) => ({
+                value: option.value,
+                label: t(option.label),
+              }))}
               value={statusFilter === null ? 'all' : statusFilter.toString()}
               onValueChange={(v) => v !== null && handleStatusFilterChange(v)}
             >
@@ -351,6 +352,19 @@ export function MultiKeyManageDialog({
 
               {autoDisabledCount > 0 && (
                 <Button
+                  variant='outline'
+                  size='sm'
+                  onClick={() =>
+                    setConfirmAction({ type: 'restore-auto-disabled' })
+                  }
+                >
+                  <RefreshCw className='mr-2 h-4 w-4' />
+                  {t('Restore Auto-Disabled')}
+                </Button>
+              )}
+
+              {autoDisabledCount > 0 && (
+                <Button
                   variant='destructive'
                   size='sm'
                   onClick={() => {
@@ -378,6 +392,7 @@ export function MultiKeyManageDialog({
 
           {/* Table */}
           <div className='min-h-0 flex-1 overflow-auto rounded-md border'>
+            {/* eslint-disable-next-line no-nested-ternary */}
             {isLoading ? (
               <div className='flex items-center justify-center py-12'>
                 <Loader2 className='text-muted-foreground h-8 w-8 animate-spin' />

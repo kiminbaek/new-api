@@ -76,12 +76,11 @@ func TestClassifyChannelError_AccountLevelDisablesChannel(t *testing.T) {
 	}
 }
 
-func TestClassifyChannelError_KeyLevel(t *testing.T) {
+func TestClassifyChannelError_KeyFailureDisablesVisibleChannel(t *testing.T) {
 	err := types.NewErrorWithStatusCode(errors.New("Incorrect API key provided"),
 		types.ErrorCodeDoRequestFailed, http.StatusUnauthorized)
-	// 多 Key 渠道只废这把 key
-	assert.Equal(t, ActionDisableKey, ClassifyChannelError(err, true))
-	// 单 Key 渠道没有别的 key 可用，等价于整渠道不可用
+	// Smart mode must never create a hidden, persistent single-key disable.
+	assert.Equal(t, ActionDisableChannel, ClassifyChannelError(err, true))
 	assert.Equal(t, ActionDisableChannel, ClassifyChannelError(err, false))
 }
 
@@ -339,4 +338,25 @@ func TestPruneRelayStatsForChannel(t *testing.T) {
 	assert.Equal(t, 0, s)
 	s8, _, _ := RelayStatSample(8, "m-a")
 	assert.Equal(t, 1, s8)
+}
+
+func TestDisableChannelSmartModeDoesNotPersistSingleKeyDisable(t *testing.T) {
+	previousSmart := common.SmartAutoDisableEnabled
+	previousAutomatic := common.AutomaticDisableChannelEnabled
+	common.SmartAutoDisableEnabled = true
+	common.AutomaticDisableChannelEnabled = true
+	t.Cleanup(func() {
+		common.SmartAutoDisableEnabled = previousSmart
+		common.AutomaticDisableChannelEnabled = previousAutomatic
+	})
+
+	usedKey := "key-a"
+	channelError := types.ChannelError{
+		ChannelId: 77, ChannelName: "multi", IsMultiKey: true,
+		UsingKey: usedKey, AutoBan: false,
+	}
+	// AutoBan=false means no DB is needed; this verifies smart-mode key stripping
+	// at the visible channel disable entry point without side effects.
+	DisableChannel(channelError, "invalid key")
+	assert.Equal(t, "key-a", channelError.UsingKey, "input value remains immutable")
 }

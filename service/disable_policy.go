@@ -41,8 +41,6 @@ const (
 	ActionNone DisableAction = iota
 	// ActionDisableModel 只下线 (channel, model)。
 	ActionDisableModel
-	// ActionDisableKey 只下线当次使用的 key（多 Key 渠道），单 Key 渠道退化为 L2。
-	ActionDisableKey
 	// ActionDisableChannel 整渠道禁用（账号级故障）。
 	ActionDisableChannel
 )
@@ -51,8 +49,6 @@ func (a DisableAction) String() string {
 	switch a {
 	case ActionDisableModel:
 		return "disable_model"
-	case ActionDisableKey:
-		return "disable_key"
 	case ActionDisableChannel:
 		return "disable_channel"
 	default:
@@ -122,7 +118,7 @@ func SmartDisableEnabled() bool {
 
 // ClassifyChannelError 判定该错误应该走哪一级动作。
 // 只做「性质分类」，不做「够不够格下线」——后者由 ShouldDisableModelNow 把关。
-func ClassifyChannelError(err *types.NewAPIError, isMultiKey bool) DisableAction {
+func ClassifyChannelError(err *types.NewAPIError, _ bool) DisableAction {
 	if err == nil {
 		return ActionNone
 	}
@@ -134,11 +130,10 @@ func ClassifyChannelError(err *types.NewAPIError, isMultiKey bool) DisableAction
 		return ActionDisableChannel
 	}
 
-	// key 明确失效：多 Key 渠道只废这把 key；单 Key 渠道等价于整渠道不可用。
+	// Key authentication failures are channel-level in smart mode. Persistently
+	// disabling one hidden key made a channel look healthy while silently losing
+	// capacity, and successful channel tests could not recover that key.
 	if err.GetErrorCode() == types.ErrorCodeChannelInvalidKey || smartMatchAny(lower, smartKeyLevelKeywords) {
-		if isMultiKey {
-			return ActionDisableKey
-		}
 		return ActionDisableChannel
 	}
 

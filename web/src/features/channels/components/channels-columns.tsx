@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 /* eslint-disable react-refresh/only-export-components */
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ColumnDef } from '@tanstack/react-table'
 import {
   AlertTriangle,
@@ -26,6 +26,7 @@ import {
   ListOrdered,
   Shuffle,
   SlidersHorizontal,
+  Activity,
 } from 'lucide-react'
 import { useState, useMemo, useContext, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -38,6 +39,7 @@ import { ProviderBadge } from '@/components/provider-badge'
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
 import { TableId } from '@/components/table-id'
 import { TruncatedText } from '@/components/truncated-text'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
@@ -46,6 +48,10 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import {
+  getModelPriority,
+  type ModelPriorityRow,
+} from '@/features/model-priority/api'
 import { toIntlLocale } from '@/i18n/languages'
 import {
   formatCurrencyFromUSD,
@@ -167,6 +173,75 @@ function UpstreamUpdateTags({ channel }: { channel: Channel }) {
         />
       )}
     </div>
+  )
+}
+
+function SmartRoutingCell({
+  channel,
+  rows,
+}: {
+  channel: Channel
+  rows: ModelPriorityRow[]
+}) {
+  const { t } = useTranslation()
+  if (isTagAggregateRow(channel)) return null
+  const channelRows = rows
+  if (channelRows.length === 0) {
+    return <span className='text-muted-foreground text-xs'>{t('No data')}</span>
+  }
+  const down = channelRows.filter((row) => row.delta < 0).length
+  const up = channelRows.filter((row) => row.delta > 0).length
+  const isolated = channelRows.filter(
+    (row) => row.routing_status === 'quarantined'
+  ).length
+  const canary = channelRows.filter((row) => row.routing_status === 'canary')
+  const priorities = channelRows.map((row) => row.eff_priority)
+  const min = Math.min(...priorities)
+  const max = Math.max(...priorities)
+  const label = min === max ? String(min) : `${min}–${max}`
+  const detail = channelRows
+    .map(
+      (row) =>
+        `${row.model}: ${row.base_priority}→${row.eff_priority}, ${Math.round(row.health_score)}/100${row.routing_status === 'canary' ? `, Canary ${row.canary_percent}%` : ''}`
+    )
+    .join('\n')
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <button
+            type='button'
+            className='hover:bg-muted flex min-w-32 flex-col gap-1 rounded-md px-2 py-1 text-left'
+          />
+        }
+      >
+        <span className='flex items-center gap-1 text-sm font-semibold tabular-nums'>
+          <Activity className='size-3.5 text-blue-500' />
+          {label}
+        </span>
+        <span className='flex flex-wrap gap-1 text-[11px]'>
+          {down > 0 ? <Badge variant='destructive'>↓{down}</Badge> : null}
+          {up > 0 ? <Badge variant='secondary'>↑{up}</Badge> : null}
+          {isolated > 0 ? (
+            <Badge variant='destructive'>
+              {t('Quarantined')} {isolated}
+            </Badge>
+          ) : null}
+          {canary.length > 0 ? (
+            <Badge variant='outline'>Canary {canary.length}</Badge>
+          ) : null}
+          {down + up + isolated + canary.length === 0 ? (
+            <span className='text-muted-foreground'>
+              {channelRows.length} {t('models')}
+            </span>
+          ) : null}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className='max-w-md font-mono text-xs whitespace-pre-line'>
+        {detail}
+      </TooltipContent>
+    </Tooltip>
   )
 }
 
@@ -593,6 +668,20 @@ export function useChannelsColumns(
   const { sensitiveVisible } = useChannels()
   const enableSelection = options.enableSelection ?? true
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
+  const { data: priorityRows = [] } = useQuery({
+    queryKey: ['model-priority'],
+    queryFn: getModelPriority,
+    refetchInterval: 30_000,
+  })
+  const priorityRowsByChannel = useMemo(() => {
+    const grouped = new Map<number, ModelPriorityRow[]>()
+    for (const row of priorityRows) {
+      const channelRows = grouped.get(row.channel_id)
+      if (channelRows) channelRows.push(row)
+      else grouped.set(row.channel_id, [row])
+    }
+    return grouped
+  }, [priorityRows])
   // The column definitions only depend on the translation function, the active
   // locale, and sensitive-data visibility. Memoizing keeps the array (and every
   // cell renderer reference) stable across unrelated re-renders, so react-table
@@ -1113,10 +1202,24 @@ export function useChannelsColumns(
       // Priority column
       {
         accessorKey: 'priority',
-        header: t('Priority'),
+        header: t('Base Priority'),
         meta: { mobileHidden: true },
         cell: ({ row }) => <PriorityCell channel={row.original} />,
-        size: 100,
+        size: 110,
+      },
+
+      {
+        id: 'smart_routing',
+        header: t('Smart Routing'),
+        meta: { mobileHidden: false },
+        cell: ({ row }) => (
+          <SmartRoutingCell
+            channel={row.original}
+            rows={priorityRowsByChannel.get(row.original.id) || []}
+          />
+        ),
+        size: 170,
+        enableSorting: false,
       },
 
       // Weight column
@@ -1225,6 +1328,6 @@ export function useChannelsColumns(
         meta: { pinned: 'right' as const },
       },
     ],
-    [enableSelection, t, locale, sensitiveVisible]
+    [enableSelection, t, locale, priorityRowsByChannel, sensitiveVisible]
   )
 }

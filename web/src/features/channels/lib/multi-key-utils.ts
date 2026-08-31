@@ -55,6 +55,8 @@ export function getMultiKeyConfirmMessage(
       return MULTI_KEY_CONFIRM_MESSAGES.DISABLE_ALL
     case 'delete-disabled':
       return MULTI_KEY_CONFIRM_MESSAGES.DELETE_DISABLED
+    case 'restore-auto-disabled':
+      return MULTI_KEY_CONFIRM_MESSAGES.RESTORE_AUTO_DISABLED
     default:
       return ''
   }
