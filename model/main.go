@@ -302,6 +302,9 @@ func is64BitIntegerType(dbType common.DatabaseType, dataType string) bool {
 }
 
 func migrateDB() error {
+	if err := migrateTokenKeyUniqueness(DB); err != nil {
+		return err
+	}
 	if err := migratePrefillGroupUniqueness(DB); err != nil {
 		return err
 	}
