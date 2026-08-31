@@ -10,9 +10,9 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"runtime/debug"
 	"sync"
 	"time"
-	"runtime/debug"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -96,12 +96,24 @@ func InitAutoPriorityScheduler() {
 
 func runAutoPriorityTick(interval time.Duration) {
 	byModel := map[string][]apEntry{}
+	now := time.Now()
 	ForEachRelayStat(func(chId int, mdl string, samples, succ int) {
 		if samples < common.AutoPriorityMinSamples {
 			return
 		}
 		byModel[mdl] = append(byModel[mdl], apEntry{ChId: chId, Samples: samples, Succ: succ})
 	})
+	// Calculate decayed health after ForEachRelayStat releases its read lock.
+	// Re-entering the same RWMutex while a writer waits can deadlock.
+	for mdl, entries := range byModel {
+		for i := range entries {
+			health := AssessRelayHealth(entries[i].ChId, mdl, now)
+			entries[i].Health = health.Score / 100
+			entries[i].EffectiveSamples = math.Max(1, health.EffectiveCount)
+			entries[i].Confidence = health.Confidence
+		}
+		byModel[mdl] = entries
+	}
 
 	chanCache := map[int]*model.Channel{}
 	getCh := func(id int) *model.Channel {
@@ -204,7 +216,10 @@ func restoreAutoPriority() {
 }
 
 type apEntry struct {
-	ChId    int
-	Samples int
-	Succ    int
+	ChId             int
+	Samples          int
+	Succ             int
+	Health           float64
+	EffectiveSamples float64
+	Confidence       float64
 }

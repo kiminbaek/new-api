@@ -69,9 +69,6 @@ const (
 	smartMinFailStreak = 3
 	// smartMinSamples 成功率判定所需最小样本量，样本不足只降权不下线。
 	smartMinSamples = 20
-	// smartBadSuccessRate 成功率低于该值 + 连续失败达标 → 下线。
-	smartBadSuccessRate = 0.2
-
 	// 探测退避：首次 1 分钟，每次失败翻倍，30 分钟封顶。
 	smartProbeBaseInterval = time.Minute
 	smartProbeMaxInterval  = 30 * time.Minute
@@ -199,7 +196,7 @@ func smartMatchAny(lowerMsg string, keywords []string) bool {
 // 不够格 → 什么都不做，交给 auto_priority 降权（L0）自然分流。
 func ShouldDisableModelNow(chId int, mdl string) (bool, string) {
 	streak := RelayConsecutiveFailures(chId, mdl)
-	samples, succ, _ := RelayStatSample(chId, mdl)
+	samples, _, _ := RelayStatSample(chId, mdl)
 
 	if streak >= smartHardFailStreak {
 		return true, fmt.Sprintf("连续失败 %d 次", streak)
@@ -211,9 +208,9 @@ func ShouldDisableModelNow(chId int, mdl string) (bool, string) {
 		// 样本不足不下结论，先降权观察。
 		return false, ""
 	}
-	rate := float64(succ) / float64(samples)
-	if rate < smartBadSuccessRate {
-		return true, fmt.Sprintf("近 %d 次成功率 %.0f%%，连续失败 %d 次", samples, rate*100, streak)
+	health := AssessRelayHealth(chId, mdl, time.Now())
+	if health.Score <= healthDisableScore && health.Confidence >= 0.55 {
+		return true, fmt.Sprintf("衰减成功率 %.0f%%、健康分 %.0f/100（置信度 %.0f%%），连续失败 %d 次", health.WeightedRate*100, health.Score, health.Confidence*100, streak)
 	}
 	return false, ""
 }
@@ -256,7 +253,7 @@ func checkModelMissing(channelError types.ChannelError, modelName string, err *t
 	ResetModelMissing(channelError.ChannelId, modelName)
 	if !IsSmartDown(channelError.ChannelId, modelName) {
 		reason := fmt.Sprintf("疑似下架：连续 %d 次 404，已临时下线等待探测确认", streak)
-		RegisterSmartDown(channelError.ChannelId, channelError.ChannelName, modelName, SmartDownModel, reason)
+		RegisterSmartDownAttributed(channelError.ChannelId, channelError.ChannelName, modelName, SmartDownModel, reason, AttributeChannelError(err))
 		NotifyModelMissing(channelError.ChannelId, channelError.ChannelName, modelName, streak)
 		common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用 MISSING：通道「%s」（#%d）模型 %s %s",
 			channelError.ChannelName, channelError.ChannelId, modelName, reason))
@@ -291,8 +288,16 @@ type SmartDownState struct {
 	ProbeStartedAt int64 `json:"probe_started_at,omitempty"`
 
 	// RecentSamples/RecentSucc 看板展示用：下线决策依据的近期滚动统计快照。
-	RecentSamples int `json:"recent_samples,omitempty"`
-	RecentSucc    int `json:"recent_succ,omitempty"`
+	RecentSamples int              `json:"recent_samples,omitempty"`
+	RecentSucc    int              `json:"recent_succ,omitempty"`
+	HealthScore   float64          `json:"health_score"`
+	Confidence    float64          `json:"confidence"`
+	Attribution   FaultAttribution `json:"attribution"`
+	CanaryStage   int              `json:"canary_stage"`
+	CanaryPercent int              `json:"canary_percent"`
+	CanarySuccess int              `json:"canary_success"`
+	CanaryFailure int              `json:"canary_failure"`
+	CanarySeen    uint64           `json:"-"`
 }
 
 var (
@@ -306,6 +311,10 @@ func smartDownKey(chId int, mdl string) string {
 
 // RegisterSmartDown 登记一条下线记录并安排首次探测。重复登记不重置退避进度。
 func RegisterSmartDown(chId int, chName string, mdl string, level SmartDownLevel, reason string) {
+	RegisterSmartDownAttributed(chId, chName, mdl, level, reason, FaultAttribution{Category: "unknown", Action: "observe", Summary: "等待更多故障信息"})
+}
+
+func RegisterSmartDownAttributed(chId int, chName string, mdl string, level SmartDownLevel, reason string, attribution FaultAttribution) {
 	key := smartDownKey(chId, mdl)
 	now := time.Now()
 	smartDownMu.Lock()
@@ -313,6 +322,7 @@ func RegisterSmartDown(chId int, chName string, mdl string, level SmartDownLevel
 	if st, ok := smartDown[key]; ok {
 		st.Reason = reason
 		st.Level = level
+		st.Attribution = attribution
 		if chName != "" {
 			st.ChannelName = chName
 		}
@@ -327,6 +337,7 @@ func RegisterSmartDown(chId int, chName string, mdl string, level SmartDownLevel
 		DisabledAt:  now.Unix(),
 		NextProbeAt: now.Add(smartProbeBaseInterval).Unix(),
 		Attempts:    0,
+		Attribution: attribution,
 	}
 }
 
@@ -355,7 +366,7 @@ func InitSmartDisable() {
 		if !SmartDisableEnabled() {
 			return false
 		}
-		return IsSmartDown(channelId, mdl)
+		return SmartRouteBlocked(channelId, mdl)
 	}
 	common.SysLog("[CUSTOM] smart auto-disable filter hook installed")
 }
@@ -435,32 +446,49 @@ const (
 // 但超过 smartProbeStaleSeconds 的在途项会被视为陈旧重新认领，不会永久卡死。
 // 返回按 NextProbeAt 升序（最饿的先探测）。
 func DueSmartProbes(limit int) []SmartDownState {
-	now := time.Now().Unix()
-	out := make([]SmartDownState, 0, limit)
+	now := time.Now()
+	nowUnix := now.Unix()
+	candidates := make([]SmartDownState, 0)
 	smartDownMu.Lock()
 	for _, st := range smartDown {
-		stale := st.Probing && now-st.ProbeStartedAt >= smartProbeStaleSeconds
-		if !stale {
-			// 在途未超时：跳过
-			if st.Probing {
-				continue
-			}
-			// 未到期：跳过
-			if st.NextProbeAt > now {
-				continue
-			}
+		if st.CanaryStage > 0 {
+			continue
 		}
-		// 陈旧在途项直接重新认领（它当初被认领时已经赢得过探测资格），
-		// 不受 NextProbeAt 影响——否则永远轮不到它。
+		stale := st.Probing && nowUnix-st.ProbeStartedAt >= smartProbeStaleSeconds
+		if !stale && (st.Probing || st.NextProbeAt > nowUnix) {
+			continue
+		}
+		health := AssessRelayHealth(st.ChannelId, st.Model, now)
+		st.HealthScore = health.Score
+		st.Confidence = health.Confidence
+		candidates = append(candidates, *st)
+	}
+	if limit <= 0 {
+		limit = AdaptiveProbeBudget(candidates, now)
+	}
+	if limit > len(candidates) {
+		limit = len(candidates)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		pi := probePriority(candidates[i], now)
+		pj := probePriority(candidates[j], now)
+		if pi == pj {
+			return candidates[i].NextProbeAt < candidates[j].NextProbeAt
+		}
+		return pi > pj
+	})
+	out := make([]SmartDownState, 0, limit)
+	for i := 0; i < limit; i++ {
+		candidate := candidates[i]
+		st := smartDown[smartDownKey(candidate.ChannelId, candidate.Model)]
+		if st == nil || st.CanaryStage > 0 {
+			continue
+		}
 		st.Probing = true
-		st.ProbeStartedAt = now
+		st.ProbeStartedAt = nowUnix
 		out = append(out, *st)
-		if limit > 0 && len(out) >= limit {
-			break
-		}
 	}
 	smartDownMu.Unlock()
-	sort.Slice(out, func(i, j int) bool { return out[i].NextProbeAt < out[j].NextProbeAt })
 	return out
 }
 
@@ -475,12 +503,24 @@ func FinishSmartProbe(chId int, mdl string, ok bool, errMsg string) (channelFull
 		return false
 	}
 	if ok {
-		delete(smartDown, key)
-		// L2 quarantine registers every configured model. Re-enable the DB channel
-		// only after the final model has passed a real probe; one lucky model must
-		// never release still-unverified siblings back into routing.
+		if st.Level == SmartDownChannel || st.Model == "" {
+			delete(smartDown, key)
+			return true
+		}
+		// A successful synthetic probe starts controlled real-traffic recovery;
+		// it does not prove production traffic is healthy yet.
+		st.Probing = false
+		st.ProbeStartedAt = 0
+		st.LastError = ""
+		st.CanaryStage = 1
+		st.CanaryPercent = canaryPercents[1]
+		st.CanarySuccess = 0
+		st.CanaryFailure = 0
+		st.NextProbeAt = 0
+		// Once every model on an L2 channel has reached at least stage 1, the DB
+		// channel may reopen. Per-model canary gates still control real traffic.
 		for _, other := range smartDown {
-			if other.ChannelId == chId && other.Level == SmartDownModel {
+			if other.ChannelId == chId && other.Level == SmartDownModel && other.CanaryStage == 0 {
 				return false
 			}
 		}
@@ -530,8 +570,81 @@ func IsSmartDown(chId int, mdl string) bool {
 	}
 	smartDownMu.RLock()
 	defer smartDownMu.RUnlock()
-	_, ok := smartDown[smartDownKey(chId, mdl)]
-	return ok
+	st, ok := smartDown[smartDownKey(chId, mdl)]
+	return ok && st.CanaryStage == 0
+}
+
+// SmartRouteBlocked returns whether this candidate is blocked. Quarantined
+// entries are always blocked; canary entries are admitted by a stable window.
+func SmartRouteBlocked(chId int, mdl string) bool {
+	smartDownMu.Lock()
+	defer smartDownMu.Unlock()
+	st, ok := smartDown[smartDownKey(chId, mdl)]
+	if !ok {
+		return false
+	}
+	if st.CanaryStage == 0 || st.CanaryPercent <= 0 {
+		return true
+	}
+	st.CanarySeen++
+	return !canaryAllows(st.CanaryPercent, chId, mdl, st.CanarySeen)
+}
+
+type CanaryTransition struct {
+	Active      bool
+	Promoted    bool
+	Recovered   bool
+	RolledBack  bool
+	Stage       int
+	Percent     int
+	DisabledAt  int64
+	Attempts    int
+	HealthScore float64
+}
+
+func RecordSmartCanaryOutcome(chId int, mdl string, ok bool) CanaryTransition {
+	smartDownMu.Lock()
+	defer smartDownMu.Unlock()
+	key := smartDownKey(chId, mdl)
+	st, exists := smartDown[key]
+	if !exists || st.CanaryStage == 0 {
+		return CanaryTransition{}
+	}
+	transition := CanaryTransition{Active: true, Stage: st.CanaryStage, Percent: st.CanaryPercent, DisabledAt: st.DisabledAt, Attempts: st.Attempts}
+	if !ok {
+		st.CanaryStage = 0
+		st.CanaryPercent = 0
+		st.CanarySuccess = 0
+		st.CanaryFailure++
+		st.Attempts++
+		st.LastError = "金丝雀真实流量失败，已退回隔离"
+		st.NextProbeAt = time.Now().Add(smartProbeBaseInterval).Unix()
+		transition.RolledBack = true
+		transition.Stage = 0
+		transition.Percent = 0
+		return transition
+	}
+	st.CanarySuccess++
+	health := AssessRelayHealth(chId, mdl, time.Now())
+	st.HealthScore = health.Score
+	st.Confidence = health.Confidence
+	transition.HealthScore = health.Score
+	target := canarySuccessTargets[st.CanaryStage]
+	// Hysteresis: disable at <=28, but promotion requires >=72. A few lucky
+	// requests cannot immediately erase a sustained bad history.
+	if target > 0 && st.CanarySuccess >= target && health.Score >= healthRecoverScore && health.Confidence >= 0.35 {
+		st.CanaryStage++
+		st.CanarySuccess = 0
+		st.CanaryPercent = canaryPercents[st.CanaryStage]
+		transition.Promoted = true
+		transition.Stage = st.CanaryStage
+		transition.Percent = st.CanaryPercent
+	}
+	if st.CanaryPercent >= 100 {
+		delete(smartDown, key)
+		transition.Recovered = true
+	}
+	return transition
 }
 
 // smartDownLen 无锁近似：仅用于空表快路径判断（0 或非 0 都安全）。
@@ -575,7 +688,7 @@ func quarantineWholeChannel(channelError types.ChannelError, streak int, err *ty
 		}
 		// 已在下线态的模型不重置退避进度，只补齐漏网的
 		if !IsSmartDown(channelError.ChannelId, m) {
-			RegisterSmartDown(channelError.ChannelId, channelError.ChannelName, m, SmartDownModel, reason)
+			RegisterSmartDownAttributed(channelError.ChannelId, channelError.ChannelName, m, SmartDownModel, reason, AttributeChannelError(err))
 		}
 		last = m
 	}
@@ -596,6 +709,9 @@ func ListSmartDownWithStats() []SmartDownState {
 		samples, succ, _ := RelayStatSample(out[i].ChannelId, out[i].Model)
 		out[i].RecentSamples = samples
 		out[i].RecentSucc = succ
+		health := AssessRelayHealth(out[i].ChannelId, out[i].Model, time.Now())
+		out[i].HealthScore = health.Score
+		out[i].Confidence = health.Confidence
 	}
 	return out
 }

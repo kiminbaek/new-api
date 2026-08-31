@@ -15,8 +15,12 @@ import (
 )
 
 type smartDisableStatusResponse struct {
-	Enabled bool                     `json:"enabled"`
-	Items   []service.SmartDownState `json:"items"`
+	Enabled        bool                     `json:"enabled"`
+	Items          []service.SmartDownState `json:"items"`
+	ProbeBudget    int                      `json:"probe_budget"`
+	DisableScore   float64                  `json:"disable_score"`
+	RecoveryScore  float64                  `json:"recovery_score"`
+	DecayHalfLifeH int                      `json:"decay_half_life_hours"`
 }
 
 // GetSmartDisableStatus GET /api/channel/smart_disable/status

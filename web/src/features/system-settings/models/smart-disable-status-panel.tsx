@@ -47,6 +47,18 @@ type SmartDownItem = {
   probing: boolean
   recent_samples?: number
   recent_succ?: number
+  health_score: number
+  confidence: number
+  attribution: {
+    category: string
+    confidence: number
+    action: string
+    summary: string
+  }
+  canary_stage: number
+  canary_percent: number
+  canary_success: number
+  canary_failure: number
 }
 
 function formatRate(item: SmartDownItem): string {
@@ -60,9 +72,23 @@ function formatRate(item: SmartDownItem): string {
 type SmartDisableStatus = {
   enabled: boolean
   items: SmartDownItem[]
+  probe_budget: number
+  disable_score: number
+  recovery_score: number
+  decay_half_life_hours: number
 }
 
 const REFRESH_INTERVAL_MS = 15000
+
+function recoveryStatus(
+  item: SmartDownItem,
+  now: number,
+  t: (key: string) => string
+): string {
+  if (item.canary_stage > 0) return t('Real traffic verification')
+  if (item.probing) return t('Probing...')
+  return formatCountdown(item.next_probe_at, now)
+}
 
 function formatCountdown(target: number, now: number): string {
   const diff = target - now
@@ -133,15 +159,54 @@ export function SmartDisableStatusPanel() {
         </p>
       </div>
 
+      {status ? (
+        <div className='grid grid-cols-2 gap-3 lg:grid-cols-4'>
+          <div className='rounded-xl border p-3'>
+            <div className='text-muted-foreground text-xs'>
+              {t('Active incidents')}
+            </div>
+            <div className='mt-1 text-2xl font-semibold'>{items.length}</div>
+          </div>
+          <div className='rounded-xl border p-3'>
+            <div className='text-muted-foreground text-xs'>
+              {t('Adaptive probe budget')}
+            </div>
+            <div className='mt-1 text-2xl font-semibold'>
+              {status.probe_budget}
+            </div>
+          </div>
+          <div className='rounded-xl border p-3'>
+            <div className='text-muted-foreground text-xs'>
+              {t('Hysteresis thresholds')}
+            </div>
+            <div className='mt-1 font-semibold'>
+              {status.disable_score} → {status.recovery_score}
+            </div>
+          </div>
+          <div className='rounded-xl border p-3'>
+            <div className='text-muted-foreground text-xs'>
+              {t('Decay half-life')}
+            </div>
+            <div className='mt-1 font-semibold'>
+              {status.decay_half_life_hours}h
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {status && !status.enabled ? (
         <p className='text-muted-foreground text-sm'>
           {t('Smart auto-disable is currently off.')}
         </p>
-      ) : items.length === 0 ? (
+      ) : null}
+      {(!status || status.enabled) && items.length === 0 ? (
         <p className='text-muted-foreground text-sm'>
-          {loading ? t('Loading...') : t('All channels and models are healthy.')}
+          {loading
+            ? t('Loading...')
+            : t('All channels and models are healthy.')}
         </p>
-      ) : (
+      ) : null}
+      {(!status || status.enabled) && items.length > 0 ? (
         <div className='min-w-0 overflow-x-auto'>
           <Table>
             <TableHeader>
@@ -150,7 +215,9 @@ export function SmartDisableStatusPanel() {
                 <TableHead>{t('Model')}</TableHead>
                 <TableHead>{t('Scope')}</TableHead>
                 <TableHead>{t('Reason')}</TableHead>
-                <TableHead>{t('Recent success rate')}</TableHead>
+                <TableHead>{t('Health / confidence')}</TableHead>
+                <TableHead>{t('Attribution')}</TableHead>
+                <TableHead>{t('Recovery stage')}</TableHead>
                 <TableHead>{t('Next probe')}</TableHead>
                 <TableHead>{t('Probes')}</TableHead>
                 <TableHead />
@@ -181,12 +248,32 @@ export function SmartDisableStatusPanel() {
                   <TableCell className='max-w-[20rem] truncate'>
                     {item.reason}
                   </TableCell>
-                  <TableCell>{formatRate(item)}</TableCell>
                   <TableCell>
-                    {item.probing
-                      ? t('Probing...')
-                      : formatCountdown(item.next_probe_at, now)}
+                    <div className='font-medium'>
+                      {Math.round(item.health_score)} / 100
+                    </div>
+                    <div className='text-muted-foreground text-xs'>
+                      {Math.round(item.confidence * 100)}% · {formatRate(item)}
+                    </div>
                   </TableCell>
+                  <TableCell className='max-w-[14rem]'>
+                    <Badge variant='outline'>
+                      {item.attribution?.category || 'unknown'}
+                    </Badge>
+                    <div className='text-muted-foreground mt-1 truncate text-xs'>
+                      {item.attribution?.summary || item.reason}
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    {item.canary_stage > 0 ? (
+                      <Badge variant='secondary'>
+                        Canary {item.canary_percent}%
+                      </Badge>
+                    ) : (
+                      <Badge variant='destructive'>{t('Quarantined')}</Badge>
+                    )}
+                  </TableCell>
+                  <TableCell>{recoveryStatus(item, now, t)}</TableCell>
                   <TableCell>{item.attempts}</TableCell>
                   <TableCell>
                     <Button
@@ -202,7 +289,7 @@ export function SmartDisableStatusPanel() {
             </TableBody>
           </Table>
         </div>
-      )}
+      ) : null}
     </div>
   )
 }

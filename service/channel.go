@@ -87,7 +87,7 @@ func ApplyDisablePolicy(channelError types.ChannelError, modelName string, err *
 		DisableChannel(channelError, err.ErrorWithStatusCode())
 		// 整渠道已禁：模型级记录失去意义，换成一条渠道级记录用于看板展示。
 		ClearSmartDownByChannel(channelError.ChannelId)
-		RegisterSmartDown(channelError.ChannelId, channelError.ChannelName, "", SmartDownChannel, common.LocalLogPreview(err.Error()))
+		RegisterSmartDownAttributed(channelError.ChannelId, channelError.ChannelName, "", SmartDownChannel, common.LocalLogPreview(err.Error()), AttributeChannelError(err))
 		return ActionDisableChannel, true
 	}
 	return ActionNone, true
@@ -101,7 +101,7 @@ func disableModelOnChannel(channelError types.ChannelError, modelName string, wh
 		return ActionNone
 	}
 	reason := fmt.Sprintf("%s；最后错误：%s", why, common.LocalLogPreview(err.Error()))
-	RegisterSmartDown(channelError.ChannelId, channelError.ChannelName, modelName, SmartDownModel, reason)
+	RegisterSmartDownAttributed(channelError.ChannelId, channelError.ChannelName, modelName, SmartDownModel, reason, AttributeChannelError(err))
 	NotifyChannelDown(channelError.ChannelId, channelError.ChannelName, "L1", modelName, why)
 	common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用 L1：通道「%s」（#%d）模型 %s 已下线，%s", channelError.ChannelName, channelError.ChannelId, modelName, reason))
 

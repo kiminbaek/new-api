@@ -7,14 +7,15 @@ import (
 	"encoding/json"
 	"os"
 	"os/signal"
-	"syscall"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"github.com/bytedance/gopkg/util/gopool"
+	"syscall"
 	"time"
+
+	"github.com/bytedance/gopkg/util/gopool"
 )
 
 const relayStatWindowSize = 128
@@ -26,9 +27,10 @@ const (
 )
 
 type statRing struct {
-	buf [relayStatWindowSize]int8 // 1=success, 0=failure
-	n   int                       // 已写入数
-	idx int                       // 下一个写位置
+	buf [relayStatWindowSize]int8  // 1=success, 0=failure
+	ts  [relayStatWindowSize]int64 // observation Unix time for decay weighting
+	n   int                        // 已写入数
+	idx int                        // 下一个写位置
 }
 
 var (
@@ -65,6 +67,7 @@ func recordRelayOutcome(chId int, model string, ok int8) {
 		statStore[k] = r
 	}
 	r.buf[r.idx] = ok
+	r.ts[r.idx] = time.Now().Unix()
 	r.idx = (r.idx + 1) % relayStatWindowSize
 	if r.n < relayStatWindowSize {
 		r.n++
@@ -143,6 +146,27 @@ func RelayStatSample(chId int, model string) (samples, succ, fail int) {
 		}
 	}
 	return r.n, succ, fail
+}
+
+func relayStatChronological(chId int, model string) ([]int8, []int64) {
+	statMu.RLock()
+	defer statMu.RUnlock()
+	r := statStore[relayStatKey(chId, model)]
+	if r == nil || r.n == 0 {
+		return nil, nil
+	}
+	outcomes := make([]int8, 0, r.n)
+	timestamps := make([]int64, 0, r.n)
+	start := 0
+	if r.n == relayStatWindowSize {
+		start = r.idx
+	}
+	for i := 0; i < r.n; i++ {
+		pos := (start + i) % relayStatWindowSize
+		outcomes = append(outcomes, r.buf[pos])
+		timestamps = append(timestamps, r.ts[pos])
+	}
+	return outcomes, timestamps
 }
 
 // ModelSuccessSummary 模型级实时成功率聚合（跨渠道汇总滚动窗口）。
@@ -241,9 +265,10 @@ func ForEachRelayStat(fn func(chId int, model string, samples, succ int)) {
 // ==================== [CUSTOM] 统计持久化：定期落盘 + 启动恢复 ====================
 
 type statPersistEntry struct {
-	Buf []int8 `json:"buf"`
-	N   int    `json:"n"`
-	Idx int    `json:"idx"`
+	Buf []int8  `json:"buf"`
+	Ts  []int64 `json:"ts,omitempty"`
+	N   int     `json:"n"`
+	Idx int     `json:"idx"`
 }
 
 func statPersistPath() string {
@@ -284,6 +309,15 @@ func restoreRelayStats() {
 		}
 		r := &statRing{n: e.N, idx: e.Idx}
 		copy(r.buf[:], e.Buf)
+		copy(r.ts[:], e.Ts)
+		// Legacy snapshots had no timestamps. Stamp only populated slots at
+		// migration time so they decay normally instead of staying fresh forever.
+		if len(e.Ts) == 0 {
+			now := time.Now().Unix()
+			for i := 0; i < r.n; i++ {
+				r.ts[i] = now
+			}
+		}
 		statStore[k] = r
 	}
 	statMu.Unlock()
@@ -296,7 +330,9 @@ func saveRelayStatsSnapshot() {
 	for k, r := range statStore {
 		e := statPersistEntry{N: r.n, Idx: r.idx}
 		e.Buf = make([]int8, relayStatWindowSize)
+		e.Ts = make([]int64, relayStatWindowSize)
 		copy(e.Buf, r.buf[:])
+		copy(e.Ts, r.ts[:])
 		snapshot[k] = e
 	}
 	statMu.RUnlock()

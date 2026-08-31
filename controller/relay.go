@@ -272,6 +272,13 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		if newAPIError == nil {
 			service.RecordRelaySuccess(channel.Id, relayInfo.OriginModelName) // [CUSTOM] 需求4
+			transition := service.RecordSmartCanaryOutcome(channel.Id, relayInfo.OriginModelName, true)
+			if transition.Recovered {
+				service.NotifyChannelRecovered(channel.Id, channel.Name, "L1", relayInfo.OriginModelName, time.Unix(transition.DisabledAt, 0), transition.Attempts)
+				common.SysLog(fmt.Sprintf("[CUSTOM] 金丝雀恢复完成：通道「%s」（#%d）模型 %s 已恢复 100%% 流量", channel.Name, channel.Id, relayInfo.OriginModelName))
+			} else if transition.Promoted {
+				common.SysLog(fmt.Sprintf("[CUSTOM] 金丝雀升阶：通道「%s」（#%d）模型 %s → %d%%（健康分 %.0f）", channel.Name, channel.Id, relayInfo.OriginModelName, transition.Percent, transition.HealthScore))
+			}
 			relayInfo.LastError = nil
 			return
 		}
@@ -281,6 +288,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		// [CUSTOM] 需求2/4: 失败记账；配置 fail_threshold 且未达阈值时压制本次自动禁用
 		service.RecordRelayFailure(channel.Id, relayInfo.OriginModelName)
+		transition := service.RecordSmartCanaryOutcome(channel.Id, relayInfo.OriginModelName, false)
+		if transition.RolledBack {
+			common.SysLog(fmt.Sprintf("[CUSTOM] 金丝雀回滚：通道「%s」（#%d）模型 %s 真实流量失败，退回隔离", channel.Name, channel.Id, relayInfo.OriginModelName))
+		}
 		autoBan := channel.GetAutoBan()
 		if cs2, ok2 := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting); ok2 && cs2.FailThreshold != nil && *cs2.FailThreshold > 0 {
 			th := cs2.FailThreshold

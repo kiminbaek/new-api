@@ -24,8 +24,7 @@ import (
 )
 
 const (
-	smartProbeTick     = 30 * time.Second
-	smartProbeBatchMax = 5 // 每轮最多探测几项，避免一次性打出大量出站请求
+	smartProbeTick = 30 * time.Second
 )
 
 // InitSmartDisableProbe 启动常驻探测 worker。总开关关闭时空转（不清理已下线项，
@@ -53,7 +52,7 @@ func InitSmartDisableProbe() {
 }
 
 func runSmartProbeTick() {
-	due := service.DueSmartProbes(smartProbeBatchMax)
+	due := service.DueSmartProbes(0) // adaptive budget: 1..5
 	if len(due) == 0 {
 		return
 	}
@@ -117,13 +116,12 @@ func probeOne(st service.SmartDownState, testUserID int) {
 	if result.newAPIError == nil && result.localErr == nil {
 		channelFullyRecovered := service.FinishSmartProbe(st.ChannelId, st.Model, true, "")
 		service.RecordRelaySuccess(st.ChannelId, st.Model)
-		service.NotifyChannelRecovered(st.ChannelId, ch.Name, string(st.Level), st.Model, time.Unix(st.DisabledAt, 0), st.Attempts)
 		// L2 升级导致整渠道被禁的场景：模型已实测恢复 → 把渠道也重新启用
 		if ch.Status != common.ChannelStatusEnabled && channelFullyRecovered {
 			service.EnableChannel(ch.Id, "", ch.Name)
 			common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用恢复：通道「%s」（#%d）全部隔离模型均已实测恢复，L2 整渠道禁用解除", ch.Name, ch.Id))
 		}
-		common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用恢复：通道「%s」（#%d）模型 %s 探测通过，已重新上线（下线时长 %s，探测 %d 次）",
+		common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用恢复：通道「%s」（#%d）模型 %s 探测通过，进入 1%% 金丝雀（下线时长 %s，探测 %d 次）",
 			ch.Name, ch.Id, st.Model, time.Since(time.Unix(st.DisabledAt, 0)).Truncate(time.Second), st.Attempts+1))
 		return
 	}
