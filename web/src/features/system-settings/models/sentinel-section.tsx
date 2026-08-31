@@ -18,13 +18,22 @@ For commercial licensing, please contact support@quantumnous.com
 */
 // [CUSTOM] 哨兵推送设置卡片：渠道/模型异常事件主动通知（QQ 网关 webhook + 可选邮件）。
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useEffect, useRef } from 'react'
+import {
+  BellRing,
+  CheckCircle2,
+  Loader2,
+  Radio,
+  ShieldCheck,
+} from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import * as z from 'zod'
 
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
 import {
   Form,
   FormControl,
@@ -35,17 +44,17 @@ import {
   FormMessage,
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
-import { Switch } from '@/components/ui/switch'
-import { Textarea } from '@/components/ui/textarea'
 
 import {
   SettingsForm,
-  SettingsSwitchContent,
-  SettingsSwitchItem,
+  SettingsControlGroup,
+  SettingsFormGrid,
+  SettingsSwitchField,
 } from '../components/settings-form-layout'
 import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useUpdateOption } from '../hooks/use-update-option'
+import { safeNumberFieldProps } from '../utils/numeric-field'
 
 const sentinelFormSchema = z.object({
   SentinelEnabled: z.boolean(),
@@ -55,18 +64,30 @@ const sentinelFormSchema = z.object({
   SentinelDailyHour: z.coerce.number().int().min(0).max(23),
 })
 
-type SentinelFormValues = z.infer<typeof sentinelFormSchema>
+type SentinelFormInput = z.input<typeof sentinelFormSchema>
+type SentinelFormValues = z.output<typeof sentinelFormSchema>
 
 interface SentinelSectionProps {
-  defaultValues: Record<string, string | undefined>
+  defaultValues: {
+    SentinelEnabled: boolean
+    SentinelWebhookURL: string
+    SentinelWebhookAuth: string
+    SentinelEmailTo: string
+    SentinelDailyHour: number
+  }
 }
 
 export function SentinelSection({ defaultValues }: SentinelSectionProps) {
-  const t = useTranslation()
+  const { t } = useTranslation()
   const updateOption = useUpdateOption()
   const baselineRef = useRef<Partial<SentinelFormValues>>({})
+  const [isTesting, setIsTesting] = useState(false)
+  const [testResults, setTestResults] = useState<Record<
+    string,
+    { success: boolean; error?: string }
+  > | null>(null)
 
-  const form = useForm<SentinelFormValues>({
+  const form = useForm<SentinelFormInput, unknown, SentinelFormValues>({
     resolver: zodResolver(sentinelFormSchema),
     defaultValues: {
       SentinelEnabled: false,
@@ -79,11 +100,11 @@ export function SentinelSection({ defaultValues }: SentinelSectionProps) {
 
   useEffect(() => {
     const values: SentinelFormValues = {
-      SentinelEnabled: defaultValues['SentinelEnabled'] === 'true',
-      SentinelWebhookURL: defaultValues['SentinelWebhookURL'] ?? '',
-      SentinelWebhookAuth: defaultValues['SentinelWebhookAuth'] ?? '',
-      SentinelEmailTo: defaultValues['SentinelEmailTo'] ?? '',
-      SentinelDailyHour: Number(defaultValues['SentinelDailyHour'] ?? 8) || 8,
+      SentinelEnabled: defaultValues.SentinelEnabled ?? false,
+      SentinelWebhookURL: defaultValues.SentinelWebhookURL ?? '',
+      SentinelWebhookAuth: '', // Secret is intentionally never returned by the API.
+      SentinelEmailTo: defaultValues.SentinelEmailTo ?? '',
+      SentinelDailyHour: defaultValues.SentinelDailyHour ?? 8,
     }
     form.reset(values)
     baselineRef.current = values
@@ -92,7 +113,10 @@ export function SentinelSection({ defaultValues }: SentinelSectionProps) {
   const onSubmit = async (values: SentinelFormValues) => {
     const updates = (
       Object.keys(values) as Array<keyof SentinelFormValues>
-    ).filter((key) => String(values[key]) !== String(baselineRef.current[key]))
+    ).filter((key) => {
+      if (key === 'SentinelWebhookAuth' && values[key] === '') return false
+      return String(values[key]) !== String(baselineRef.current[key])
+    })
 
     if (updates.length === 0) {
       toast.info(t('No changes to save'))
@@ -111,9 +135,12 @@ export function SentinelSection({ defaultValues }: SentinelSectionProps) {
   }
 
   const testPush = async () => {
+    setIsTesting(true)
+    setTestResults(null)
     try {
       const res = await fetch('/api/sentinel/test', { method: 'POST' })
       const data = await res.json()
+      setTestResults(data.channels ?? null)
       if (data.success) {
         toast.success(t('Test notification sent — check your channel'))
       } else {
@@ -121,121 +148,220 @@ export function SentinelSection({ defaultValues }: SentinelSectionProps) {
       }
     } catch {
       toast.error(t('Request failed'))
+    } finally {
+      setIsTesting(false)
     }
   }
 
   return (
     <SettingsSection title={t('Sentinel Push')}>
-      <p className='text-muted-foreground mb-2 text-sm'>
-        {t(
-          'Automatically push notifications for channel/model anomalies (auto-disable, recovery, suspected model removal, low redundancy). Configure the QQ Gateway address below and it works once your bot is online.',
-        )}
-      </p>
+      <div className='mb-5 grid gap-3 md:grid-cols-3'>
+        <Card size='sm'>
+          <CardContent className='flex items-center gap-3'>
+            <div className='bg-primary/10 text-primary rounded-lg p-2'>
+              <BellRing className='size-5' />
+            </div>
+            <div>
+              <div className='font-medium'>{t('Proactive alerts')}</div>
+              <div className='text-muted-foreground text-xs'>
+                {t('Disable, recovery and redundancy events')}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card size='sm'>
+          <CardContent className='flex items-center gap-3'>
+            <div className='rounded-lg bg-emerald-500/10 p-2 text-emerald-600'>
+              <ShieldCheck className='size-5' />
+            </div>
+            <div>
+              <div className='font-medium'>{t('Non-blocking delivery')}</div>
+              <div className='text-muted-foreground text-xs'>
+                {t('Notification failures never affect relay traffic')}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card size='sm'>
+          <CardContent className='flex items-center gap-3'>
+            <div className='rounded-lg bg-amber-500/10 p-2 text-amber-600'>
+              <Radio className='size-5' />
+            </div>
+            <div>
+              <div className='font-medium'>{t('24-hour deduplication')}</div>
+              <div className='text-muted-foreground text-xs'>
+                {t('Deduplicated by event, channel and model')}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+      <Alert className='mb-5'>
+        <ShieldCheck />
+        <AlertTitle>
+          {form.watch('SentinelEnabled')
+            ? t('Sentinel is enabled')
+            : t('Sentinel is disabled')}
+        </AlertTitle>
+        <AlertDescription>
+          {t(
+            'Configure a webhook, email, or both. The saved token is never returned to the browser.'
+          )}
+        </AlertDescription>
+      </Alert>
       <Form {...form}>
         <SettingsForm onSubmit={form.handleSubmit(onSubmit)}>
-          <SettingsSwitchContent>
+          <SettingsPageFormActions
+            onSave={form.handleSubmit(onSubmit)}
+            isSaving={updateOption.isPending}
+          />
+
+          <SettingsControlGroup>
             <FormField
               control={form.control}
               name='SentinelEnabled'
               render={({ field }) => (
-                <SettingsSwitchItem
+                <SettingsSwitchField
+                  checked={field.value}
+                  onCheckedChange={field.onChange}
                   label={t('Enable sentinel push')}
                   description={t(
-                    'Off or unconfigured channels = fully silent, never blocks the main flow',
+                    'Off or unconfigured channels = fully silent, never blocks the main flow'
                   )}
-                >
-                  <FormControl>
-                    <Switch
-                      checked={field.value}
-                      onCheckedChange={field.onChange}
-                    />
-                  </FormControl>
-                </SettingsSwitchItem>
+                />
               )}
             />
-          </SettingsSwitchContent>
+          </SettingsControlGroup>
 
-          <FormField
-            control={form.control}
-            name='SentinelWebhookURL'
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>{t('Webhook URL')}</FormLabel>
-                <FormControl>
-                  <Input placeholder='http://127.0.0.1:3018/api/webui/send' {...field} />
-                </FormControl>
-                <FormDescription>
-                  {t(
-                    'Generic JSON webhook. Fill in the QQ Gateway send endpoint to receive pushes in QQ.',
-                  )}
-                </FormDescription>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
+          <SettingsFormGrid>
+            <FormField
+              control={form.control}
+              name='SentinelWebhookURL'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Webhook URL')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      placeholder='http://127.0.0.1:3018/api/webui/send'
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'Generic JSON webhook. Fill in the QQ Gateway send endpoint to receive pushes in QQ.'
+                    )}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
 
-          <FormField
-            control={form.control}
-            name='SentinelWebhookAuth'
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>{t('Webhook Token')}</FormLabel>
-                <FormControl>
-                  <Input type='password' placeholder='Bearer token' {...field} />
-                </FormControl>
-                <FormDescription>
-                  {t('Bearer token if the endpoint requires auth (e.g. gateway admin token).')}
-                </FormDescription>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
+            <FormField
+              control={form.control}
+              name='SentinelWebhookAuth'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Webhook Token')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      type='password'
+                      placeholder='Bearer token'
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'Bearer token if the endpoint requires auth (e.g. gateway admin token).'
+                    )}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
 
-          <FormField
-            control={form.control}
-            name='SentinelEmailTo'
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>{t('Email fallback (optional)')}</FormLabel>
-                <FormControl>
-                  <Input placeholder='you@example.com' {...field} />
-                </FormControl>
-                <FormDescription>
-                  {t(
-                    'Also sends a copy by email. Requires SMTP configured below in System Settings.',
-                  )}
-                </FormDescription>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
+            <FormField
+              control={form.control}
+              name='SentinelEmailTo'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Email fallback (optional)')}</FormLabel>
+                  <FormControl>
+                    <Input placeholder='you@example.com' {...field} />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'Also sends a copy by email. Requires SMTP configured below in System Settings.'
+                    )}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
 
-          <FormField
-            control={form.control}
-            name='SentinelDailyHour'
-            render={({ field }) => (
-              <FormItem>
-                <FormLabel>{t('Daily report hour')}</FormLabel>
-                <FormControl>
-                  <Input type='number' min={0} max={23} {...field} />
-                </FormControl>
-                <FormDescription>
-                  {t('Hour of day (0-23) to send the daily summary report.')}
-                </FormDescription>
-                <FormMessage />
-              </FormItem>
-            )}
-          />
+            <FormField
+              control={form.control}
+              name='SentinelDailyHour'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Daily report hour')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      type='number'
+                      min={0}
+                      max={23}
+                      {...safeNumberFieldProps(field)}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t('Hour of day (0-23) to send the daily summary report.')}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </SettingsFormGrid>
 
           <div className='flex items-center gap-2'>
-            <Button type='button' variant='outline' onClick={testPush}>
-              {t('Send test notification')}
+            <Button
+              type='button'
+              variant='outline'
+              disabled={isTesting}
+              onClick={testPush}
+            >
+              {isTesting ? (
+                <Loader2 className='animate-spin' data-icon='inline-start' />
+              ) : (
+                <Radio data-icon='inline-start' />
+              )}
+              {isTesting
+                ? t('Testing channels...')
+                : t('Send test notification')}
             </Button>
+            <span className='text-muted-foreground text-xs'>
+              {t(
+                'The saved token is hidden. Leave it blank to keep the current token.'
+              )}
+            </span>
           </div>
 
-          <Textarea className='hidden' readOnly value='' />
-
-          <SettingsPageFormActions form={form} />
+          {testResults ? (
+            <div className='grid gap-2 sm:grid-cols-2'>
+              {Object.entries(testResults).map(([channel, result]) => (
+                <Alert
+                  key={channel}
+                  variant={result.success ? 'default' : 'destructive'}
+                >
+                  {result.success ? <CheckCircle2 /> : <Radio />}
+                  <AlertTitle className='capitalize'>{channel}</AlertTitle>
+                  <AlertDescription>
+                    {result.success
+                      ? t('Delivery succeeded')
+                      : result.error || t('Delivery failed')}
+                  </AlertDescription>
+                </Alert>
+              ))}
+            </div>
+          ) : null}
         </SettingsForm>
       </Form>
     </SettingsSection>

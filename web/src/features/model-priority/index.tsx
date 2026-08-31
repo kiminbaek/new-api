@@ -1,9 +1,22 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowDown, ArrowUp, Minus, RefreshCw } from 'lucide-react'
+import {
+  AlertCircle,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  CheckCircle2,
+  Minus,
+  RefreshCw,
+  Search,
+  SlidersHorizontal,
+} from 'lucide-react'
 import { useMemo, useState } from 'react'
 
 import { SectionPageLayout } from '@/components/layout'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import {
   Select,
@@ -20,10 +33,42 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+
 import { getModelPriority, type ModelPriorityRow } from './api'
 
+type StatFilter = 'all' | 'neg' | 'pos' | 'adjusted'
+
+function deltaTone(delta: number) {
+  if (delta < 0) return 'text-destructive'
+  if (delta > 0) return 'text-emerald-600 dark:text-emerald-400'
+  return 'text-muted-foreground'
+}
+
+function DeltaValue({ delta }: { delta: number }) {
+  let icon = <Minus className='size-3.5' />
+  if (delta < 0) icon = <ArrowDown className='size-3.5' />
+  if (delta > 0) icon = <ArrowUp className='size-3.5' />
+  return (
+    <span
+      className={`inline-flex items-center gap-1 font-semibold ${deltaTone(delta)}`}
+    >
+      {icon}
+      {delta > 0 ? '+' : ''}
+      {delta}
+    </span>
+  )
+}
+
 export function ModelPriority() {
-  const { data: rows = [], isLoading, refetch } = useQuery({
+  const {
+    data: rows = [],
+    isLoading,
+    isFetching,
+    isError,
+    error,
+    dataUpdatedAt,
+    refetch,
+  } = useQuery({
     queryKey: ['model-priority'],
     queryFn: getModelPriority,
   })
@@ -33,130 +78,380 @@ export function ModelPriority() {
   const [fDelta, setFDelta] = useState('all')
   const [fEnabled, setFEnabled] = useState('all')
   const [sortBy, setSortBy] = useState<keyof ModelPriorityRow>('model')
-  const [sortDir, setSortDir] = useState(1)
+  const [sortDir, setSortDir] = useState<1 | -1>(1)
 
-  const stats = useMemo(() => ({
-    total: rows.length,
-    neg: rows.filter((r) => r.delta < 0).length,
-    pos: rows.filter((r) => r.delta > 0).length,
-    adjusted: rows.filter((r) => r.delta !== 0).length,
-  }), [rows])
+  const stats = useMemo(
+    () => ({
+      total: rows.length,
+      neg: rows.filter((row) => row.delta < 0).length,
+      pos: rows.filter((row) => row.delta > 0).length,
+      adjusted: rows.filter((row) => row.delta !== 0).length,
+    }),
+    [rows]
+  )
 
   const filtered = useMemo(() => {
-    let d = rows.filter((r) => {
-      if (fModel && !r.model.toLowerCase().includes(fModel.toLowerCase())) return false
-      if (fChannel && !r.channel_name.toLowerCase().includes(fChannel.toLowerCase())) return false
-      if (fDelta === 'neg' && r.delta >= 0) return false
-      if (fDelta === 'pos' && r.delta <= 0) return false
-      if (fDelta === 'zero' && r.delta !== 0) return false
-      if (fEnabled === 'on' && !r.enabled) return false
-      if (fEnabled === 'off' && r.enabled) return false
+    const filteredRows = rows.filter((row) => {
+      if (fModel && !row.model.toLowerCase().includes(fModel.toLowerCase())) {
+        return false
+      }
+      if (
+        fChannel &&
+        !row.channel_name.toLowerCase().includes(fChannel.toLowerCase())
+      ) {
+        return false
+      }
+      if (fDelta === 'neg' && row.delta >= 0) return false
+      if (fDelta === 'pos' && row.delta <= 0) return false
+      if (fDelta === 'zero' && row.delta !== 0) return false
+      if (fDelta === 'adjusted' && row.delta === 0) return false
+      if (fEnabled === 'on' && !row.enabled) return false
+      if (fEnabled === 'off' && row.enabled) return false
       return true
     })
-    d = [...d].sort((a, b) => {
-      const va = a[sortBy], vb = b[sortBy]
-      if (typeof va === 'string') return va.localeCompare(vb as string) * sortDir
-      return ((va as number) - (vb as number)) * sortDir
+    return [...filteredRows].sort((a, b) => {
+      const aValue = a[sortBy]
+      const bValue = b[sortBy]
+      if (typeof aValue === 'string') {
+        return aValue.localeCompare(bValue as string) * sortDir
+      }
+      return ((aValue as number) - (bValue as number)) * sortDir
     })
-    return d
   }, [rows, fModel, fChannel, fDelta, fEnabled, sortBy, sortDir])
 
-  const sortCol = (k: keyof ModelPriorityRow) => {
-    if (sortBy === k) setSortDir(-sortDir)
-    else { setSortBy(k); setSortDir(1) }
+  const sortColumn = (key: keyof ModelPriorityRow) => {
+    if (sortBy === key) {
+      setSortDir((current) => (current === 1 ? -1 : 1))
+      return
+    }
+    setSortBy(key)
+    setSortDir(1)
   }
+
+  const applyStatFilter = (filter: StatFilter) => {
+    setFDelta(filter)
+  }
+
+  const statCards: Array<{
+    key: StatFilter
+    value: number
+    label: string
+    detail: string
+    color: string
+  }> = [
+    {
+      key: 'all',
+      value: stats.total,
+      label: '全部路由',
+      detail: '渠道 × 模型',
+      color: 'text-blue-600',
+    },
+    {
+      key: 'neg',
+      value: stats.neg,
+      label: '降权中',
+      detail: '自动避开不稳定线路',
+      color: 'text-destructive',
+    },
+    {
+      key: 'pos',
+      value: stats.pos,
+      label: '升权中',
+      detail: '近期表现优于基准',
+      color: 'text-emerald-600',
+    },
+    {
+      key: 'adjusted',
+      value: stats.adjusted,
+      label: '已调整',
+      detail: '算法正在动态干预',
+      color: 'text-amber-600',
+    },
+  ]
+
+  const renderSortHead = (label: string, key: keyof ModelPriorityRow) => {
+    const active = sortBy === key
+    let ariaSort: 'ascending' | 'descending' | 'none' = 'none'
+    if (active) {
+      ariaSort = sortDir === 1 ? 'ascending' : 'descending'
+    }
+    return (
+      <TableHead aria-sort={ariaSort}>
+        <button
+          type='button'
+          className='hover:text-foreground inline-flex items-center gap-1 font-medium'
+          onClick={() => sortColumn(key)}
+        >
+          {label}
+          <ArrowUpDown
+            className={`size-3.5 ${active ? 'text-primary' : 'text-muted-foreground'}`}
+          />
+        </button>
+      </TableHead>
+    )
+  }
+
+  const updatedText = dataUpdatedAt
+    ? new Date(dataUpdatedAt).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      })
+    : '尚未更新'
 
   return (
     <SectionPageLayout>
       <SectionPageLayout.Title>模型优先级看板</SectionPageLayout.Title>
       <SectionPageLayout.Actions>
-        <Button variant="outline" size="sm" onClick={() => refetch()}>
-          <RefreshCw className="h-4 w-4 mr-2" /> 刷新
+        <Button
+          variant='outline'
+          size='sm'
+          disabled={isFetching}
+          onClick={() => void refetch()}
+        >
+          <RefreshCw
+            className={`mr-2 size-4 ${isFetching ? 'animate-spin' : ''}`}
+          />
+          {isFetching ? '刷新中' : '刷新'}
         </Button>
       </SectionPageLayout.Actions>
       <SectionPageLayout.Content>
-        <div className="grid grid-cols-2 gap-3 mb-4 sm:grid-cols-4">
-          {[
-            { n: stats.total, l: '总条目', c: 'text-blue-600' },
-            { n: stats.neg, l: '降权中', c: 'text-red-600' },
-            { n: stats.pos, l: '升权中', c: 'text-green-600' },
-            { n: stats.adjusted, l: '自动调整', c: 'text-amber-600' },
-          ].map((s) => (
-            <div key={s.l} className="rounded-lg border bg-card p-4">
-              <div className={`text-2xl font-bold ${s.c}`}>{s.n}</div>
-              <div className="text-xs text-muted-foreground mt-1">{s.l}</div>
-            </div>
-          ))}
-        </div>
+        <div className='space-y-4'>
+          <div className='flex flex-col gap-1'>
+            <p className='text-muted-foreground text-sm'>
+              实时查看智能调度对每个渠道 × 模型的升降权结果。
+            </p>
+            <p className='text-muted-foreground text-xs'>
+              数据更新时间：{updatedText}
+            </p>
+          </div>
 
-        <div className="flex gap-2 mb-4 flex-wrap">
-          <Input placeholder="筛模型名..." className="w-40" value={fModel} onChange={(e) => setFModel(e.target.value)} />
-          <Input placeholder="筛渠道名..." className="w-40" value={fChannel} onChange={(e) => setFChannel(e.target.value)} />
-          <Select value={fDelta} onValueChange={setFDelta}>
-            <SelectTrigger className="w-32"><SelectValue placeholder="偏移" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">全部偏移</SelectItem>
-              <SelectItem value="neg">仅降权</SelectItem>
-              <SelectItem value="pos">仅升权</SelectItem>
-              <SelectItem value="zero">仅无变化</SelectItem>
-            </SelectContent>
-          </Select>
-          <Select value={fEnabled} onValueChange={setFEnabled}>
-            <SelectTrigger className="w-32"><SelectValue placeholder="状态" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">全部状态</SelectItem>
-              <SelectItem value="on">仅启用</SelectItem>
-              <SelectItem value="off">仅禁用</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
+          <div className='grid grid-cols-2 gap-3 xl:grid-cols-4'>
+            {statCards.map((stat) => (
+              <button
+                key={stat.key}
+                type='button'
+                className='focus-visible:ring-ring rounded-xl text-left focus-visible:ring-2 focus-visible:outline-none'
+                onClick={() => applyStatFilter(stat.key)}
+              >
+                <Card className='hover:bg-muted/30 h-full py-3 transition-colors'>
+                  <CardContent className='space-y-1'>
+                    <div
+                      className={`text-2xl font-bold tabular-nums ${stat.color}`}
+                    >
+                      {stat.value}
+                    </div>
+                    <div className='font-medium'>{stat.label}</div>
+                    <div className='text-muted-foreground text-xs'>
+                      {stat.detail}
+                    </div>
+                  </CardContent>
+                </Card>
+              </button>
+            ))}
+          </div>
 
-        <div className="rounded-lg border">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="cursor-pointer" onClick={() => sortCol('channel_id')}>#</TableHead>
-                <TableHead className="cursor-pointer" onClick={() => sortCol('channel_name')}>渠道</TableHead>
-                <TableHead className="cursor-pointer" onClick={() => sortCol('model')}>模型</TableHead>
-                <TableHead className="cursor-pointer" onClick={() => sortCol('base_priority')}>基准</TableHead>
-                <TableHead className="cursor-pointer" onClick={() => sortCol('eff_priority')}>有效值</TableHead>
-                <TableHead className="cursor-pointer" onClick={() => sortCol('delta')}>偏移</TableHead>
-                <TableHead className="cursor-pointer" onClick={() => sortCol('weight')}>权重</TableHead>
-                <TableHead>状态</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {isLoading ? (
-                <TableRow><TableCell colSpan={8} className="text-center py-8 text-muted-foreground">加载中...</TableCell></TableRow>
-              ) : filtered.length === 0 ? (
-                <TableRow><TableCell colSpan={8} className="text-center py-8 text-muted-foreground">无匹配数据</TableCell></TableRow>
-              ) : filtered.map((r) => (
-                <TableRow key={`${r.channel_id}-${r.model}`}>
-                  <TableCell>{r.channel_id}</TableCell>
-                  <TableCell>{r.channel_name}</TableCell>
-                  <TableCell className="font-mono text-sm">{r.model}</TableCell>
-                  <TableCell>{r.base_priority}</TableCell>
-                  <TableCell className="font-semibold">{r.eff_priority}</TableCell>
-                  <TableCell>
-                    <span className={`inline-flex items-center gap-1 font-semibold ${
-                      r.delta < 0 ? 'text-red-600' : r.delta > 0 ? 'text-green-600' : 'text-muted-foreground'
-                    }`}>
-                      {r.delta < 0 ? <ArrowDown className="h-3 w-3" /> : r.delta > 0 ? <ArrowUp className="h-3 w-3" /> : <Minus className="h-3 w-3" />}
-                      {r.delta > 0 ? '+' : ''}{r.delta}
-                    </span>
-                  </TableCell>
-                  <TableCell>{r.weight}</TableCell>
-                  <TableCell>
-                    <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
-                      r.enabled ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-                    }`}>
-                      {r.enabled ? '启用' : '禁用'}
-                    </span>
-                  </TableCell>
+          <Card className='py-3'>
+            <CardContent className='flex flex-col gap-3 lg:flex-row lg:items-center'>
+              <div className='text-muted-foreground flex items-center gap-2 text-sm font-medium'>
+                <SlidersHorizontal className='size-4' />
+                筛选
+              </div>
+              <div className='grid flex-1 grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4'>
+                <div className='relative'>
+                  <Search className='text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2' />
+                  <Input
+                    aria-label='筛选模型名'
+                    placeholder='筛选模型名'
+                    className='pl-9'
+                    value={fModel}
+                    onChange={(event) => setFModel(event.target.value)}
+                  />
+                </div>
+                <Input
+                  aria-label='筛选渠道名'
+                  placeholder='筛选渠道名'
+                  value={fChannel}
+                  onChange={(event) => setFChannel(event.target.value)}
+                />
+                <Select
+                  value={fDelta}
+                  onValueChange={(value) => value && setFDelta(value)}
+                >
+                  <SelectTrigger className='w-full'>
+                    <SelectValue placeholder='偏移' />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value='all'>全部偏移</SelectItem>
+                    <SelectItem value='neg'>仅降权</SelectItem>
+                    <SelectItem value='pos'>仅升权</SelectItem>
+                    <SelectItem value='adjusted'>仅已调整</SelectItem>
+                    <SelectItem value='zero'>仅无变化</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Select
+                  value={fEnabled}
+                  onValueChange={(value) => value && setFEnabled(value)}
+                >
+                  <SelectTrigger className='w-full'>
+                    <SelectValue placeholder='状态' />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value='all'>全部状态</SelectItem>
+                    <SelectItem value='on'>仅启用</SelectItem>
+                    <SelectItem value='off'>仅禁用</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <Badge variant='outline'>{filtered.length} 条结果</Badge>
+            </CardContent>
+          </Card>
+
+          {isError ? (
+            <Alert variant='destructive'>
+              <AlertCircle />
+              <AlertTitle>优先级数据加载失败</AlertTitle>
+              <AlertDescription>
+                {error instanceof Error
+                  ? error.message
+                  : '请检查网络或后端服务后重试。'}
+              </AlertDescription>
+            </Alert>
+          ) : null}
+
+          <div className='grid gap-3 md:hidden'>
+            {isLoading ? (
+              <Card>
+                <CardContent className='text-muted-foreground py-8 text-center'>
+                  加载中...
+                </CardContent>
+              </Card>
+            ) : null}
+            {!isLoading && !isError && filtered.length === 0 ? (
+              <Card>
+                <CardContent className='text-muted-foreground py-8 text-center'>
+                  无匹配数据
+                </CardContent>
+              </Card>
+            ) : null}
+            {!isLoading && !isError
+              ? filtered.map((row) => (
+                  <Card key={`${row.channel_id}-${row.model}`} className='py-3'>
+                    <CardContent className='space-y-3'>
+                      <div className='flex items-start justify-between gap-3'>
+                        <div className='min-w-0'>
+                          <div className='truncate font-mono text-sm font-medium'>
+                            {row.model}
+                          </div>
+                          <div className='text-muted-foreground truncate text-xs'>
+                            #{row.channel_id} · {row.channel_name}
+                          </div>
+                        </div>
+                        <Badge
+                          variant={row.enabled ? 'secondary' : 'destructive'}
+                        >
+                          {row.enabled ? '启用' : '禁用'}
+                        </Badge>
+                      </div>
+                      <div className='grid grid-cols-4 gap-2 text-center text-xs'>
+                        <div>
+                          <div className='text-muted-foreground'>基准</div>
+                          <div className='mt-1 font-semibold'>
+                            {row.base_priority}
+                          </div>
+                        </div>
+                        <div>
+                          <div className='text-muted-foreground'>有效</div>
+                          <div className='mt-1 font-semibold'>
+                            {row.eff_priority}
+                          </div>
+                        </div>
+                        <div>
+                          <div className='text-muted-foreground'>偏移</div>
+                          <div className='mt-1'>
+                            <DeltaValue delta={row.delta} />
+                          </div>
+                        </div>
+                        <div>
+                          <div className='text-muted-foreground'>权重</div>
+                          <div className='mt-1 font-semibold'>{row.weight}</div>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))
+              : null}
+          </div>
+
+          <div className='hidden overflow-hidden rounded-xl border md:block'>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  {renderSortHead('#', 'channel_id')}
+                  {renderSortHead('渠道', 'channel_name')}
+                  {renderSortHead('模型', 'model')}
+                  {renderSortHead('基准', 'base_priority')}
+                  {renderSortHead('有效值', 'eff_priority')}
+                  {renderSortHead('偏移', 'delta')}
+                  {renderSortHead('权重', 'weight')}
+                  <TableHead>状态</TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+              </TableHeader>
+              <TableBody>
+                {isLoading ? (
+                  <TableRow>
+                    <TableCell
+                      colSpan={8}
+                      className='text-muted-foreground py-10 text-center'
+                    >
+                      加载中...
+                    </TableCell>
+                  </TableRow>
+                ) : null}
+                {!isLoading && !isError && filtered.length === 0 ? (
+                  <TableRow>
+                    <TableCell
+                      colSpan={8}
+                      className='text-muted-foreground py-10 text-center'
+                    >
+                      无匹配数据
+                    </TableCell>
+                  </TableRow>
+                ) : null}
+                {!isLoading && !isError
+                  ? filtered.map((row) => (
+                      <TableRow key={`${row.channel_id}-${row.model}`}>
+                        <TableCell>{row.channel_id}</TableCell>
+                        <TableCell className='font-medium'>
+                          {row.channel_name}
+                        </TableCell>
+                        <TableCell className='font-mono text-sm'>
+                          {row.model}
+                        </TableCell>
+                        <TableCell>{row.base_priority}</TableCell>
+                        <TableCell className='font-semibold'>
+                          {row.eff_priority}
+                        </TableCell>
+                        <TableCell>
+                          <DeltaValue delta={row.delta} />
+                        </TableCell>
+                        <TableCell>{row.weight}</TableCell>
+                        <TableCell>
+                          <Badge
+                            variant={row.enabled ? 'secondary' : 'destructive'}
+                          >
+                            {row.enabled ? (
+                              <CheckCircle2 data-icon='inline-start' />
+                            ) : null}
+                            {row.enabled ? '启用' : '禁用'}
+                          </Badge>
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  : null}
+              </TableBody>
+            </Table>
+          </div>
         </div>
       </SectionPageLayout.Content>
     </SectionPageLayout>

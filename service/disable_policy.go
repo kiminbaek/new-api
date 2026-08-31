@@ -218,7 +218,6 @@ func ShouldDisableModelNow(chId int, mdl string) (bool, string) {
 	return false, ""
 }
 
-
 // ===== [CUSTOM] 模型疑似下架检测：同渠道×模型连续 404 达阈值 → L1 下线 + 哨兵 =====
 
 var (
@@ -467,17 +466,25 @@ func DueSmartProbes(limit int) []SmartDownState {
 
 // FinishSmartProbe 记录探测结果。ok=true 时记录被移除（调用方负责实际恢复上线）；
 // ok=false 时退避翻倍等下一轮。
-func FinishSmartProbe(chId int, mdl string, ok bool, errMsg string) {
+func FinishSmartProbe(chId int, mdl string, ok bool, errMsg string) (channelFullyRecovered bool) {
 	key := smartDownKey(chId, mdl)
 	smartDownMu.Lock()
 	defer smartDownMu.Unlock()
 	st, exists := smartDown[key]
 	if !exists {
-		return
+		return false
 	}
 	if ok {
 		delete(smartDown, key)
-		return
+		// L2 quarantine registers every configured model. Re-enable the DB channel
+		// only after the final model has passed a real probe; one lucky model must
+		// never release still-unverified siblings back into routing.
+		for _, other := range smartDown {
+			if other.ChannelId == chId && other.Level == SmartDownModel {
+				return false
+			}
+		}
+		return true
 	}
 	st.Probing = false
 	st.Attempts++
@@ -487,6 +494,7 @@ func FinishSmartProbe(chId int, mdl string, ok bool, errMsg string) {
 		backoff = smartProbeMaxInterval
 	}
 	st.NextProbeAt = time.Now().Add(backoff).Unix()
+	return false
 }
 
 // ListSmartDown 返回全部下线记录快照（只读看板用）。

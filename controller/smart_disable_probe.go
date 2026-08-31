@@ -17,10 +17,10 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/gin-gonic/gin"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/bytedance/gopkg/util/gopool"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -115,13 +115,13 @@ func probeOne(st service.SmartDownState, testUserID int) {
 	result := testChannel(ctx, ch, testUserID, st.Model, "", shouldUseStreamForAutomaticChannelTest(ch))
 
 	if result.newAPIError == nil && result.localErr == nil {
-		service.FinishSmartProbe(st.ChannelId, st.Model, true, "")
+		channelFullyRecovered := service.FinishSmartProbe(st.ChannelId, st.Model, true, "")
 		service.RecordRelaySuccess(st.ChannelId, st.Model)
 		service.NotifyChannelRecovered(st.ChannelId, ch.Name, string(st.Level), st.Model, time.Unix(st.DisabledAt, 0), st.Attempts)
 		// L2 升级导致整渠道被禁的场景：模型已实测恢复 → 把渠道也重新启用
-		if ch.Status != common.ChannelStatusEnabled {
+		if ch.Status != common.ChannelStatusEnabled && channelFullyRecovered {
 			service.EnableChannel(ch.Id, "", ch.Name)
-			common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用恢复：通道「%s」（#%d）L2 整渠道禁用随模型恢复一并解除", ch.Name, ch.Id))
+			common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用恢复：通道「%s」（#%d）全部隔离模型均已实测恢复，L2 整渠道禁用解除", ch.Name, ch.Id))
 		}
 		common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用恢复：通道「%s」（#%d）模型 %s 探测通过，已重新上线（下线时长 %s，探测 %d 次）",
 			ch.Name, ch.Id, st.Model, time.Since(time.Unix(st.DisabledAt, 0)).Truncate(time.Second), st.Attempts+1))
@@ -152,13 +152,17 @@ func SentinelTestPush(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "未配置任何推送通道（webhook 与邮箱均为空）"})
 		return
 	}
-	go func() {
-		if cfg.WebhookURL != "" {
-			_ = service.SentinelPostWebhookPublic(cfg.WebhookURL, cfg.WebhookAuth, title, content)
+	results := service.SendSentinelTest(cfg, title, content)
+	success := true
+	for _, result := range results {
+		if !result.Success {
+			success = false
+			break
 		}
-		if cfg.EmailTo != "" {
-			_ = common.SendEmail(title, cfg.EmailTo, strings.ReplaceAll(content, "\n", "<br>"))
-		}
-	}()
-	c.JSON(http.StatusOK, gin.H{"success": true})
+	}
+	message := "测试通知发送成功"
+	if !success {
+		message = "测试通知发送失败，请查看各通道错误"
+	}
+	c.JSON(http.StatusOK, gin.H{"success": success, "message": message, "channels": results})
 }

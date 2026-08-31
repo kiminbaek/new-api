@@ -497,7 +497,7 @@ export function transformChannelToFormDefaults(
     system_prompt_override: false,
     model_priorities_text: '',
     retry_times: undefined,
-    health_check_mode: '',
+    health_check_mode: '' as '' | 'default' | 'scheduled' | 'passive',
     health_check_minutes: undefined,
     chat_to_responses: undefined,
     timeout_seconds: undefined,
@@ -668,17 +668,17 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
       // schema 已校验，此处兜底忽略
     }
   }
-  if (formData.retry_times != null) settingObj.retry_times = formData.retry_times
-  if (formData.timeout_seconds != null)
+  if (formData.retry_times != null) {
+    settingObj.retry_times = formData.retry_times
+  }
+  if (formData.timeout_seconds != null) {
     settingObj.timeout_seconds = formData.timeout_seconds
-  if (formData.fail_threshold != null)
+  }
+  if (formData.fail_threshold != null) {
     settingObj.fail_threshold = formData.fail_threshold
+  }
   // [CUSTOM] 分渠道存活检测（空/default 不写入保持 JSON 等价）
-  if (
-    formData.health_check_mode &&
-    formData.health_check_mode !== '' &&
-    formData.health_check_mode !== 'default'
-  ) {
+  if (formData.health_check_mode && formData.health_check_mode !== 'default') {
     settingObj.health_check_mode = formData.health_check_mode
   }
   if (formData.health_check_minutes != null) {

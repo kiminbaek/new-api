@@ -190,6 +190,21 @@ func TestSmartDownRegistryAndProbeBackoff(t *testing.T) {
 	assert.False(t, IsSmartDown(7, "gpt-4o"))
 }
 
+func TestFinishSmartProbeOnlyFullyRecoversChannelAfterLastModel(t *testing.T) {
+	resetSmartState()
+	RegisterSmartDown(7, "ch7", "m-a", SmartDownModel, "L2 quarantine")
+	RegisterSmartDown(7, "ch7", "m-b", SmartDownModel, "L2 quarantine")
+
+	fullyRecovered := FinishSmartProbe(7, "m-a", true, "")
+	assert.False(t, fullyRecovered, "one recovered model must not release the whole L2 channel")
+	assert.False(t, IsSmartDown(7, "m-a"))
+	assert.True(t, IsSmartDown(7, "m-b"), "unverified sibling model must stay quarantined")
+
+	fullyRecovered = FinishSmartProbe(7, "m-b", true, "")
+	assert.True(t, fullyRecovered, "the last recovered model may release the L2 channel")
+	assert.False(t, IsSmartDown(7, "m-b"))
+}
+
 func TestSmartDownBackoffIsCapped(t *testing.T) {
 	resetSmartState()
 	RegisterSmartDown(7, "ch7", "gpt-4o", SmartDownModel, "boom")

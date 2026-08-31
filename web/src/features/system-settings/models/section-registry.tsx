@@ -17,7 +17,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { ChannelAffinitySection } from '../general/channel-affinity'
-import { ModelGroupsSection } from './model-groups-section'
 import { IoNetDeploymentSettingsSection } from '../integrations/ionet-deployment-settings-section'
 import type { ModelSettings } from '../types'
 import { createSectionRegistry } from '../utils/section-registry'
@@ -25,8 +24,9 @@ import { ClaudeSettingsCard } from './claude-settings-card'
 import { GeminiSettingsCard } from './gemini-settings-card'
 import { GlobalSettingsCard } from './global-settings-card'
 import { GrokSettingsCard } from './grok-settings-card'
-import { SentinelSection } from './sentinel-section'
+import { ModelGroupsSection } from './model-groups-section'
 import { RoutingReliabilitySection } from './routing-reliability-section'
+import { SentinelSection } from './sentinel-section'
 
 function formatJsonForEditor(value: string, fallback: string) {
   const raw = (value ?? '').toString().trim()
@@ -109,15 +109,16 @@ const MODELS_SECTIONS = [
     build: (settings: ModelSettings) => (
       <SentinelSection
         defaultValues={{
-          SentinelEnabled: settings['SentinelEnabled'],
-          SentinelWebhookURL: settings['SentinelWebhookURL'],
-          SentinelWebhookAuth: settings['SentinelWebhookAuth'],
-          SentinelEmailTo: settings['SentinelEmailTo'],
-          SentinelDailyHour: settings['SentinelDailyHour'],
+          SentinelEnabled: settings.SentinelEnabled,
+          SentinelWebhookURL: settings.SentinelWebhookURL,
+          SentinelWebhookAuth: settings.SentinelWebhookAuth,
+          SentinelEmailTo: settings.SentinelEmailTo,
+          SentinelDailyHour: settings.SentinelDailyHour,
         }}
       />
     ),
-  },  {
+  },
+  {
     id: 'model-groups',
     titleKey: 'Model Groups',
     build: (settings: ModelSettings) => (

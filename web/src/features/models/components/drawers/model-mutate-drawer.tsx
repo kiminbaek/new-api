@@ -287,6 +287,11 @@ export function ModelMutateDrawer({
   const modelSettings = useMemo(() => {
     if (!systemOptionsData?.data) return null
     const defaultModelSettings: ModelSettings = {
+      SentinelEnabled: false,
+      SentinelWebhookURL: '',
+      SentinelWebhookAuth: '',
+      SentinelEmailTo: '',
+      SentinelDailyHour: 8,
       'global.pass_through_request_enabled': false,
       'global.thinking_model_blacklist': '[]',
       'global.chat_completions_to_responses_policy': '{}',
@@ -328,6 +333,14 @@ export function ModelMutateDrawer({
       RetryTimes: 0,
       ModelGroups: '{}',
       ChannelDisableThreshold: '',
+      RelayUserAgent: '',
+      HealthCheckJitterEnabled: true,
+      AutoPriorityEnabled: false,
+      AutoPriorityIntervalSec: 300,
+      AutoPriorityMinSamples: 20,
+      AutoPriorityScale: 50,
+      AutoPriorityMaxDelta: 200,
+      SmartAutoDisableEnabled: true,
       AutomaticDisableChannelEnabled: false,
       AutomaticEnableChannelEnabled: false,
       AutomaticDisableKeywords: '',

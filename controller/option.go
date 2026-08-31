@@ -76,6 +76,15 @@ func buildCompletionRatioMetaValue(optionValues map[string]string) string {
 	return string(jsonBytes)
 }
 
+func isSensitiveOptionKey(key string) bool {
+	return key == "SentinelWebhookAuth" ||
+		strings.HasSuffix(key, "Token") ||
+		strings.HasSuffix(key, "Secret") ||
+		strings.HasSuffix(key, "Key") ||
+		strings.HasSuffix(key, "secret") ||
+		strings.HasSuffix(key, "api_key")
+}
+
 func GetOptions(c *gin.Context) {
 	var options []*model.Option
 	optionValues := make(map[string]string)
@@ -85,11 +94,7 @@ func GetOptions(c *gin.Context) {
 			continue
 		}
 		value := common.Interface2String(v)
-		isSensitiveKey := strings.HasSuffix(k, "Token") ||
-			strings.HasSuffix(k, "Secret") ||
-			strings.HasSuffix(k, "Key") ||
-			strings.HasSuffix(k, "secret") ||
-			strings.HasSuffix(k, "api_key")
+		isSensitiveKey := isSensitiveOptionKey(k)
 		if isSensitiveKey {
 			continue
 		}

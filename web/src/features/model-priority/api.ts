@@ -14,5 +14,8 @@ export interface ModelPriorityRow {
 
 export async function getModelPriority(): Promise<ModelPriorityRow[]> {
   const res = await api.get('/api/channel/model-priority')
+  if (!res.data?.success) {
+    throw new Error(res.data?.message || '模型优先级数据加载失败')
+  }
   return res.data.data || []
 }
