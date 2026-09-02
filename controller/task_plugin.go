@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -24,7 +25,13 @@ import (
 	"gorm.io/gorm"
 )
 
-const maxTaskPluginSourceBytes = 1024 * 1024
+const (
+	maxTaskPluginSourceBytes          = 1024 * 1024
+	taskPluginRuntimeSyncHeader       = "X-Task-Plugin-Runtime-Sync"
+	taskPluginRuntimeSyncPendingValue = "pending"
+)
+
+var taskPluginSHA256Pattern = regexp.MustCompile(`^[a-fA-F0-9]{64}$`)
 
 type taskPluginUploadRequest struct {
 	Source       string `json:"source" binding:"required"`
@@ -32,6 +39,7 @@ type taskPluginUploadRequest struct {
 	Remark       string `json:"remark"`
 	Force        bool   `json:"force"`
 	SourceSha256 string `json:"sourceSha256"`
+	Marketplace  bool   `json:"marketplace"`
 }
 
 func UploadTaskPlugin(c *gin.Context) {
@@ -44,7 +52,16 @@ func UploadTaskPlugin(c *gin.Context) {
 		common.ApiErrorMsg(c, "plugin source exceeds 1 MiB")
 		return
 	}
-	if expected := strings.TrimSpace(request.SourceSha256); expected != "" {
+	expected := strings.TrimSpace(request.SourceSha256)
+	if request.Marketplace && !taskPluginSHA256Pattern.MatchString(expected) {
+		common.ApiErrorMsg(c, "marketplace plugin requires a valid sha256")
+		return
+	}
+	if expected != "" {
+		if !taskPluginSHA256Pattern.MatchString(expected) {
+			common.ApiErrorMsg(c, "plugin source sha256 must be 64 hexadecimal characters")
+			return
+		}
 		actual := fmt.Sprintf("%x", sha256.Sum256([]byte(request.Source)))
 		if !strings.EqualFold(actual, expected) {
 			common.ApiErrorMsg(c, "plugin source sha256 mismatch")
@@ -80,11 +97,10 @@ func UploadTaskPlugin(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if err = syncTaskPluginsOnceContext(c.Request.Context()); err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	common.ApiSuccess(c, taskPluginDetail{Plugin: &plugin, Meta: loaded.Meta, Source: plugin.Source, Layer: "override"})
+	completeTaskPluginMutation(
+		c,
+		taskPluginDetail{Plugin: &plugin, Meta: loaded.Meta, Source: plugin.Source, Layer: "override"},
+	)
 }
 
 func GetTaskPluginVersions(c *gin.Context) {
@@ -398,11 +414,7 @@ func DeleteTaskPluginVersion(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if err = syncTaskPluginsOnceContext(c.Request.Context()); err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	common.ApiSuccess(c, nil)
+	completeTaskPluginMutation(c, nil)
 }
 
 type taskPluginActivateRequest struct {
@@ -448,11 +460,7 @@ func ActivateTaskPlugin(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if err = syncTaskPluginsOnceContext(c.Request.Context()); err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	common.ApiSuccess(c, nil)
+	completeTaskPluginMutation(c, nil)
 }
 
 type taskPluginStatusRequest struct {
@@ -527,11 +535,25 @@ func SetTaskPluginStatus(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if err := syncTaskPluginsOnceContext(c.Request.Context()); err != nil {
-		common.ApiError(c, err)
+	completeTaskPluginMutation(
+		c,
+		gin.H{"plugin_enabled": *request.Enabled, "disabled_channels": disabledChannels},
+	)
+}
+
+var syncTaskPluginsAfterMutation = syncTaskPluginsOnceContext
+
+func completeTaskPluginMutation(c *gin.Context, data any) {
+	if err := syncTaskPluginsAfterMutation(c.Request.Context()); err != nil {
+		c.Header(taskPluginRuntimeSyncHeader, taskPluginRuntimeSyncPendingValue)
+		c.JSON(http.StatusOK, gin.H{
+			"success": true,
+			"message": "saved; task plugin runtime synchronization is pending",
+			"data":    data,
+		})
 		return
 	}
-	common.ApiSuccess(c, gin.H{"plugin_enabled": *request.Enabled, "disabled_channels": disabledChannels})
+	common.ApiSuccess(c, data)
 }
 
 func taskPluginHasFactory(key string) bool {

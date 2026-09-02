@@ -36,7 +36,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
 import { getTaskPlugin, installMarketplacePlugin } from '../api'
 import {
+  canInstallMarketplaceVersion,
   findMarketplaceVersion,
+  isValidMarketplaceSHA256,
   resolvePluginSourceUrl,
   type InstallState,
 } from '../lib/marketplace'
@@ -73,6 +75,7 @@ export function MarketplaceInstallDialog(props: MarketplaceInstallDialogProps) {
   const isUpgrade = target
     ? target.installState.status !== 'not_installed'
     : false
+  const hasValidHash = canInstallMarketplaceVersion(entry)
 
   const sourceQuery = useQuery({
     queryKey: [
@@ -109,25 +112,39 @@ export function MarketplaceInstallDialog(props: MarketplaceInstallDialogProps) {
 
   const installMutation = useMutation({
     mutationFn: () => {
-      if (!target || !sourceQuery.data) throw new Error('source not fetched')
+      if (
+        !target ||
+        !sourceQuery.data ||
+        !entry ||
+        !isValidMarketplaceSHA256(entry.sha256)
+      ) {
+        throw new Error('verified marketplace source is required')
+      }
       return installMarketplacePlugin({
         source: sourceQuery.data.text,
-        sourceSha256: entry?.sha256,
+        sourceSha256: entry.sha256,
         remark: `${target.source.name} v${target.version}`,
       })
     },
-    onSuccess: (detail) => {
+    onSuccess: (result) => {
+      const detail = result.data
       queryClient.invalidateQueries({ queryKey: ['task-plugins'] })
       queryClient.invalidateQueries({ queryKey: ['task-plugin', pluginKey] })
       queryClient.invalidateQueries({
         queryKey: ['task-plugin-versions', pluginKey],
       })
-      toast.success(
-        t('Installed {{name}} v{{version}}', {
-          name: detail.meta.name,
-          version: detail.meta.version,
-        })
-      )
+      if (result.runtimeSyncPending) {
+        toast.warning(
+          t('Plugin saved; runtime synchronization is pending.')
+        )
+      } else {
+        toast.success(
+          t('Installed {{name}} v{{version}}', {
+            name: detail.meta.name,
+            version: detail.meta.version,
+          })
+        )
+      }
       props.onOpenChange(false)
     },
   })
@@ -189,12 +206,13 @@ export function MarketplaceInstallDialog(props: MarketplaceInstallDialogProps) {
 
         <MarketplaceCapabilities plugin={target.plugin} version={entry} />
 
-        {!entry?.sha256 && (
-          <Alert>
-            <AlertTitle>{t('No integrity hash')}</AlertTitle>
+        {!hasValidHash && (
+          <Alert variant='destructive'>
+            <AlertTriangle />
+            <AlertTitle>{t('Verified sha256 required')}</AlertTitle>
             <AlertDescription>
               {t(
-                'This source does not publish a sha256 for this version, so the downloaded source cannot be pinned to what the source intended.'
+                'One-click install is disabled because this version has no valid 64-character sha256. Review and upload the source manually if you trust it.'
               )}
             </AlertDescription>
           </Alert>
@@ -311,7 +329,10 @@ export function MarketplaceInstallDialog(props: MarketplaceInstallDialogProps) {
           </Button>
           <Button
             disabled={
-              !sourceQuery.data || digestMismatch || installMutation.isPending
+              !sourceQuery.data ||
+              !hasValidHash ||
+              digestMismatch ||
+              installMutation.isPending
             }
             onClick={() => installMutation.mutate()}
           >

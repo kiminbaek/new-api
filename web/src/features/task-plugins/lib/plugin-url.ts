@@ -76,7 +76,11 @@ export function normalizePluginSourceUrl(input: string): string | null {
   return parsed.toString()
 }
 
-export type PluginSourceFetchFailure = 'unreachable' | 'not_found' | 'too_large'
+export type PluginSourceFetchFailure =
+  | 'unreachable'
+  | 'not_found'
+  | 'too_large'
+  | 'cross_origin_redirect'
 
 export class PluginSourceFetchError extends Error {
   constructor(
@@ -92,6 +96,21 @@ export class PluginSourceFetchError extends Error {
  * goes through here: the gateway never makes the outbound request, so there is
  * no server-side SSRF surface.
  */
+export function assertSameOriginResponse(
+  requestedUrl: string,
+  responseUrl: string
+): void {
+  if (!responseUrl) return
+  try {
+    if (new URL(responseUrl).origin !== new URL(requestedUrl).origin) {
+      throw new PluginSourceFetchError('cross_origin_redirect')
+    }
+  } catch (error) {
+    if (error instanceof PluginSourceFetchError) throw error
+    throw new PluginSourceFetchError('unreachable')
+  }
+}
+
 export async function fetchPluginSourceText(
   url: string,
   fetchImpl: typeof fetch = globalThis.fetch
@@ -105,6 +124,7 @@ export async function fetchPluginSourceText(
   if (!response.ok) {
     throw new PluginSourceFetchError('not_found', response.status)
   }
+  assertSameOriginResponse(url, response.url)
   const declaredLength = Number(response.headers.get('content-length'))
   if (
     Number.isFinite(declaredLength) &&

@@ -54,6 +54,24 @@ export class TaskPluginUsageError extends Error {
   }
 }
 
+export type TaskPluginMutationResult<T> = {
+  data: T
+  runtimeSyncPending: boolean
+}
+
+export function taskPluginMutationResult<T>(
+  response: { data: ApiResponse<T>; headers?: Record<string, unknown> & { get?: (name: string) => unknown } }
+): TaskPluginMutationResult<T> {
+  const headers = response.headers
+  const value =
+    headers?.get?.('x-task-plugin-runtime-sync') ??
+    headers?.['x-task-plugin-runtime-sync']
+  return {
+    data: requireSuccess(response.data),
+    runtimeSyncPending: value === 'pending',
+  }
+}
+
 function requireSuccess<T>(response: ApiResponse<T>): T {
   if (!response.success) {
     const data = response.data as TaskPluginUsage | undefined
@@ -92,7 +110,7 @@ export async function uploadTaskPlugin(source: string, remark: string) {
     { source, remark },
     mutationConfig
   )
-  return requireSuccess(response.data)
+  return taskPluginMutationResult(response)
 }
 
 /**
@@ -103,7 +121,7 @@ export async function uploadTaskPlugin(source: string, remark: string) {
  */
 export async function installMarketplacePlugin(request: {
   source: string
-  sourceSha256?: string
+  sourceSha256: string
   remark: string
 }) {
   const response = await api.post<ApiResponse<TaskPluginDetail>>(
@@ -111,12 +129,13 @@ export async function installMarketplacePlugin(request: {
     {
       source: request.source,
       sourceSha256: request.sourceSha256,
+      marketplace: true,
       enabled: true,
       remark: request.remark,
     },
     mutationConfig
   )
-  return requireSuccess(response.data)
+  return taskPluginMutationResult(response)
 }
 
 export async function listMarketplaceSources() {
@@ -141,7 +160,7 @@ export async function activateTaskPlugin(key: string, version: string) {
     { version },
     mutationConfig
   )
-  requireSuccess(response.data)
+  return taskPluginMutationResult(response)
 }
 
 export async function setTaskPluginStatus(
@@ -154,7 +173,7 @@ export async function setTaskPluginStatus(
     { enabled },
     { ...mutationConfig, params: options }
   )
-  requireSuccess(response.data)
+  return taskPluginMutationResult(response)
 }
 
 export async function deleteTaskPluginVersion(
@@ -166,7 +185,7 @@ export async function deleteTaskPluginVersion(
     `/api/plugin/task/${encodeURIComponent(key)}/versions/${encodeURIComponent(version)}`,
     { ...mutationConfig, params: force ? { force: true } : undefined }
   )
-  requireSuccess(response.data)
+  return taskPluginMutationResult(response)
 }
 
 export async function getTaskPluginEnabledOption() {

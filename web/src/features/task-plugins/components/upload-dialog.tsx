@@ -56,8 +56,8 @@ export function UploadDialog(props: UploadDialogProps) {
   const [importError, setImportError] = useState('')
   const mutation = useMutation({
     mutationFn: () => uploadTaskPlugin(source, remark),
-    onSuccess: (data) => {
-      setResult(data)
+    onSuccess: (result) => {
+      setResult(result.data)
       queryClient.invalidateQueries({ queryKey: ['task-plugins'] })
       if (props.initialKey) {
         queryClient.invalidateQueries({
@@ -67,7 +67,11 @@ export function UploadDialog(props: UploadDialogProps) {
           queryKey: ['task-plugin-versions', props.initialKey],
         })
       }
-      toast.success(t('Plugin uploaded successfully'))
+      if (result.runtimeSyncPending) {
+        toast.warning(t('Plugin saved; runtime synchronization is pending.'))
+      } else {
+        toast.success(t('Plugin uploaded successfully'))
+      }
     },
   })
 

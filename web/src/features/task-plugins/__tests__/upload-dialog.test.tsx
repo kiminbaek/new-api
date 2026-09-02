@@ -209,8 +209,11 @@ describe('UploadDialog upload lifecycle', () => {
     await waitFor(() => expect(footerButton(/Uploading/)).toBeDisabled())
 
     resolveUpload({
-      source: 'const a = 1',
-      meta: { key: 'demo', name: 'Demo', version: '1.0.0', apiVersion: 1 },
+      data: {
+        source: 'const a = 1',
+        meta: { key: 'demo', name: 'Demo', version: '1.0.0', apiVersion: 1 },
+      },
+      runtimeSyncPending: false,
     })
     expect(
       await screen.findByText('Parsed plugin metadata')

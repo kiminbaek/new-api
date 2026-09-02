@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1002,6 +1003,7 @@ func TestUploadTaskPluginSourceSha256(t *testing.T) {
 	tests := []struct {
 		name        string
 		key         string
+		marketplace bool
 		withHash    bool
 		hash        string
 		wantSuccess bool
@@ -1010,27 +1012,42 @@ func TestUploadTaskPluginSourceSha256(t *testing.T) {
 		{
 			name:        "matching hash succeeds",
 			key:         "sha256-match",
+			marketplace: true,
 			withHash:    true,
 			wantSuccess: true,
 		},
 		{
-			name:      "mismatching hash rejected",
-			key:       "sha256-mismatch",
-			withHash:  true,
-			hash:      "deadbeef",
-			wantError: "plugin source sha256 mismatch",
+			name:        "valid but mismatching hash rejected",
+			key:         "sha256-mismatch",
+			marketplace: true,
+			withHash:    true,
+			hash:        strings.Repeat("0", 64),
+			wantError:   "plugin source sha256 mismatch",
 		},
 		{
-			name:        "absent field unchanged",
+			name:      "invalid hash format rejected",
+			key:       "sha256-format",
+			withHash:  true,
+			hash:      "deadbeef",
+			wantError: "plugin source sha256 must be 64 hexadecimal characters",
+		},
+		{
+			name:        "manual upload without hash remains supported",
 			key:         "sha256-absent",
 			wantSuccess: true,
+		},
+		{
+			name:        "marketplace upload requires hash",
+			key:         "sha256-marketplace-missing",
+			marketplace: true,
+			wantError:   "marketplace plugin requires a valid sha256",
 		},
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
 			cleanupTaskPluginControllerRuntime(t, testCase.key)
 			source := taskPluginControllerTestSource(testCase.key, "1.0.0")
-			payload := map[string]any{"source": source}
+			payload := map[string]any{"source": source, "marketplace": testCase.marketplace}
 			if testCase.withHash {
 				hash := testCase.hash
 				if hash == "" {
@@ -1060,6 +1077,27 @@ func TestUploadTaskPluginSourceSha256(t *testing.T) {
 			assert.Zero(t, count)
 		})
 	}
+}
+
+func TestCompleteTaskPluginMutationReportsPendingAfterDatabaseCommit(t *testing.T) {
+	previous := syncTaskPluginsAfterMutation
+	syncTaskPluginsAfterMutation = func(context.Context) error {
+		return errors.New("runtime publish unavailable")
+	}
+	t.Cleanup(func() { syncTaskPluginsAfterMutation = previous })
+
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodPost, "/api/plugin/task", nil)
+	data := gin.H{"plugin_enabled": true}
+
+	completeTaskPluginMutation(context, data)
+
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Equal(t, taskPluginRuntimeSyncPendingValue, recorder.Header().Get(taskPluginRuntimeSyncHeader))
+	assert.Contains(t, recorder.Body.String(), `"success":true`)
+	assert.Contains(t, recorder.Body.String(), `"plugin_enabled":true`)
+	assert.Contains(t, recorder.Body.String(), "runtime synchronization is pending")
 }
 
 func setupTaskPluginMarketplaceSourcesTest(t *testing.T) {

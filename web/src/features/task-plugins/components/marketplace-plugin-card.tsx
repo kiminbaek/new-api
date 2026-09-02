@@ -30,6 +30,7 @@ import { getChannelTypeLabel } from '@/features/channels/lib'
 import { resolveLocalizedText } from '@/lib/localized-text'
 
 import {
+  canInstallMarketplaceVersion,
   findMarketplaceVersion,
   marketplaceBuiltInVersion,
   resolveMarketplaceActionPolicy,
@@ -54,6 +55,7 @@ export function MarketplacePluginCard(props: MarketplacePluginCardProps) {
   const labelClass = 'text-muted-foreground text-[11px] font-medium select-none'
   const actionPolicy = resolveMarketplaceActionPolicy(props.installed)
   const builtInVersion = marketplaceBuiltInVersion(props.installed)
+  const canInstall = canInstallMarketplaceVersion(latestEntry)
 
   return (
     <div className='flex h-full flex-col gap-2.5 rounded-xl border p-3'>
@@ -109,10 +111,10 @@ export function MarketplacePluginCard(props: MarketplacePluginCardProps) {
         </div>
       )}
 
-      {!latestEntry?.sha256 && (
+      {!canInstall && (
         <div className='text-destructive flex items-center gap-1 text-xs'>
           <TriangleAlert className='size-3 shrink-0' aria-hidden='true' />
-          {t('No integrity hash')}
+          {t('Verified sha256 required for one-click install')}
         </div>
       )}
 
@@ -126,10 +128,13 @@ export function MarketplacePluginCard(props: MarketplacePluginCardProps) {
               props.installState.status === 'up_to_date' ? 'outline' : 'default'
             }
             className='w-full'
+            disabled={!canInstall}
             onClick={props.onInstall}
           >
             <Download />
-            {getActionLabel(props.installState, t)}
+            {canInstall
+              ? getActionLabel(props.installState, t)
+              : t('Manual upload required')}
           </Button>
         )}
       </div>

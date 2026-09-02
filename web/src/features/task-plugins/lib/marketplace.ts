@@ -28,6 +28,16 @@ export const SUPPORTED_INDEX_VERSION = 1
 /** The gateway only runs task plugins today; other kinds are filtered out. */
 export const SUPPORTED_PLUGIN_KIND = 'task'
 
+export function isValidMarketplaceSHA256(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-fA-F0-9]{64}$/.test(value.trim())
+}
+
+export function canInstallMarketplaceVersion(
+  version: MarketplaceIndexVersion | undefined
+): boolean {
+  return isValidMarketplaceSHA256(version?.sha256)
+}
+
 /**
  * Resolves a version's `path` against the index URL it was declared in, so the
  * same index works behind any raw prefix (GitHub raw, jsDelivr, a mirror).
@@ -282,7 +292,9 @@ export function indexHasIntegrityHashes(index: MarketplaceIndex): boolean {
   return (
     index.plugins.length > 0 &&
     index.plugins.every((plugin) =>
-      plugin.versions.every((version) => Boolean(version.sha256))
+      plugin.versions.every((version) =>
+        isValidMarketplaceSHA256(version.sha256)
+      )
     )
   )
 }

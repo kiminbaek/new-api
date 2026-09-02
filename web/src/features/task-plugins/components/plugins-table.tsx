@@ -82,7 +82,10 @@ export function PluginsTable(props: PluginsTableProps) {
       enabled: boolean
       options?: { cascade?: boolean; force?: boolean }
     }) => setTaskPluginStatus(key, enabled, options),
-    onSuccess: () => {
+    onSuccess: (result) => {
+      if (result.runtimeSyncPending) {
+        toast.warning(t('Plugin saved; runtime synchronization is pending.'))
+      }
       queryClient.invalidateQueries({ queryKey: ['task-plugins'] })
       setBlockedAction(null)
       setBlockedUsage(null)
@@ -99,9 +102,13 @@ export function PluginsTable(props: PluginsTableProps) {
   const deleteMutation = useMutation({
     mutationFn: (plugin: TaskPluginListItem) =>
       deleteTaskPluginVersion(plugin.meta.key, plugin.meta.version),
-    onSuccess: () => {
+    onSuccess: (result) => {
       setDeleteTarget(null)
-      toast.success(t('Plugin version deleted'))
+      if (result.runtimeSyncPending) {
+        toast.warning(t('Plugin saved; runtime synchronization is pending.'))
+      } else {
+        toast.success(t('Plugin version deleted'))
+      }
       queryClient.invalidateQueries({ queryKey: ['task-plugins'] })
     },
     onError: (error) => {
@@ -423,7 +430,12 @@ export function PluginsTable(props: PluginsTableProps) {
                   deleteTarget.meta.version,
                   true
                 )
-                  .then(() => {
+                  .then((result) => {
+                    if (result.runtimeSyncPending) {
+                      toast.warning(
+                        t('Plugin saved; runtime synchronization is pending.')
+                      )
+                    }
                     setBlockedAction(null)
                     setDeleteTarget(null)
                     queryClient.invalidateQueries({

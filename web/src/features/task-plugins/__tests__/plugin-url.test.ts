@@ -117,6 +117,7 @@ function stubResponse(options: {
   status?: number
   body?: string
   contentLength?: string
+  url?: string
 }): Response {
   const headers = new Headers()
   if (options.contentLength) {
@@ -125,6 +126,7 @@ function stubResponse(options: {
   return {
     ok: options.ok,
     status: options.status ?? (options.ok ? 200 : 404),
+    url: options.url ?? '',
     headers,
     text: async () => options.body ?? '',
   } as unknown as Response
@@ -138,6 +140,23 @@ describe('browser plugin source fetch', () => {
       async () => stubResponse({ ok: true, body: source })
     )
     assert.equal(text, source)
+  })
+
+  test('rejects a fetch redirected to another origin', async () => {
+    await assert.rejects(
+      fetchPluginSourceText('https://trusted.example/plugin.js', async () =>
+        stubResponse({
+          ok: true,
+          url: 'https://evil.example/plugin.js',
+          body: 'export const meta = {}',
+        })
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof PluginSourceFetchError)
+        assert.equal(error.reason, 'cross_origin_redirect')
+        return true
+      }
+    )
   })
 
   test('reports the status when the host answers with an error', async () => {

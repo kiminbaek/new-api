@@ -40,6 +40,7 @@ import {
   isDefaultMarketplaceSource,
   parseMarketplaceIndex,
 } from '../lib/marketplace'
+import { assertSameOriginResponse } from '../lib/plugin-url'
 import type { MarketplaceIndex, MarketplaceSource } from '../types'
 import {
   MarketplaceInstallDialog,
@@ -84,6 +85,7 @@ export function MarketplacePanel() {
           })
         )
       }
+      assertSameOriginResponse(selectedSource.index_url, response.url)
       return parseMarketplaceIndex(await response.json())
     },
   })

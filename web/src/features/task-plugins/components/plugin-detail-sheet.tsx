@@ -90,8 +90,12 @@ export function PluginDetailSheet(props: PluginDetailSheetProps) {
   })
   const activateMutation = useMutation({
     mutationFn: (version: string) => activateTaskPlugin(key, version),
-    onSuccess: () => {
-      toast.success(t('Plugin version activated'))
+    onSuccess: (result) => {
+      if (result.runtimeSyncPending) {
+        toast.warning(t('Plugin saved; runtime synchronization is pending.'))
+      } else {
+        toast.success(t('Plugin version activated'))
+      }
       queryClient.invalidateQueries({ queryKey: ['task-plugins'] })
       queryClient.invalidateQueries({ queryKey: ['task-plugin', key] })
       queryClient.invalidateQueries({ queryKey: ['task-plugin-versions', key] })

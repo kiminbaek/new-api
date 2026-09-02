@@ -542,13 +542,28 @@ describe('source integrity and trust labels', () => {
         index([
           marketplacePlugin({
             versions: [
-              { version: '1.2.0', path: 'a.js', sha256: 'aa' },
-              { version: '1.0.0', path: 'b.js', sha256: 'bb' },
+              { version: '1.2.0', path: 'a.js', sha256: 'a'.repeat(64) },
+              { version: '1.0.0', path: 'b.js', sha256: 'b'.repeat(64) },
             ],
           }),
         ])
       ),
       true
+    )
+  })
+
+  test('treats an invalid hash format as unverified', () => {
+    assert.equal(
+      indexHasIntegrityHashes(
+        index([
+          marketplacePlugin({
+            versions: [
+              { version: '1.2.0', path: 'a.js', sha256: 'deadbeef' },
+            ],
+          }),
+        ])
+      ),
+      false
     )
   })
 
