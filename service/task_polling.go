@@ -119,6 +119,19 @@ type TaskPollSummary struct {
 	NullTasksFailed  int `json:"null_tasks_failed"`
 }
 
+func taskPollingMapKey(channelID int, upstreamID string) string {
+	return fmt.Sprintf("%d\x00%s", channelID, upstreamID)
+}
+
+func lookupPollingTask(taskM map[string]*model.Task, channelID int, upstreamID string) *model.Task {
+	if task := taskM[taskPollingMapKey(channelID, upstreamID)]; task != nil {
+		return task
+	}
+	// Compatibility for focused unit tests and internal callers built before
+	// channel-scoped keys. Production maps use only composite keys.
+	return taskM[upstreamID]
+}
+
 // RunTaskPollingOnce performs one async-task (Suno/video) polling pass
 // synchronously. It honors ctx cancellation (the system-task runner cancels it
 // when the lease is lost) and, when report is non-nil, reports progress as
@@ -166,7 +179,7 @@ func RunTaskPollingOnce(ctx context.Context, report func(processed, total int)) 
 				}
 				continue
 			}
-			taskM[upstreamID] = task
+			taskM[taskPollingMapKey(task.ChannelId, upstreamID)] = task
 			taskChannelM[task.ChannelId] = append(taskChannelM[task.ChannelId], upstreamID)
 		}
 		if len(taskChannelM) == 0 {
@@ -285,7 +298,7 @@ func updateBatchTasks(ctx context.Context, adaptor BatchTaskPollingAdaptor, chan
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		task := taskM[upstreamID]
+		task := lookupPollingTask(taskM, channelId, upstreamID)
 		if task == nil {
 			logger.LogWarn(ctx, fmt.Sprintf("Batch task response ignored: unknown task_id=%s", upstreamID))
 			continue
@@ -455,7 +468,7 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 	// GORM Updates mutates its struct argument while assigning fields, so passing
 	// the shared pointer creates a real race even when each task belongs to only
 	// one channel. Work on a deep copy and persist it through the existing CAS.
-	task := cloneTaskForPolling(taskM[taskId])
+	task := cloneTaskForPolling(lookupPollingTask(taskM, ch.Id, taskId))
 	if task == nil {
 		logger.LogError(ctx, fmt.Sprintf("Task %s not found in taskM", taskId))
 		return fmt.Errorf("task %s not found", taskId)

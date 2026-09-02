@@ -837,3 +837,16 @@ func TestBatchTerminalPendingTaskRetriesBillingWithoutStatusTransition(t *testin
 	assert.Equal(t, 5000+quota, getUserQuota(t, userID))
 	assert.Equal(t, int64(1), countLogs(t))
 }
+
+func TestPollingTaskIndexScopesDuplicateUpstreamIDsByChannel(t *testing.T) {
+	first := &model.Task{ID: 1, ChannelId: 701, PrivateData: model.TaskPrivateData{UpstreamTaskID: "1"}}
+	second := &model.Task{ID: 2, ChannelId: 702, PrivateData: model.TaskPrivateData{UpstreamTaskID: "1"}}
+	taskMap := map[string]*model.Task{
+		taskPollingMapKey(first.ChannelId, first.GetUpstreamTaskID()):   first,
+		taskPollingMapKey(second.ChannelId, second.GetUpstreamTaskID()): second,
+	}
+
+	assert.Same(t, first, lookupPollingTask(taskMap, first.ChannelId, "1"))
+	assert.Same(t, second, lookupPollingTask(taskMap, second.ChannelId, "1"))
+	assert.NotEqual(t, taskPollingMapKey(first.ChannelId, "1"), taskPollingMapKey(second.ChannelId, "1"))
+}
