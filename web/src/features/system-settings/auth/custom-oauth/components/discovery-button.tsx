@@ -46,8 +46,9 @@ export function DiscoveryButton(props: DiscoveryButtonProps) {
       return
     }
 
-    const res = await discover.mutateAsync(wellKnown)
-    if (res.success && res.data?.discovery) {
+    try {
+      const res = await discover.mutateAsync(wellKnown)
+      if (!res.data?.discovery) return
       const disc = res.data.discovery
       if (disc.authorization_endpoint) {
         props.form.setValue(
@@ -79,6 +80,8 @@ export function DiscoveryButton(props: DiscoveryButtonProps) {
           }
         }
       }
+    } catch {
+      // The mutation owns the error toast; keep existing form values intact.
     }
   }
 

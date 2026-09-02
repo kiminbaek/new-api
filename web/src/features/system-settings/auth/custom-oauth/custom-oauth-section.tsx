@@ -20,6 +20,7 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { CopyButton } from '@/components/copy-button'
+import { ErrorState } from '@/components/error-state'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 
 import { SettingsSection } from '../../components/settings-section'
@@ -35,7 +36,8 @@ type CustomOAuthSectionProps = {
 
 export function CustomOAuthSection(props: CustomOAuthSectionProps) {
   const { t } = useTranslation()
-  const { data: providers = [], isLoading } = useCustomOAuthProviders()
+  const providersQuery = useCustomOAuthProviders()
+  const providers = providersQuery.data ?? []
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editingProvider, setEditingProvider] =
     useState<CustomOAuthProvider | null>(null)
@@ -62,12 +64,33 @@ export function CustomOAuthSection(props: CustomOAuthSectionProps) {
     }
   }
 
-  if (isLoading) {
+  if (providersQuery.isLoading) {
     return (
       <SettingsSection title={t('Custom OAuth Providers')}>
         <div className='text-muted-foreground py-8 text-center text-sm'>
           {t('Loading...')}
         </div>
+      </SettingsSection>
+    )
+  }
+
+  if (providersQuery.isError) {
+    return (
+      <SettingsSection title={t('Custom OAuth Providers')}>
+        <ErrorState
+          title={t('Unable to load custom OAuth providers')}
+          description={
+            providersQuery.error instanceof Error
+              ? providersQuery.error.message
+              : undefined
+          }
+          onRetry={
+            providersQuery.isFetching
+              ? undefined
+              : () => void providersQuery.refetch()
+          }
+          className='min-h-[240px]'
+        />
       </SettingsSection>
     )
   }

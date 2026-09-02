@@ -45,8 +45,12 @@ export function ProviderTable(props: ProviderTableProps) {
 
   const handleDelete = async () => {
     if (!deleteTarget) return
-    await deleteProvider.mutateAsync(deleteTarget.id)
-    setDeleteTarget(null)
+    try {
+      await deleteProvider.mutateAsync(deleteTarget.id)
+      setDeleteTarget(null)
+    } catch {
+      // The mutation owns the error toast; keep the confirmation open to retry.
+    }
   }
 
   return (

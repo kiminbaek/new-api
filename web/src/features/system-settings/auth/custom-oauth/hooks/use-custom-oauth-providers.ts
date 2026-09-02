@@ -17,6 +17,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
+import i18next from 'i18next'
+
+import { requireSuccessfulResponse } from '@/lib/api-response'
 
 import { getCustomOAuthProviders } from '../api'
 
@@ -24,7 +27,10 @@ export function useCustomOAuthProviders() {
   return useQuery({
     queryKey: ['custom-oauth-providers'],
     queryFn: async () => {
-      const res = await getCustomOAuthProviders()
+      const res = requireSuccessfulResponse(
+        await getCustomOAuthProviders(),
+        i18next.t('Failed to load custom OAuth providers')
+      )
       return res.data ?? []
     },
   })

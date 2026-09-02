@@ -16,9 +16,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { api } from '@/lib/api'
+import { api, type ApiRequestConfig } from '@/lib/api'
 
 import type { CustomOAuthProvider, DiscoveryResponse } from './types'
+
+const customOAuthRequestConfig: ApiRequestConfig = {
+  skipBusinessError: true,
+  skipErrorHandler: true,
+}
 
 // ============================================================================
 // Response Types
@@ -37,21 +42,21 @@ interface ApiResponse<T = unknown> {
 export async function getCustomOAuthProviders(): Promise<
   ApiResponse<CustomOAuthProvider[]>
 > {
-  const res = await api.get('/api/custom-oauth-provider/')
+  const res = await api.get('/api/custom-oauth-provider/', customOAuthRequestConfig)
   return res.data
 }
 
 export async function getCustomOAuthProvider(
   id: number
 ): Promise<ApiResponse<CustomOAuthProvider>> {
-  const res = await api.get(`/api/custom-oauth-provider/${id}`)
+  const res = await api.get(`/api/custom-oauth-provider/${id}`, customOAuthRequestConfig)
   return res.data
 }
 
 export async function createCustomOAuthProvider(
   data: Omit<CustomOAuthProvider, 'id'>
 ): Promise<ApiResponse<CustomOAuthProvider>> {
-  const res = await api.post('/api/custom-oauth-provider/', data)
+  const res = await api.post('/api/custom-oauth-provider/', data, customOAuthRequestConfig)
   return res.data
 }
 
@@ -59,14 +64,14 @@ export async function updateCustomOAuthProvider(
   id: number,
   data: Partial<CustomOAuthProvider>
 ): Promise<ApiResponse<CustomOAuthProvider>> {
-  const res = await api.put(`/api/custom-oauth-provider/${id}`, data)
+  const res = await api.put(`/api/custom-oauth-provider/${id}`, data, customOAuthRequestConfig)
   return res.data
 }
 
 export async function deleteCustomOAuthProvider(
   id: number
 ): Promise<ApiResponse> {
-  const res = await api.delete(`/api/custom-oauth-provider/${id}`)
+  const res = await api.delete(`/api/custom-oauth-provider/${id}`, customOAuthRequestConfig)
   return res.data
 }
 

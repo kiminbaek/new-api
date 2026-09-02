@@ -20,6 +20,8 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import i18next from 'i18next'
 import { toast } from 'sonner'
 
+import { requireSuccessfulResponse } from '@/lib/api-response'
+
 import {
   createCustomOAuthProvider,
   updateCustomOAuthProvider,
@@ -42,8 +44,11 @@ export function useCreateProvider() {
   const invalidate = useInvalidateOnSuccess()
 
   return useMutation({
-    mutationFn: (data: Omit<CustomOAuthProvider, 'id'>) =>
-      createCustomOAuthProvider(data),
+    mutationFn: async (data: Omit<CustomOAuthProvider, 'id'>) =>
+      requireSuccessfulResponse(
+        await createCustomOAuthProvider(data),
+        i18next.t('Failed to create provider')
+      ),
     onSuccess: (res) => {
       if (res.success) {
         toast.success(i18next.t('Provider created successfully'))
@@ -66,7 +71,13 @@ export function useUpdateProvider() {
     }: {
       id: number
       data: Partial<CustomOAuthProvider>
-    }) => updateCustomOAuthProvider(id, data),
+    }) =>
+      updateCustomOAuthProvider(id, data).then((response) =>
+        requireSuccessfulResponse(
+          response,
+          i18next.t('Failed to update provider')
+        )
+      ),
     onSuccess: (res) => {
       if (res.success) {
         toast.success(i18next.t('Provider updated successfully'))
@@ -83,7 +94,11 @@ export function useDeleteProvider() {
   const invalidate = useInvalidateOnSuccess()
 
   return useMutation({
-    mutationFn: (id: number) => deleteCustomOAuthProvider(id),
+    mutationFn: async (id: number) =>
+      requireSuccessfulResponse(
+        await deleteCustomOAuthProvider(id),
+        i18next.t('Failed to delete provider')
+      ),
     onSuccess: (res) => {
       if (res.success) {
         toast.success(i18next.t('Provider deleted successfully'))
@@ -98,7 +113,11 @@ export function useDeleteProvider() {
 
 export function useDiscoverEndpoints() {
   return useMutation({
-    mutationFn: (wellKnownUrl: string) => discoverOIDCEndpoints(wellKnownUrl),
+    mutationFn: async (wellKnownUrl: string) =>
+      requireSuccessfulResponse(
+        await discoverOIDCEndpoints(wellKnownUrl),
+        i18next.t('Failed to discover OIDC endpoints')
+      ),
     onSuccess: (res: DiscoveryResponse) => {
       if (res.success) {
         toast.success(i18next.t('OIDC endpoints discovered successfully'))

@@ -165,21 +165,20 @@ export function ProviderFormDialog(props: ProviderFormDialogProps) {
   }, [props.open, props.provider, form])
 
   const onSubmit = async (values: CustomOAuthFormValues) => {
-    if (isEditing && props.provider) {
-      const res = await updateProvider.mutateAsync({
-        id: props.provider.id,
-        data: values,
-      })
-      if (res.success) {
-        props.onOpenChange(false)
+    try {
+      if (isEditing && props.provider) {
+        await updateProvider.mutateAsync({
+          id: props.provider.id,
+          data: values,
+        })
+      } else {
+        await createProvider.mutateAsync(
+          values as Omit<CustomOAuthProvider, 'id'>
+        )
       }
-    } else {
-      const res = await createProvider.mutateAsync(
-        values as Omit<CustomOAuthProvider, 'id'>
-      )
-      if (res.success) {
-        props.onOpenChange(false)
-      }
+      props.onOpenChange(false)
+    } catch {
+      // The mutation owns the error toast; preserve the form for correction.
     }
   }
 
