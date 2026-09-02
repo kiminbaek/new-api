@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -12,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/oauth"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 )
 
@@ -138,6 +141,19 @@ type FetchCustomOAuthDiscoveryRequest struct {
 	IssuerURL    string `json:"issuer_url"`
 }
 
+const maxCustomOAuthDiscoveryBytes = 1 << 20
+
+func readCustomOAuthDiscoveryBody(reader io.Reader) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(reader, maxCustomOAuthDiscoveryBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("读取 Discovery 配置失败: %w", err)
+	}
+	if len(body) > maxCustomOAuthDiscoveryBytes {
+		return nil, errors.New("Discovery 配置超过 1 MiB 限制")
+	}
+	return body, nil
+}
+
 // FetchCustomOAuthDiscovery fetches OIDC discovery document via backend (root-only route)
 func FetchCustomOAuthDiscovery(c *gin.Context) {
 	var req FetchCustomOAuthDiscoveryRequest
@@ -176,10 +192,10 @@ func FetchCustomOAuthDiscovery(c *gin.Context) {
 	}
 	httpReq.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: 20 * time.Second}
+	client := service.GetSSRFProtectedHTTPClient()
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		common.ApiErrorMsg(c, "获取 Discovery 配置失败: "+err.Error())
+		common.ApiErrorMsg(c, "获取 Discovery 配置失败，请检查地址与 SSRF 防护设置")
 		return
 	}
 	defer resp.Body.Close()
@@ -194,8 +210,13 @@ func FetchCustomOAuthDiscovery(c *gin.Context) {
 		return
 	}
 
+	discoveryBody, err := readCustomOAuthDiscoveryBody(resp.Body)
+	if err != nil {
+		common.ApiErrorMsg(c, err.Error())
+		return
+	}
 	var discovery map[string]any
-	if err = common.DecodeJson(resp.Body, &discovery); err != nil {
+	if err = common.Unmarshal(discoveryBody, &discovery); err != nil {
 		common.ApiErrorMsg(c, "解析 Discovery 配置失败: "+err.Error())
 		return
 	}
