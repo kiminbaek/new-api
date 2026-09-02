@@ -34,6 +34,7 @@ import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { CopyButton } from '@/components/copy-button'
+import { ErrorState } from '@/components/error-state'
 import { StaticDataTable } from '@/components/data-table'
 import { sideDrawerContentClassName } from '@/components/drawer-layout'
 import { GroupBadge } from '@/components/group-badge'
@@ -272,6 +273,19 @@ function OverviewSummaryGrid(props: { model: PricingModel }) {
             latencyValues.length
         )
       : 0
+
+  if (metricsQuery.isError) {
+    return (
+      <div className='bg-muted/20 overflow-hidden rounded-lg border'>
+        <ErrorState
+          title={t('Unable to load performance data')}
+          description={metricsQuery.error.message}
+          onRetry={() => void metricsQuery.refetch()}
+          className='min-h-[140px] py-4'
+        />
+      </div>
+    )
+  }
 
   return (
     <div className='bg-muted/20 grid overflow-hidden rounded-lg border sm:grid-cols-3 sm:divide-x'>
