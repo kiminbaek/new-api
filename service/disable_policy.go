@@ -21,6 +21,7 @@ package service
 // 探测（1→2→4→8→16→30min 封顶），实测通过才恢复上线。
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -355,6 +356,30 @@ func ClearSmartDownByChannel(chId int) {
 	}
 }
 
+// ManualRecoverSmartDown performs an administrator-forced recovery without
+// reporting success before an L2 database-disabled channel is actually enabled.
+// When only one model is recovered, sibling model gates remain in memory and
+// continue to block routing after the channel itself is reopened.
+func ManualRecoverSmartDown(chId int, mdl string) error {
+	ch, err := model.GetChannelById(chId, false)
+	if err != nil || ch == nil {
+		return fmt.Errorf("channel %d not found: %w", chId, err)
+	}
+	info := ch.GetOtherInfo()
+	reason, _ := info["status_reason"].(string)
+	if ch.Status == common.ChannelStatusAutoDisabled && strings.Contains(reason, smartL2Marker) {
+		if !model.UpdateChannelStatus(chId, "", common.ChannelStatusEnabled, "") {
+			return fmt.Errorf("failed to enable L2-disabled channel %d", chId)
+		}
+	}
+	if mdl == "" {
+		ClearSmartDownByChannel(chId)
+	} else {
+		ClearSmartDown(chId, mdl)
+	}
+	return nil
+}
+
 // InitSmartDisable 注入 model 层选路过滤钩子。必须在服务启动时调用一次。
 func InitSmartDisable() {
 	model.SmartDownFilterHook = func(channelId int, mdl string) bool {
@@ -370,8 +395,8 @@ func InitSmartDisable() {
 //
 // L2 升级禁用会落库（channel.status=3 + status_reason 带「智能下线」标记），
 // 但探测队列是内存态——进程重启后记录清零，被 L2 禁掉的渠道就没人管了。
-// 这里把这类渠道找回来重新登记（解析「最后一个：<model>」作为探测目标），
-// 让探测 worker 接着恢复它们。人工禁用 / 账号级禁用不带该标记，不会被误捞。
+// 新格式持久化完整模型列表；旧格式只有「最后一个」时按渠道当前模型列表保守
+// 重建，确保每个模型都经过探测，绝不因单模型成功误放开整个渠道。
 func RestoreSmartDownFromDB() {
 	if !common.SmartAutoDisableEnabled {
 		return
@@ -401,15 +426,62 @@ func restoreSmartDownForChannel(ch *model.Channel) bool {
 	if !strings.Contains(reason, smartL2Marker) {
 		return false
 	}
-	mdl := ""
-	if idx := strings.LastIndex(reason, smartL2LastModelPrefix); idx >= 0 {
-		mdl = strings.TrimSpace(strings.TrimSuffix(reason[idx+len(smartL2LastModelPrefix):], "）"))
-	}
-	if mdl == "" {
+	models := parseSmartL2Models(ch, reason)
+	if len(models) == 0 {
 		return false
 	}
-	RegisterSmartDown(ch.Id, ch.Name, mdl, SmartDownModel, reason)
+	for _, mdl := range models {
+		RegisterSmartDown(ch.Id, ch.Name, mdl, SmartDownModel, reason)
+	}
 	return true
+}
+
+func normalizeSmartL2Models(models []string) []string {
+	out := make([]string, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, mdl := range models {
+		mdl = strings.TrimSpace(mdl)
+		if mdl == "" {
+			continue
+		}
+		if _, exists := seen[mdl]; exists {
+			continue
+		}
+		seen[mdl] = struct{}{}
+		out = append(out, mdl)
+	}
+	return out
+}
+
+func formatSmartL2Reason(base string, models []string) string {
+	models = normalizeSmartL2Models(models)
+	payload, err := json.Marshal(models)
+	if err != nil || len(models) == 0 {
+		return base
+	}
+	return fmt.Sprintf("%s（%s%s）", base, smartL2ModelsPrefix, payload)
+}
+
+func parseSmartL2Models(ch *model.Channel, reason string) []string {
+	if idx := strings.LastIndex(reason, smartL2ModelsPrefix); idx >= 0 {
+		raw := strings.TrimSpace(strings.TrimSuffix(reason[idx+len(smartL2ModelsPrefix):], "）"))
+		var models []string
+		if json.Unmarshal([]byte(raw), &models) == nil {
+			if models = normalizeSmartL2Models(models); len(models) > 0 {
+				return models
+			}
+		}
+	}
+	// 兼容 mp11 旧记录：L2 的语义就是全模型均已下线，因此优先恢复渠道
+	// 当前配置的完整模型列表，而不是只信任旧 reason 中的「最后一个」。
+	if models := normalizeSmartL2Models(ch.GetModels()); len(models) > 0 {
+		return models
+	}
+	if idx := strings.LastIndex(reason, smartL2LastModelPrefix); idx >= 0 {
+		mdl := strings.TrimSpace(strings.TrimSuffix(reason[idx+len(smartL2LastModelPrefix):], "）"))
+		return normalizeSmartL2Models([]string{mdl})
+	}
+	return nil
 }
 
 // RefreshSmartDownAfterChannelEdit 渠道配置被编辑后的下线记录处理。
@@ -433,7 +505,8 @@ func RefreshSmartDownAfterChannelEdit(chId int) {
 // smartL2Marker 与 disableModelOnChannel 升级文案保持一致；改文案必须同步改这里。
 const (
 	smartL2Marker          = "智能下线"
-	smartL2LastModelPrefix = "最后一个："
+	smartL2ModelsPrefix    = "模型列表："
+	smartL2LastModelPrefix = "最后一个：" // mp11 旧格式兼容
 )
 
 // DueSmartProbes 取出所有到期且可探测的记录，并就地标记 Probing。
@@ -666,7 +739,7 @@ var smartDisableChannelImpl = DisableChannel
 // quarantineWholeChannel 渠道级快速隔离：把该渠道全部模型登记为 L1 下线，
 // 再按「全模型已下线」语义升级 L2 整渠道禁用。
 //
-// reason 必须同时包含「智能下线」和「最后一个：<model>」——那是
+// reason 必须同时包含「智能下线」和完整模型列表——那是
 // RestoreSmartDownFromDB 与 probeOne 的跨重启解析协议，改文案必须同步。
 func quarantineWholeChannel(channelError types.ChannelError, streak int, err *types.NewAPIError) bool {
 	models, gerr := smartChannelModelsFetcher(channelError.ChannelId)
@@ -693,7 +766,8 @@ func quarantineWholeChannel(channelError types.ChannelError, streak int, err *ty
 	common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用 L2 快速隔离：通道「%s」（#%d）渠道级连续失败 %d 次，全部模型一次性下线",
 		channelError.ChannelName, channelError.ChannelId, streak))
 	NotifyChannelDown(channelError.ChannelId, channelError.ChannelName, "L2", "全部模型", fmt.Sprintf("渠道级连续失败 %d 次，快速隔离", streak))
-	smartDisableChannelImpl(channelError, fmt.Sprintf("渠道级连续失败 %d 次，全部模型均已被智能下线（最后一个：%s）", streak, last))
+	disableReason := formatSmartL2Reason(fmt.Sprintf("渠道级连续失败 %d 次，全部模型均已被智能下线", streak), models)
+	smartDisableChannelImpl(channelError, disableReason)
 	return true
 }
 

@@ -165,19 +165,20 @@ var SyncFrequency int // unit is second
 var BatchUpdateEnabled = false
 var BatchUpdateInterval int
 
-var RelayTimeout int // unit is second
+var RelayTimeout int               // unit is second
+var RelayResponseHeaderTimeout int // unit is second
 
-var RelayIdleConnTimeout int // unit is second
-var RelayUserAgent string    // [CUSTOM] stealth: global outbound User-Agent override
+var RelayIdleConnTimeout int        // unit is second
+var RelayUserAgent string           // [CUSTOM] stealth: global outbound User-Agent override
 var HealthCheckJitterEnabled = true // [CUSTOM] stealth: 存活检测间隔随机抖动(±15%)，默认开
 
 // [CUSTOM] 哨兵推送：渠道/模型异常事件主动通知（webhook 通用通道 + 可选邮件）。
 // 未启用或无通道时完全静默；配置由管理界面热改，推送永不阻塞主流程。
 var SentinelEnabled = false
-var SentinelWebhookURL = ""   // 通用 webhook；填 QQ 网关 http://127.0.0.1:3018/api/webui/send 即接入 QQ 推送
+var SentinelWebhookURL = ""  // 通用 webhook；填 QQ 网关 http://127.0.0.1:3018/api/webui/send 即接入 QQ 推送
 var SentinelWebhookAuth = "" // webhook 的 Bearer token（QQ 网关为管理员令牌）
-var SentinelEmailTo = ""      // 收件邮箱（空=不发邮件）
-var SentinelDailyHour = 8     // 每日一报的小时点（0-23）
+var SentinelEmailTo = ""     // 收件邮箱（空=不发邮件）
+var SentinelDailyHour = 8    // 每日一报的小时点（0-23）
 var (
 	// [CUSTOM] 需求4: 双向浮动自动优先级
 	AutoPriorityEnabled     bool

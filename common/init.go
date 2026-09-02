@@ -109,6 +109,7 @@ func InitEnv() {
 	SyncFrequency = GetEnvOrDefault("SYNC_FREQUENCY", 60)
 	BatchUpdateInterval = GetEnvOrDefault("BATCH_UPDATE_INTERVAL", 5)
 	RelayTimeout = GetEnvOrDefault("RELAY_TIMEOUT", 0)
+	RelayResponseHeaderTimeout = GetEnvOrDefault("RELAY_RESPONSE_HEADER_TIMEOUT", 1800)
 	RelayIdleConnTimeout = GetEnvOrDefault("RELAY_IDLE_CONN_TIMEOUT", 90)
 	// [CUSTOM] 需求1 隐蔽化：默认 UA 兜底开启（空值会暴露 Go-http-client 网关指纹）。
 	// DB options 表 RelayUserAgent 存在时覆盖此默认；渠道级 header_override 再覆盖全局。

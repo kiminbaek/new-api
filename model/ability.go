@@ -419,6 +419,14 @@ func CountAliveChannelsForModel(mdl string) int {
 	return int(n)
 }
 
+// ListAliveChannelIDsForModel returns DB-enabled candidates. The service layer
+// further removes in-memory smart-disable gates before reporting redundancy.
+func ListAliveChannelIDsForModel(mdl string) []int {
+	var ids []int
+	DB.Model(&Ability{}).Where("model = ? AND enabled = ?", mdl, true).Distinct("channel_id").Pluck("channel_id", &ids)
+	return ids
+}
+
 // [CUSTOM] 哨兵每日一报：列出可用渠道数 <= threshold 的模型名。
 func ListModelsWithFewChannels(threshold int) []string {
 	var rows []struct {
@@ -441,15 +449,15 @@ func ListModelsWithFewChannels(threshold int) []string {
 
 // [CUSTOM] 模型优先级看板数据：abilities join channels，返回有效优先级/基准/偏移/渠道名
 type ModelPriorityRow struct {
-	ChannelID    int     `json:"channel_id"`
-	ChannelName  string  `json:"channel_name"`
-	Model        string  `json:"model"`
-	Group        string  `json:"group"`
-	Enabled      bool    `json:"enabled"`
-	BasePriority int64   `json:"base_priority"`   // channels.priority（手动基准，UI 原值）
-	EffPriority   int64   `json:"eff_priority"`   // abilities.priority（当前有效值，含自动浮动）
-	Delta        int64   `json:"delta"`           // eff - base
-	Weight       uint    `json:"weight"`
+	ChannelID    int    `json:"channel_id"`
+	ChannelName  string `json:"channel_name"`
+	Model        string `json:"model"`
+	Group        string `json:"group"`
+	Enabled      bool   `json:"enabled"`
+	BasePriority int64  `json:"base_priority"` // channels.priority（手动基准，UI 原值）
+	EffPriority  int64  `json:"eff_priority"`  // abilities.priority（当前有效值，含自动浮动）
+	Delta        int64  `json:"delta"`         // eff - base
+	Weight       uint   `json:"weight"`
 }
 
 func GetModelPriorityBoard() ([]ModelPriorityRow, error) {

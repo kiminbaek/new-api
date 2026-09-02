@@ -35,8 +35,12 @@ func GetSmartDisableStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data": smartDisableStatusResponse{
-			Enabled: service.SmartDisableEnabled(),
-			Items:   items,
+			Enabled:        service.SmartDisableEnabled(),
+			Items:          items,
+			ProbeBudget:    service.CurrentAdaptiveProbeBudget(items),
+			DisableScore:   service.HealthDisableThreshold(),
+			RecoveryScore:  service.HealthRecoveryThreshold(),
+			DecayHalfLifeH: service.HealthDecayHalfLifeHours(),
 		},
 	})
 }
@@ -57,19 +61,31 @@ func ClearSmartDisableStatus(c *gin.Context) {
 	}
 	switch {
 	case req.All:
+		seen := make(map[int]struct{})
 		for _, st := range service.ListSmartDown() {
-			service.ClearSmartDown(st.ChannelId, st.Model)
+			if _, ok := seen[st.ChannelId]; ok {
+				continue
+			}
+			seen[st.ChannelId] = struct{}{}
+			if err := service.ManualRecoverSmartDown(st.ChannelId, ""); err != nil {
+				c.JSON(http.StatusOK, gin.H{"success": false, "message": "恢复失败：" + err.Error()})
+				return
+			}
 		}
-		common.SysLog("[CUSTOM] 智能禁用：管理员手动清除全部下线记录")
-	case req.ChannelId > 0 && req.Model == "":
-		service.ClearSmartDownByChannel(req.ChannelId)
-		common.SysLog("[CUSTOM] 智能禁用：管理员手动清除渠道下线记录")
+		common.SysLog("[CUSTOM] 智能禁用：管理员手动恢复全部下线记录")
 	case req.ChannelId > 0:
-		service.ClearSmartDown(req.ChannelId, req.Model)
-		common.SysLog("[CUSTOM] 智能禁用：管理员手动清除单项下线记录")
+		if err := service.ManualRecoverSmartDown(req.ChannelId, req.Model); err != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "恢复失败：" + err.Error()})
+			return
+		}
+		if req.Model == "" {
+			common.SysLog("[CUSTOM] 智能禁用：管理员手动恢复渠道全部下线记录")
+		} else {
+			common.SysLog("[CUSTOM] 智能禁用：管理员手动恢复单项下线记录")
+		}
 	default:
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "需指定 channel_id 或 all"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "恢复成功"})
 }

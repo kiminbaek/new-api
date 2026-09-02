@@ -1,7 +1,6 @@
 package openai
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -166,33 +165,9 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		}
 	}
 
-	// [CUSTOM FAKE-SUCCESS] 假成功识别（根治"空回复还计费"）：
-	// 上游异常收尾（EOF/超时/扫描错误/panic/ping失败/未知）且未收到任何有效数据块
-	// （ReceivedResponseCount==0，即客户端一个内容字节都没拿到）时，绝不能按成功放行——
-	// 此前会照样给客户端发 [DONE] 并按成功计费，导致：虚拟分组不切换、智能禁用不计数、
-	// 调用方收到"空回复"（表现为机器人静默不回话）。
-	// 此时尚未向客户端写出任何内容（写入只发生在 dataHandler/收尾段），可安全转为错误，
-	// 交给 controller 重试链：换渠道 → 轮转虚拟组成员 → 退预扣费 → RecordRelayFailure
-	// （拉低成功率排序 + 触发 L1 模型级智能禁用）。
-	// 客户端已断开（client_gone）时同样转错误，但标记 SkipRetry（重试无意义），仍走记账+退费。
-	if info.StreamStatus != nil && info.ReceivedResponseCount == 0 {
-		reason := info.StreamStatus.EndReason
-		abnormal := reason == relaycommon.StreamEndReasonEOF ||
-			reason == relaycommon.StreamEndReasonTimeout ||
-			reason == relaycommon.StreamEndReasonScannerErr ||
-			reason == relaycommon.StreamEndReasonPanic ||
-			reason == relaycommon.StreamEndReasonPingFail ||
-			reason == relaycommon.StreamEndReasonNone ||
-			reason == relaycommon.StreamEndReasonClientGone
-		if abnormal && usage.CompletionTokens == 0 && responseTextBuilder.Len() == 0 {
-			errMsg := fmt.Sprintf("upstream stream ended abnormally (reason=%s) with 0 chunks, treating as failure instead of fake success", reason)
-			logger.LogError(c, "[FAKE-SUCCESS] "+errMsg)
-			if reason == relaycommon.StreamEndReasonClientGone {
-				return nil, types.NewErrorWithStatusCode(errors.New(errMsg), types.ErrorCodeBadResponse,
-					http.StatusBadGateway, types.ErrOptionWithSkipRetry())
-			}
-			return nil, types.NewOpenAIError(errors.New(errMsg), types.ErrorCodeBadResponse, http.StatusBadGateway)
-		}
+	if streamErr := helper.StreamOutcomeError(info); streamErr != nil {
+		logger.LogError(c, "[FAKE-SUCCESS] "+streamErr.Error())
+		return nil, streamErr
 	}
 
 	// 处理最后的响应

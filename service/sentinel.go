@@ -93,6 +93,13 @@ func claimSentinelDebounce(channelId int, eventType string, entity string, now t
 	return true
 }
 
+func releaseSentinelDebounce(channelId int, eventType string, entity string) {
+	k := sentinelDebounceKey{channelId: channelId, event: eventType, entity: entity}
+	sentinelMu.Lock()
+	delete(sentinelLastSent, k)
+	sentinelMu.Unlock()
+}
+
 func resetSentinelDebounceForTest() {
 	sentinelMu.Lock()
 	sentinelLastSent = map[sentinelDebounceKey]time.Time{}
@@ -118,22 +125,32 @@ func EmitSentinel(eventType string, channelId int, entity string, title string, 
 	}
 	text := fmt.Sprintf("%s\n%s", title, content)
 	go func() {
+		delivered := false
 		defer func() {
 			if r := recover(); r != nil {
 				common.SysError(fmt.Sprintf("[CUSTOM][sentinel] push panic (survives): %v", r))
+			}
+			if eventType != "daily_report" && !delivered {
+				releaseSentinelDebounce(channelId, eventType, entity)
 			}
 		}()
 		if cfg.WebhookURL != "" {
 			if err := sentinelPostWebhook(cfg, title, text, level); err != nil {
 				common.SysError(fmt.Sprintf("[CUSTOM][sentinel] webhook fail: %v", err))
+			} else {
+				delivered = true
 			}
 		}
 		if cfg.EmailTo != "" {
 			if err := sentinelSendEmail(title, cfg.EmailTo, strings.ReplaceAll(content, "\n", "<br>")); err != nil {
 				common.SysError(fmt.Sprintf("[CUSTOM][sentinel] email fail: %v", err))
+			} else {
+				delivered = true
 			}
 		}
-		common.SysLog(fmt.Sprintf("[CUSTOM][sentinel] emitted %s ch#%d: %s", eventType, channelId, title))
+		if delivered {
+			common.SysLog(fmt.Sprintf("[CUSTOM][sentinel] emitted %s ch#%d: %s", eventType, channelId, title))
+		}
 	}()
 }
 
@@ -222,12 +239,23 @@ func NotifyChannelRecovered(chId int, chName string, level string, modelName str
 	EmitSentinel(SentinelEventChannelRecovered, chId, modelName, title, content)
 }
 
+func countRoutableChannelsForModel(modelName string) int {
+	ids := model.ListAliveChannelIDsForModel(modelName)
+	n := 0
+	for _, channelID := range ids {
+		if !IsSmartDown(channelID, modelName) {
+			n++
+		}
+	}
+	return n
+}
+
 // checkRedundancyAfterDisable 下线后检查受影响模型的剩余可用渠道数，<2 时预警。
 func checkRedundancyAfterDisable(modelName string) {
 	if modelName == "" {
 		return
 	}
-	n := model.CountAliveChannelsForModel(modelName)
+	n := countRoutableChannelsForModel(modelName)
 	if n < 2 {
 		EmitSentinel(SentinelEventRedundancyLow, -1, modelName,
 			fmt.Sprintf("⚠️ 模型 %s 冗余不足", modelName),

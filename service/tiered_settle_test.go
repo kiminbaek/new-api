@@ -1,9 +1,13 @@
 package service
 
 import (
+	"errors"
 	"math"
 	"math/rand"
+	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
@@ -1023,4 +1027,99 @@ func BenchmarkRatioBilling_Parallel(b *testing.B) {
 			ratioQuota(usage, false, 1.5, 5.0, 0.1, 1.0, 1.5)
 		}
 	})
+}
+
+type retryableSettlementFunding struct {
+	settleCalls int
+}
+
+func (*retryableSettlementFunding) Source() string       { return BillingSourceWallet }
+func (*retryableSettlementFunding) PreConsume(int) error { return nil }
+func (f *retryableSettlementFunding) Settle(int) error {
+	f.settleCalls++
+	return nil
+}
+func (*retryableSettlementFunding) Refund() error { return nil }
+
+func TestBillingSessionSettleRetriesOnlyFailedTokenStage(t *testing.T) {
+	funding := &retryableSettlementFunding{}
+	relayInfo := &relaycommon.RelayInfo{TokenId: 9, TokenKey: "token"}
+	session := &BillingSession{relayInfo: relayInfo, funding: funding, preConsumedQuota: 100}
+	oldDecrease := decreaseTokenQuotaForBilling
+	calls := 0
+	decreaseTokenQuotaForBilling = func(int, string, int) error {
+		calls++
+		if calls == 1 {
+			return errors.New("transient token write failure")
+		}
+		return nil
+	}
+	t.Cleanup(func() { decreaseTokenQuotaForBilling = oldDecrease })
+
+	require.Error(t, session.Settle(150))
+	assert.True(t, session.fundingSettled)
+	assert.False(t, session.tokenSettled)
+	assert.False(t, session.settled)
+	require.NoError(t, session.Settle(150))
+	assert.Equal(t, 1, funding.settleCalls, "successful funding stage must not run twice")
+	assert.Equal(t, 2, calls, "only failed token stage should retry")
+	assert.True(t, session.tokenSettled)
+	assert.True(t, session.settled)
+}
+
+type retryableRefundFunding struct {
+	mu    sync.Mutex
+	calls int
+	done  chan int
+}
+
+func (*retryableRefundFunding) Source() string       { return BillingSourceWallet }
+func (*retryableRefundFunding) PreConsume(int) error { return nil }
+func (*retryableRefundFunding) Settle(int) error     { return nil }
+func (f *retryableRefundFunding) Refund() error {
+	f.mu.Lock()
+	f.calls++
+	call := f.calls
+	f.mu.Unlock()
+	f.done <- call
+	if call == 1 {
+		return errors.New("transient funding refund failure")
+	}
+	return nil
+}
+
+func TestBillingSessionRefundRetriesOnlyFailedStage(t *testing.T) {
+	funding := &retryableRefundFunding{done: make(chan int, 2)}
+	relayInfo := &relaycommon.RelayInfo{TokenId: 9, TokenKey: "token"}
+	session := &BillingSession{
+		relayInfo: relayInfo, funding: funding, preConsumedQuota: 100, tokenConsumed: 100,
+	}
+	oldIncrease := increaseTokenQuotaForBilling
+	tokenCalls := 0
+	increaseTokenQuotaForBilling = func(int, string, int) error {
+		tokenCalls++
+		return nil
+	}
+	t.Cleanup(func() { increaseTokenQuotaForBilling = oldIncrease })
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	session.Refund(ctx)
+	require.Equal(t, 1, <-funding.done)
+	require.Eventually(t, func() bool {
+		session.mu.Lock()
+		defer session.mu.Unlock()
+		return !session.refunding
+	}, time.Second, time.Millisecond)
+	assert.False(t, session.refunded)
+	assert.True(t, session.tokenRefunded)
+
+	session.Refund(ctx)
+	require.Equal(t, 2, <-funding.done)
+	require.Eventually(t, func() bool {
+		session.mu.Lock()
+		defer session.mu.Unlock()
+		return session.refunded && !session.refunding
+	}, time.Second, time.Millisecond)
+	assert.Equal(t, 1, tokenCalls, "successful token refund must not run twice")
+	assert.Equal(t, 2, funding.calls)
 }

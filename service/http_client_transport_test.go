@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -23,13 +24,16 @@ func withRelayHTTPTransportSettings(t *testing.T) {
 	prevMaxIdle := common.RelayMaxIdleConns
 	prevPerHost := common.RelayMaxIdleConnsPerHost
 	prevTimeout := common.RelayIdleConnTimeout
+	prevResponseHeaderTimeout := common.RelayResponseHeaderTimeout
 	common.RelayMaxIdleConns = 500
 	common.RelayMaxIdleConnsPerHost = 100
 	common.RelayIdleConnTimeout = 90
+	common.RelayResponseHeaderTimeout = 1800
 	t.Cleanup(func() {
 		common.RelayMaxIdleConns = prevMaxIdle
 		common.RelayMaxIdleConnsPerHost = prevPerHost
 		common.RelayIdleConnTimeout = prevTimeout
+		common.RelayResponseHeaderTimeout = prevResponseHeaderTimeout
 	})
 }
 
@@ -488,4 +492,11 @@ func TestNormalizeHTTPTransportPolicyClampsWithoutPanic(t *testing.T) {
 	assert.Equal(t, HTTPTransportPolicy{Protocol: dto.HTTPProtocolAuto, Shards: 1}, NormalizeHTTPTransportPolicy(dto.ChannelSettings{HTTPProtocol: "http3"}))
 	assert.Equal(t, HTTPTransportPolicy{Protocol: dto.HTTPProtocolAuto, Shards: 1}, NormalizeHTTPTransportPolicy(dto.ChannelSettings{HTTP2ConnectionShards: -3}))
 	assert.Equal(t, HTTPTransportPolicy{Protocol: dto.HTTPProtocolAuto, Shards: 8}, NormalizeHTTPTransportPolicy(dto.ChannelSettings{HTTP2ConnectionShards: 99}))
+}
+
+func TestRelayTransportUsesResponseHeaderTimeout(t *testing.T) {
+	withRelayHTTPTransportSettings(t)
+	common.RelayResponseHeaderTimeout = 37
+	transport := newRelayHTTPTransport()
+	assert.Equal(t, 37*time.Second, transport.ResponseHeaderTimeout)
 }

@@ -77,3 +77,11 @@ func TestSendSentinelTestReportsMixedChannelFailure(t *testing.T) {
 	assert.Equal(t, "smtp unavailable", results["email"].Error)
 	assert.False(t, sentinelTestSucceeded(results))
 }
+
+func TestFailedSentinelDeliveryReleasesDebounce(t *testing.T) {
+	resetSentinelDebounceForTest()
+	now := time.Unix(2000, 0)
+	assert.True(t, claimSentinelDebounce(7, SentinelEventChannelDown, "model-a", now))
+	releaseSentinelDebounce(7, SentinelEventChannelDown, "model-a")
+	assert.True(t, claimSentinelDebounce(7, SentinelEventChannelDown, "model-a", now.Add(time.Second)))
+}

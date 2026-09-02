@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
@@ -44,6 +45,22 @@ func NewStreamScanner(reader io.Reader) *bufio.Scanner {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, InitialScannerBufferSize), getScannerBufferSize())
 	return scanner
+}
+
+// StreamOutcomeError turns a HTTP 200 stream that produced no valid SSE data
+// into a relay failure before an adaptor emits its synthetic terminal frame.
+// This keeps retry, virtual-group rotation, refund and smart-disable accounting
+// consistent across every adaptor using StreamScannerHandler.
+func StreamOutcomeError(info *relaycommon.RelayInfo) *types.NewAPIError {
+	if info == nil || info.StreamStatus == nil || info.ReceivedResponseCount > 0 {
+		return nil
+	}
+	reason := info.StreamStatus.EndReason
+	err := fmt.Errorf("upstream stream ended abnormally (reason=%s) with 0 chunks, treating as failure instead of fake success", reason)
+	if reason == relaycommon.StreamEndReasonClientGone {
+		return types.NewErrorWithStatusCode(err, types.ErrorCodeBadResponse, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
+	}
+	return types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusBadGateway)
 }
 
 func copyCodexSSEHeaders(c *gin.Context, resp *http.Response) {

@@ -111,7 +111,11 @@ func disableModelOnChannel(channelError types.ChannelError, modelName string, wh
 	// 该渠道所有模型都被下线 → 渠道自己等于死了，升级 L2。
 	if allModelsDownOnChannel(channelError.ChannelId) {
 		common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用 L2：通道「%s」（#%d）全部模型均已下线，升级为整渠道禁用", channelError.ChannelName, channelError.ChannelId))
-		DisableChannel(channelError, fmt.Sprintf("该渠道全部模型均已被智能下线（最后一个：%s）", modelName))
+		models, fetchErr := smartChannelModelsFetcher(channelError.ChannelId)
+		if fetchErr != nil || len(models) == 0 {
+			models = []string{modelName}
+		}
+		DisableChannel(channelError, formatSmartL2Reason("该渠道全部模型均已被智能下线", models))
 		return ActionDisableChannel
 	}
 	return ActionDisableModel

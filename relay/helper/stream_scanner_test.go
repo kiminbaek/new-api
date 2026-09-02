@@ -571,3 +571,27 @@ func TestStreamScannerHandler_StreamStatus_ReplacesPreInitialized(t *testing.T) 
 	assert.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason)
 	assert.Equal(t, 0, info.StreamStatus.TotalErrorCount())
 }
+
+func TestStreamOutcomeErrorRejectsZeroDataForAllTerminalReasons(t *testing.T) {
+	for _, reason := range []relaycommon.StreamEndReason{
+		relaycommon.StreamEndReasonDone,
+		relaycommon.StreamEndReasonEOF,
+		relaycommon.StreamEndReasonTimeout,
+		relaycommon.StreamEndReasonScannerErr,
+		relaycommon.StreamEndReasonHandlerStop,
+		relaycommon.StreamEndReasonPanic,
+		relaycommon.StreamEndReasonPingFail,
+	} {
+		info := &relaycommon.RelayInfo{StreamStatus: relaycommon.NewStreamStatus()}
+		info.StreamStatus.SetEndReason(reason, nil)
+		err := StreamOutcomeError(info)
+		require.NotNilf(t, err, "zero-data stream reason=%s must fail", reason)
+		assert.Equal(t, http.StatusBadGateway, err.StatusCode)
+	}
+}
+
+func TestStreamOutcomeErrorAllowsRealData(t *testing.T) {
+	info := &relaycommon.RelayInfo{ReceivedResponseCount: 1, StreamStatus: relaycommon.NewStreamStatus()}
+	info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonEOF, nil)
+	assert.Nil(t, StreamOutcomeError(info))
+}

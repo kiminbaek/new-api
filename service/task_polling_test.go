@@ -496,3 +496,21 @@ func TestSweepTimedOutTasksHonorsRefundRolloutBoundary(t *testing.T) {
 	assert.Equal(t, initialQuota+modernTaskQuota, getUserQuota(t, userID))
 	assert.Equal(t, int64(1), countLogs(t))
 }
+
+func TestCloneTaskForPollingIsDeepCopy(t *testing.T) {
+	src := &model.Task{
+		TaskID: "public", Data: []byte(`{"safe":true}`),
+		PrivateData: model.TaskPrivateData{
+			UpstreamTaskID: "upstream",
+			BillingContext: &model.TaskBillingContext{OtherRatios: map[string]float64{"duration": 2}},
+		},
+	}
+	dst := cloneTaskForPolling(src)
+	dst.Data[0] = '['
+	dst.PrivateData.BillingContext.OriginModelName = "changed"
+	dst.PrivateData.BillingContext.OtherRatios["duration"] = 9
+
+	assert.Equal(t, byte('{'), src.Data[0])
+	assert.Empty(t, src.PrivateData.BillingContext.OriginModelName)
+	assert.Equal(t, float64(2), src.PrivateData.BillingContext.OtherRatios["duration"])
+}

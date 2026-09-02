@@ -438,6 +438,25 @@ func updateVideoTasks(ctx context.Context, platform constant.TaskPlatform, chann
 	return nil
 }
 
+func cloneTaskForPolling(src *model.Task) *model.Task {
+	if src == nil {
+		return nil
+	}
+	dst := *src
+	dst.Data = append([]byte(nil), src.Data...)
+	if src.PrivateData.BillingContext != nil {
+		billing := *src.PrivateData.BillingContext
+		if src.PrivateData.BillingContext.OtherRatios != nil {
+			billing.OtherRatios = make(map[string]float64, len(src.PrivateData.BillingContext.OtherRatios))
+			for key, value := range src.PrivateData.BillingContext.OtherRatios {
+				billing.OtherRatios[key] = value
+			}
+		}
+		dst.PrivateData.BillingContext = &billing
+	}
+	return &dst
+}
+
 func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *model.Channel, taskId string, taskM map[string]*model.Task) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -448,7 +467,11 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 	}
 	proxy := ch.GetSetting().Proxy
 
-	task := taskM[taskId]
+	// taskM is a read-only snapshot shared with the coordinator and tests.
+	// GORM Updates mutates its struct argument while assigning fields, so passing
+	// the shared pointer creates a real race even when each task belongs to only
+	// one channel. Work on a deep copy and persist it through the existing CAS.
+	task := cloneTaskForPolling(taskM[taskId])
 	if task == nil {
 		logger.LogError(ctx, fmt.Sprintf("Task %s not found in taskM", taskId))
 		return fmt.Errorf("task %s not found", taskId)

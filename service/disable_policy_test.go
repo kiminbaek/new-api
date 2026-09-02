@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/stretchr/testify/assert"
 )
@@ -286,7 +287,36 @@ func TestQuarantineWholeChannelOnChannelStreak(t *testing.T) {
 	assert.True(t, IsSmartDown(7, "m-a"))
 	assert.True(t, IsSmartDown(7, "m-b"), "ALL models must be registered so probes can recover them")
 	assert.Contains(t, disabledReason, smartL2Marker)
-	assert.Contains(t, disabledReason, smartL2LastModelPrefix, "restore protocol marker must be present")
+	assert.Contains(t, disabledReason, smartL2ModelsPrefix, "restore protocol must persist every quarantined model")
+	assert.Contains(t, disabledReason, `["m-a","m-b"]`)
+}
+
+func TestRestoreSmartDownFromNewL2ReasonRestoresEveryModel(t *testing.T) {
+	resetSmartState()
+	ch := &model.Channel{Id: 17, Name: "l2-new", Models: "m-a,m-b"}
+	ch.SetOtherInfo(map[string]interface{}{
+		"status_reason": formatSmartL2Reason("全部模型均已被智能下线", []string{"m-a", "m-b"}),
+	})
+
+	assert.True(t, restoreSmartDownForChannel(ch))
+	assert.True(t, IsSmartDown(17, "m-a"))
+	assert.True(t, IsSmartDown(17, "m-b"))
+	assert.False(t, FinishSmartProbe(17, "m-a", true, ""), "one probe must not release an L2 channel")
+	assert.True(t, FinishSmartProbe(17, "m-b", true, ""), "only the last verified model may release the channel")
+}
+
+func TestRestoreSmartDownFromLegacyReasonUsesConfiguredModels(t *testing.T) {
+	resetSmartState()
+	ch := &model.Channel{Id: 18, Name: "l2-legacy", Models: "m-a,m-b,m-c"}
+	ch.SetOtherInfo(map[string]interface{}{
+		"status_reason": "该渠道全部模型均已被智能下线（最后一个：m-c）",
+	})
+
+	assert.True(t, restoreSmartDownForChannel(ch))
+	assert.True(t, IsSmartDown(18, "m-a"))
+	assert.True(t, IsSmartDown(18, "m-b"))
+	assert.True(t, IsSmartDown(18, "m-c"))
+	assert.False(t, FinishSmartProbe(18, "m-c", true, ""), "legacy restore must not trust only the last model")
 }
 
 func TestQuarantineNotTriggeredWhenOneModelSucceeds(t *testing.T) {
