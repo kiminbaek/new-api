@@ -303,7 +303,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), autoBan), newAPIError, relayInfo)
 
-		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
+		if !prepareRetryAfterFailure(c, retryParam, channel, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
 			break
 		}
 	}
@@ -423,6 +423,20 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 		return nil, newAPIError
 	}
 	return channel, nil
+}
+
+// prepareRetryAfterFailure decides whether the request may be replayed and,
+// when it may, excludes the failed channel from the rest of this request. This
+// guarantees that a retry actually fails over instead of selecting the same
+// unhealthy channel again.
+func prepareRetryAfterFailure(c *gin.Context, retryParam *service.RetryParam, channel *model.Channel, openaiErr *types.NewAPIError, retryTimes int) bool {
+	if !shouldRetry(c, openaiErr, retryTimes) {
+		return false
+	}
+	if retryParam != nil && channel != nil {
+		retryParam.Exclude(channel.Id)
+	}
+	return true
 }
 
 func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) bool {

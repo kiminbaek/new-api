@@ -160,6 +160,9 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 	if streamFailed {
 		return claudeInfo.Usage, nil
 	}
+	if outcomeErr := helper.StreamOutcomeError(info); outcomeErr != nil {
+		return nil, outcomeErr
+	}
 
 	HandleStreamFinalResponse(c, info, claudeInfo)
 	openAIUsage := buildOpenAIStyleUsageFromClaudeUsage(claudeInfo.Usage)

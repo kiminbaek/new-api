@@ -3,6 +3,7 @@ package helper
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -590,8 +592,31 @@ func TestStreamOutcomeErrorRejectsZeroDataForAllTerminalReasons(t *testing.T) {
 	}
 }
 
-func TestStreamOutcomeErrorAllowsRealData(t *testing.T) {
-	info := &relaycommon.RelayInfo{ReceivedResponseCount: 1, StreamStatus: relaycommon.NewStreamStatus()}
-	info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonEOF, nil)
-	assert.Nil(t, StreamOutcomeError(info))
+func TestStreamOutcomeErrorAllowsRealDataOnNormalTerminalReasons(t *testing.T) {
+	for _, reason := range []relaycommon.StreamEndReason{
+		relaycommon.StreamEndReasonDone,
+		relaycommon.StreamEndReasonEOF,
+		relaycommon.StreamEndReasonHandlerStop,
+	} {
+		info := &relaycommon.RelayInfo{ReceivedResponseCount: 1, StreamStatus: relaycommon.NewStreamStatus()}
+		info.StreamStatus.SetEndReason(reason, nil)
+		assert.Nilf(t, StreamOutcomeError(info), "real data with normal reason=%s must pass", reason)
+	}
+}
+
+func TestStreamOutcomeErrorRejectsPartialDataOnAbnormalTerminalReasonsWithoutRetry(t *testing.T) {
+	for _, reason := range []relaycommon.StreamEndReason{
+		relaycommon.StreamEndReasonTimeout,
+		relaycommon.StreamEndReasonScannerErr,
+		relaycommon.StreamEndReasonPanic,
+		relaycommon.StreamEndReasonPingFail,
+	} {
+		info := &relaycommon.RelayInfo{ReceivedResponseCount: 2, StreamStatus: relaycommon.NewStreamStatus()}
+		info.StreamStatus.SetEndReason(reason, errors.New("upstream interrupted"))
+		err := StreamOutcomeError(info)
+		require.NotNilf(t, err, "partial stream reason=%s must fail", reason)
+		assert.Equal(t, http.StatusBadGateway, err.StatusCode)
+		assert.True(t, types.IsSkipRetryError(err), "partial output must not be replayed")
+		assert.Contains(t, err.Error(), "2 chunks")
+	}
 }

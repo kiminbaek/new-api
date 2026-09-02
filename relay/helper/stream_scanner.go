@@ -52,15 +52,32 @@ func NewStreamScanner(reader io.Reader) *bufio.Scanner {
 // This keeps retry, virtual-group rotation, refund and smart-disable accounting
 // consistent across every adaptor using StreamScannerHandler.
 func StreamOutcomeError(info *relaycommon.RelayInfo) *types.NewAPIError {
-	if info == nil || info.StreamStatus == nil || info.ReceivedResponseCount > 0 {
+	if info == nil || info.StreamStatus == nil {
 		return nil
 	}
 	reason := info.StreamStatus.EndReason
-	err := fmt.Errorf("upstream stream ended abnormally (reason=%s) with 0 chunks, treating as failure instead of fake success", reason)
-	if reason == relaycommon.StreamEndReasonClientGone {
-		return types.NewErrorWithStatusCode(err, types.ErrorCodeBadResponse, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
+	if info.ReceivedResponseCount == 0 {
+		err := fmt.Errorf("upstream stream ended abnormally (reason=%s) with 0 chunks, treating as failure instead of fake success", reason)
+		if reason == relaycommon.StreamEndReasonClientGone {
+			return types.NewErrorWithStatusCode(err, types.ErrorCodeBadResponse, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
+		}
+		return types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusBadGateway)
 	}
-	return types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusBadGateway)
+
+	// Once response chunks have reached the client, replaying the request on a
+	// second channel would duplicate or splice the answer. Explicit transport
+	// failures must still fail accounting and reliability, but are marked
+	// SkipRetry so the current request is never transparently replayed.
+	switch reason {
+	case relaycommon.StreamEndReasonTimeout,
+		relaycommon.StreamEndReasonScannerErr,
+		relaycommon.StreamEndReasonPanic,
+		relaycommon.StreamEndReasonPingFail:
+		err := fmt.Errorf("upstream stream interrupted after %d chunks (reason=%s)", info.ReceivedResponseCount, reason)
+		return types.NewErrorWithStatusCode(err, types.ErrorCodeBadResponse, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
+	default:
+		return nil
+	}
 }
 
 func copyCodexSSEHeaders(c *gin.Context, resp *http.Response) {
