@@ -95,12 +95,15 @@ func batchUpdate() {
 		for key, value := range store {
 			switch i {
 			case BatchUpdateTypeTokenQuota:
-				err := increaseTokenQuota(key, value)
-				if err != nil {
-					common.SysLog("failed to batch update token quota: " + err.Error())
+				if err := increaseTokenQuota(key, value); err != nil {
+					common.SysLog("failed to batch update token quota, queued for retry: " + err.Error())
+					addNewRecord(i, key, value)
 				}
 			case BatchUpdateTypeChannelUsedQuota:
-				updateChannelUsedQuota(key, value)
+				if err := updateChannelUsedQuota(key, value); err != nil {
+					common.SysLog("failed to batch update channel quota, queued for retry: " + err.Error())
+					addNewRecord(i, key, value)
+				}
 			}
 		}
 	}
@@ -120,7 +123,12 @@ func batchUpdate() {
 		userIDs[key] = struct{}{}
 	}
 	for key := range userIDs {
-		updateUserQuotaUsedQuotaAndRequestCount(key, userQuotaStore[key], usedQuotaStore[key], requestCountStore[key])
+		if err := updateUserQuotaUsedQuotaAndRequestCount(key, userQuotaStore[key], usedQuotaStore[key], requestCountStore[key]); err != nil {
+			common.SysLog("failed to batch update user accounting, queued for retry: " + err.Error())
+			addNewRecord(BatchUpdateTypeUserQuota, key, userQuotaStore[key])
+			addNewRecord(BatchUpdateTypeUsedQuota, key, usedQuotaStore[key])
+			addNewRecord(BatchUpdateTypeRequestCount, key, requestCountStore[key])
+		}
 	}
 	common.SysLog("batch update finished")
 }

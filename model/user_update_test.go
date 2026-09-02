@@ -398,3 +398,58 @@ func TestResetUserPasswordByEmailRequiresSingleActiveMatch(t *testing.T) {
 	err = ResetUserPasswordByEmail("missing@example.com", "NewPassword123")
 	require.True(t, errors.Is(err, ErrEmailNotFound))
 }
+
+func TestBatchUpdateRetriesFailedAccountingDeltas(t *testing.T) {
+	setupUserUpdateTestState(t)
+	resetBatchUpdateTestState(t)
+	common.BatchUpdateEnabled = true
+
+	user := User{Id: 71, Username: "batch-retry-user", Password: "password", Status: common.UserStatusEnabled, Quota: 1000, UsedQuota: 100, RequestCount: 2}
+	channel := Channel{Id: 71, Name: "batch-retry-channel", Key: "sk-test", Status: common.ChannelStatusEnabled, UsedQuota: 100}
+	token := Token{Id: 71, UserId: 71, Key: "batch-retry-token", Name: "batch-retry-token", Status: common.TokenStatusEnabled, RemainQuota: 1000, UsedQuota: 100}
+	require.NoError(t, DB.Create(&user).Error)
+	require.NoError(t, DB.Create(&channel).Error)
+	require.NoError(t, DB.Create(&token).Error)
+
+	addNewRecord(BatchUpdateTypeUserQuota, user.Id, -50)
+	addNewRecord(BatchUpdateTypeUsedQuota, user.Id, 50)
+	addNewRecord(BatchUpdateTypeRequestCount, user.Id, 1)
+	addNewRecord(BatchUpdateTypeChannelUsedQuota, channel.Id, 50)
+	addNewRecord(BatchUpdateTypeTokenQuota, token.Id, -50)
+
+	for _, statement := range []string{
+		`CREATE TRIGGER fail_batch_user BEFORE UPDATE ON users WHEN OLD.id = 71 BEGIN SELECT RAISE(ABORT, 'forced user failure'); END;`,
+		`CREATE TRIGGER fail_batch_channel BEFORE UPDATE ON channels WHEN OLD.id = 71 BEGIN SELECT RAISE(ABORT, 'forced channel failure'); END;`,
+		`CREATE TRIGGER fail_batch_token BEFORE UPDATE ON tokens WHEN OLD.id = 71 BEGIN SELECT RAISE(ABORT, 'forced token failure'); END;`,
+	} {
+		require.NoError(t, DB.Exec(statement).Error)
+	}
+
+	batchUpdate()
+	var gotUser User
+	var gotChannel Channel
+	var gotToken Token
+	require.NoError(t, DB.First(&gotUser, user.Id).Error)
+	require.NoError(t, DB.First(&gotChannel, channel.Id).Error)
+	require.NoError(t, DB.First(&gotToken, token.Id).Error)
+	assert.Equal(t, 1000, gotUser.Quota)
+	assert.Equal(t, 100, gotUser.UsedQuota)
+	assert.Equal(t, 2, gotUser.RequestCount)
+	assert.Equal(t, int64(100), gotChannel.UsedQuota)
+	assert.Equal(t, 1000, gotToken.RemainQuota)
+	assert.Equal(t, 100, gotToken.UsedQuota)
+
+	for _, trigger := range []string{"fail_batch_user", "fail_batch_channel", "fail_batch_token"} {
+		require.NoError(t, DB.Exec("DROP TRIGGER "+trigger).Error)
+	}
+	batchUpdate()
+	require.NoError(t, DB.First(&gotUser, user.Id).Error)
+	require.NoError(t, DB.First(&gotChannel, channel.Id).Error)
+	require.NoError(t, DB.First(&gotToken, token.Id).Error)
+	assert.Equal(t, 950, gotUser.Quota)
+	assert.Equal(t, 150, gotUser.UsedQuota)
+	assert.Equal(t, 3, gotUser.RequestCount)
+	assert.Equal(t, int64(150), gotChannel.UsedQuota)
+	assert.Equal(t, 950, gotToken.RemainQuota)
+	assert.Equal(t, 150, gotToken.UsedQuota)
+}
