@@ -21,6 +21,7 @@ import { Gauge, HeartPulse, Timer } from 'lucide-react'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { ErrorState } from '@/components/error-state'
 import { IconBadge, type IconBadgeTone } from '@/components/ui/icon-badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { getPerfMetricsSummary } from '@/features/performance-metrics/api'
@@ -104,6 +105,15 @@ export function PerformanceHealthPanel() {
       </div>
 
       <div className='space-y-3 p-4 sm:p-5'>
+        {metricsQuery.isError ? (
+          <ErrorState
+            title={t('Unable to load performance data')}
+            description={metricsQuery.error.message}
+            onRetry={() => void metricsQuery.refetch()}
+            className='min-h-[180px] py-4'
+          />
+        ) : (
+          <>
         <div className='grid grid-cols-3 gap-2'>
           <MetricCell
             icon={HeartPulse}
@@ -172,6 +182,8 @@ export function PerformanceHealthPanel() {
               </div>
             </div>
           )
+        )}
+          </>
         )}
       </div>
     </section>

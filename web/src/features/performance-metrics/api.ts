@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { api } from '@/lib/api'
+import { requireSuccessfulResponse } from '@/lib/api-response'
 
 import type { PerformanceMetricsData, PerfSummaryAllData } from './types'
 
@@ -26,7 +27,10 @@ export async function getPerfMetricsSummary(
   const res = await api.get<PerfSummaryAllData>('/api/perf-metrics/summary', {
     params: { hours },
   })
-  return res.data
+  return requireSuccessfulResponse(
+    res.data,
+    'Failed to load performance metrics'
+  )
 }
 
 export async function getPerfMetrics(
@@ -39,5 +43,8 @@ export async function getPerfMetrics(
       hours,
     },
   })
-  return res.data
+  return requireSuccessfulResponse(
+    res.data,
+    'Failed to load performance metrics'
+  )
 }

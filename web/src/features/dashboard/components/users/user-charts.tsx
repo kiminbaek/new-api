@@ -22,6 +22,7 @@ import { Users, Loader2 } from 'lucide-react'
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { ErrorState } from '@/components/error-state'
 import { IconBadge } from '@/components/ui/icon-badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -40,6 +41,7 @@ import type {
   ProcessedUserChartData,
   UserChartsFilters,
 } from '@/features/dashboard/types'
+import { requireSuccessfulResponse } from '@/lib/api-response'
 import { getRollingDateRange, type TimeGranularity } from '@/lib/time'
 import { VCHART_OPTION } from '@/lib/vchart'
 
@@ -136,12 +138,17 @@ export function UserCharts(props: UserChartsProps) {
     updateTheme()
   }, [resolvedTheme])
 
-  const { data: userData, isLoading } = useQuery({
+  const userQuotaQuery = useQuery({
     queryKey: ['dashboard', 'user-quota', timeRange],
-    queryFn: () => getUserQuotaDataByUsers(timeRange),
-    select: (res) => (res.success ? res.data : []),
+    queryFn: async () =>
+      requireSuccessfulResponse(
+        await getUserQuotaDataByUsers(timeRange),
+        t('Failed to load user consumption data')
+      ).data,
     staleTime: 60_000,
   })
+  const userData = userQuotaQuery.data
+  const isLoading = userQuotaQuery.isLoading
 
   const chartData = useMemo(
     () =>
@@ -221,7 +228,15 @@ export function UserCharts(props: UserChartsProps) {
         )}
       </div>
 
-      <div className='grid gap-3'>
+      {userQuotaQuery.isError ? (
+        <ErrorState
+          title={t('Unable to load user consumption data')}
+          description={userQuotaQuery.error.message}
+          onRetry={() => void userQuotaQuery.refetch()}
+          className='min-h-[300px]'
+        />
+      ) : (
+        <div className='grid gap-3'>
         {USER_CHARTS.map((chart) => {
           const spec = chartData[chart.specKey]
 
@@ -258,7 +273,8 @@ export function UserCharts(props: UserChartsProps) {
             </div>
           )
         })}
-      </div>
+        </div>
+      )}
     </div>
   )
 }

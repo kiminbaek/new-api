@@ -21,6 +21,7 @@ import { Gauge, HeartPulse, Timer } from 'lucide-react'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { ErrorState } from '@/components/error-state'
 import { IconBadge, type IconBadgeTone } from '@/components/ui/icon-badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { getPerfMetricsSummary } from '@/features/performance-metrics/api'
@@ -100,6 +101,19 @@ export function PerformanceOverview() {
   const topModels = useMemo(() => models.slice(0, TOP_MODEL_LIMIT), [models])
   const loading = metricsQuery.isLoading
   const hasData = models.length > 0
+
+  if (metricsQuery.isError) {
+    return (
+      <div className='overflow-hidden rounded-lg border'>
+        <ErrorState
+          title={t('Unable to load performance data')}
+          description={metricsQuery.error.message}
+          onRetry={() => void metricsQuery.refetch()}
+          className='min-h-[140px] py-4'
+        />
+      </div>
+    )
+  }
 
   if (!loading && !hasData) {
     return (
