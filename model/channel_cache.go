@@ -177,8 +177,12 @@ func GetRandomSatisfiedChannel(
 	model string,
 	retry int,
 	filters []dto.ChannelFilter,
-	exclude map[int]bool,
+	excludeArgs ...map[int]bool,
 ) (*Channel, error) {
+	var exclude map[int]bool
+	if len(excludeArgs) > 0 {
+		exclude = excludeArgs[0]
+	}
 	if !common.MemoryCacheEnabled {
 		return GetChannel(group, model, retry, filters, exclude)
 

@@ -110,8 +110,12 @@ func GetChannel(
 	model string,
 	retry int,
 	filters []dto.ChannelFilter,
-	exclude map[int]bool,
+	excludeArgs ...map[int]bool,
 ) (*Channel, error) {
+	var exclude map[int]bool
+	if len(excludeArgs) > 0 {
+		exclude = excludeArgs[0]
+	}
 	var abilities []Ability
 	err := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).
 		Order("priority DESC, weight DESC").Find(&abilities).Error
