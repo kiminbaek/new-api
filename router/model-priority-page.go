@@ -10,8 +10,8 @@ import (
 // RegisterModelPriorityPage preserves old bookmarks while keeping the model
 // priority board inside the authenticated React admin console.
 func RegisterModelPriorityPage(router *gin.Engine) {
-	router.GET("/admin/model-priority", func(c *gin.Context) {
+	router.GET("/model-priority", func(c *gin.Context) {
 		c.Header("Cache-Control", "no-store")
-		c.Redirect(http.StatusTemporaryRedirect, "/model-priority")
+		c.Redirect(http.StatusTemporaryRedirect, "/admin/model-priority")
 	})
 }

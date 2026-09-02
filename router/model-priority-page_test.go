@@ -15,10 +15,10 @@ func TestLegacyModelPriorityPageRedirectsToAdminConsole(t *testing.T) {
 	RegisterModelPriorityPage(engine)
 
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/admin/model-priority", nil)
+	request := httptest.NewRequest(http.MethodGet, "/model-priority", nil)
 	engine.ServeHTTP(recorder, request)
 
 	assert.Equal(t, http.StatusTemporaryRedirect, recorder.Code)
-	assert.Equal(t, "/model-priority", recorder.Header().Get("Location"))
+	assert.Equal(t, "/admin/model-priority", recorder.Header().Get("Location"))
 	assert.Equal(t, "no-store", recorder.Header().Get("Cache-Control"))
 }

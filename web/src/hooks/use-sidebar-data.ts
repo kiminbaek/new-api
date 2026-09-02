@@ -38,7 +38,7 @@ import {
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
-import { type SidebarData } from '@/components/layout/types'
+import type { SidebarData } from '@/components/layout/types'
 import { ROLE } from '@/lib/roles'
 
 /**
@@ -165,8 +165,8 @@ export function useSidebarData(): SidebarData {
             icon: Settings,
           },
           {
-            title: '模型优先级',
-            url: '/model-priority',
+            title: '模型分级',
+            url: '/admin/model-priority',
             icon: Gauge,
             requiredRole: ROLE.ADMIN,
           },

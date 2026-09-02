@@ -1,12 +1,15 @@
 import { useQuery } from '@tanstack/react-query'
+import { Link } from '@tanstack/react-router'
 import {
   AlertCircle,
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
   CheckCircle2,
+  Info,
   Minus,
   RefreshCw,
+  Settings2,
   Search,
   SlidersHorizontal,
 } from 'lucide-react'
@@ -34,6 +37,9 @@ import {
   TableRow,
 } from '@/components/ui/table'
 
+import { ROLE } from '@/lib/roles'
+import { useAuthStore } from '@/stores/auth-store'
+
 import { getModelPriority, type ModelPriorityRow } from './api'
 
 type StatFilter = 'all' | 'neg' | 'pos' | 'adjusted'
@@ -60,6 +66,8 @@ function DeltaValue({ delta }: { delta: number }) {
 }
 
 export function ModelPriority() {
+  const user = useAuthStore((state) => state.auth.user)
+  const canConfigureGroups = Boolean(user && user.role >= ROLE.SUPER_ADMIN)
   const {
     data: rows = [],
     isLoading,
@@ -201,8 +209,23 @@ export function ModelPriority() {
 
   return (
     <SectionPageLayout>
-      <SectionPageLayout.Title>模型优先级看板</SectionPageLayout.Title>
+      <SectionPageLayout.Title>模型分级</SectionPageLayout.Title>
       <SectionPageLayout.Actions>
+        {canConfigureGroups ? (
+          <Button
+            variant='outline'
+            size='sm'
+            render={
+              <Link
+                to='/system-settings/models/$section'
+                params={{ section: 'model-groups' }}
+              />
+            }
+          >
+            <Settings2 />
+            模型组配置
+          </Button>
+        ) : null}
         <Button
           variant='outline'
           size='sm'
@@ -219,22 +242,42 @@ export function ModelPriority() {
         <div className='space-y-4'>
           <div className='flex flex-col gap-1'>
             <p className='text-muted-foreground text-sm'>
-              实时查看智能调度对每个渠道 × 模型的升降权结果。
+              查看每个渠道 × 模型的基准优先级、实时偏移与当前路由状态。
             </p>
-            <p className='text-muted-foreground text-xs'>
-              数据更新时间：{updatedText}
-            </p>
+            <div className='flex flex-wrap items-center gap-2 text-xs'>
+              <span className='text-muted-foreground'>数据更新时间：{updatedText}</span>
+              {!canConfigureGroups ? (
+                <Badge variant='outline'>模型组配置需超级管理员</Badge>
+              ) : null}
+            </div>
           </div>
+
+          <Alert>
+            <Info />
+            <AlertTitle>如何理解模型分级</AlertTitle>
+            <AlertDescription>
+              基准值来自渠道或模型配置；有效值是当前真正参与选路的优先级；
+              偏移为正表示升权，为负表示降权。隔离与 Canary 状态由健康探测和
+              智能禁用策略驱动，本页只展示运行结果，不直接修改路由。
+            </AlertDescription>
+          </Alert>
 
           <div className='grid grid-cols-2 gap-3 xl:grid-cols-4'>
             {statCards.map((stat) => (
               <button
                 key={stat.key}
                 type='button'
+                aria-pressed={fDelta === stat.key}
                 className='focus-visible:ring-ring rounded-xl text-left focus-visible:ring-2 focus-visible:outline-none'
                 onClick={() => applyStatFilter(stat.key)}
               >
-                <Card className='hover:bg-muted/30 h-full py-3 transition-colors'>
+                <Card
+                  className={`h-full py-3 transition-colors ${
+                    fDelta === stat.key
+                      ? 'border-primary bg-primary/5 ring-primary/20 ring-2'
+                      : 'hover:bg-muted/30'
+                  }`}
+                >
                   <CardContent className='space-y-1'>
                     <div
                       className={`text-2xl font-bold tabular-nums ${stat.color}`}
@@ -311,10 +354,22 @@ export function ModelPriority() {
             <Alert variant='destructive'>
               <AlertCircle />
               <AlertTitle>优先级数据加载失败</AlertTitle>
-              <AlertDescription>
-                {error instanceof Error
-                  ? error.message
-                  : '请检查网络或后端服务后重试。'}
+              <AlertDescription className='space-y-3'>
+                <p>
+                  {error instanceof Error
+                    ? error.message
+                    : '请检查网络或后端服务后重试。'}
+                </p>
+                <Button
+                  type='button'
+                  variant='outline'
+                  size='sm'
+                  disabled={isFetching}
+                  onClick={() => void refetch()}
+                >
+                  <RefreshCw className={isFetching ? 'animate-spin' : ''} />
+                  {isFetching ? '重试中' : '重新加载'}
+                </Button>
               </AlertDescription>
             </Alert>
           ) : null}
@@ -383,8 +438,8 @@ export function ModelPriority() {
               : null}
           </div>
 
-          <div className='hidden overflow-hidden rounded-xl border md:block'>
-            <Table>
+          <div className='hidden overflow-x-auto rounded-xl border md:block'>
+            <Table className='min-w-[860px]'>
               <TableHeader>
                 <TableRow>
                   {renderSortHead('#', 'channel_id')}
