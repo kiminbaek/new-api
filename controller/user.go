@@ -102,44 +102,50 @@ func Login(c *gin.Context) {
 		return
 	}
 
-	// 检查是否启用2FA
-	twoFAEnabled, err := model.IsTwoFAEnabled(user.Id)
-	if err != nil {
-		common.SysLog(fmt.Sprintf("Login failed to load 2FA status for user %d: %v", user.Id, err))
-		common.ApiErrorI18n(c, i18n.MsgDatabaseError)
-		return
-	}
-	if twoFAEnabled {
-		expiresAt := time.Now().Add(5 * time.Minute)
-		payload, err := common.Marshal(twoFALoginFlowPayload{AuthVersion: user.AuthVersion})
-		if err != nil {
-			common.ApiError(c, err)
-			return
-		}
-		flowToken, _, err := model.CreateAuthFlow(model.AuthFlowCreate{
-			Purpose:   model.AuthFlowPurposeTwoFALogin,
-			UserId:    user.Id,
-			Payload:   string(payload),
-			ExpiresAt: expiresAt,
-		})
-		if err != nil {
-			common.ApiError(c, err)
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"message": i18n.T(c, i18n.MsgUserRequire2FA),
-			"success": true,
-			"data": map[string]interface{}{
-				"require_2fa": true,
-				"flow_token":  flowToken,
-				"expires_at":  expiresAt.Unix(),
-			},
-		})
+	if requireTwoFAAfterPrimaryAuth(&user, loginMethodFromContext(c), c) {
 		return
 	}
 
 	setupLogin(&user, c)
+}
+
+func requireTwoFAAfterPrimaryAuth(user *model.User, loginMethod string, c *gin.Context) bool {
+	if user == nil || user.Id <= 0 {
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		return true
+	}
+	twoFAEnabled, err := model.IsTwoFAEnabled(user.Id)
+	if err != nil {
+		common.SysLog(fmt.Sprintf("Login failed to load 2FA status for user %d: %v", user.Id, err))
+		common.ApiErrorI18n(c, i18n.MsgDatabaseError)
+		return true
+	}
+	if !twoFAEnabled {
+		return false
+	}
+	loginMethod = strings.TrimSpace(loginMethod)
+	if loginMethod == "" {
+		loginMethod = "unknown"
+	}
+	expiresAt := time.Now().Add(5 * time.Minute)
+	payload, err := common.Marshal(twoFALoginFlowPayload{AuthVersion: user.AuthVersion, LoginMethod: loginMethod})
+	if err != nil {
+		common.ApiError(c, err)
+		return true
+	}
+	flowToken, _, err := model.CreateAuthFlow(model.AuthFlowCreate{
+		Purpose: model.AuthFlowPurposeTwoFALogin, UserId: user.Id, Payload: string(payload), ExpiresAt: expiresAt,
+	})
+	if err != nil {
+		common.ApiError(c, err)
+		return true
+	}
+	setAuthNoStore(c)
+	c.JSON(http.StatusOK, gin.H{
+		"message": i18n.T(c, i18n.MsgUserRequire2FA), "success": true,
+		"data": gin.H{"require_2fa": true, "flow_token": flowToken, "expires_at": expiresAt.Unix()},
+	})
+	return true
 }
 
 // loginMethodFromContext 根据请求路径推导登录方式，用于登录审计日志。
@@ -166,8 +172,10 @@ func loginMethodFromContext(c *gin.Context) string {
 }
 
 // recordLoginAudit 记录登录成功审计日志（对所有用户启用，仅记录成功，不记录失败）。
-func recordLoginAudit(user *model.User, c *gin.Context) {
-	method := loginMethodFromContext(c)
+func recordLoginAudit(user *model.User, c *gin.Context, method string) {
+	if strings.TrimSpace(method) == "" {
+		method = loginMethodFromContext(c)
+	}
 	ip := c.ClientIP()
 	extra := map[string]interface{}{
 		"login_method": method,
@@ -186,6 +194,14 @@ func setupLogin(user *model.User, c *gin.Context) {
 }
 
 func setupLoginAtAuthVersion(user *model.User, expectedAuthVersion int64, c *gin.Context) {
+	setupLoginAtAuthVersionAndMethod(user, expectedAuthVersion, loginMethodFromContext(c), c)
+}
+
+func setupLoginAtAuthVersionAndMethod(user *model.User, expectedAuthVersion int64, loginMethod string, c *gin.Context) {
+	loginMethod = strings.TrimSpace(loginMethod)
+	if loginMethod == "" {
+		loginMethod = "2fa"
+	}
 	if user == nil || user.Id <= 0 || user.Status != common.UserStatusEnabled {
 		common.ApiErrorI18n(c, i18n.MsgAuthUserBanned)
 		return
@@ -200,14 +216,14 @@ func setupLoginAtAuthVersion(user *model.User, expectedAuthVersion int64, c *gin
 		bundle, err = service.CreateLoginSessionAtAuthVersion(
 			user.Id,
 			expectedAuthVersion,
-			loginMethodFromContext(c),
+			loginMethod,
 			c.ClientIP(),
 			c.Request.UserAgent(),
 		)
 	} else {
 		bundle, err = service.CreateLoginSession(
 			user.Id,
-			loginMethodFromContext(c),
+			loginMethod,
 			c.ClientIP(),
 			c.Request.UserAgent(),
 		)
@@ -219,7 +235,7 @@ func setupLoginAtAuthVersion(user *model.User, expectedAuthVersion int64, c *gin
 	model.UpdateUserLastLoginAt(user.Id)
 	service.WriteRefreshCookie(c, bundle.RefreshToken)
 	setAuthNoStore(c)
-	recordLoginAudit(user, c)
+	recordLoginAudit(user, c, loginMethod)
 	c.JSON(http.StatusOK, gin.H{
 		"message": "",
 		"success": true,

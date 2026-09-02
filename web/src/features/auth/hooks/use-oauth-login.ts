@@ -20,7 +20,9 @@ import { useState, useRef, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import { getTwoFAChallenge } from '@/features/auth/lib/twofa-challenge'
 import { clearAuthentication, isAuthBundle } from '@/lib/api'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { createOAuthFlow, logout, telegramLogin } from '../api'
 import {
@@ -41,7 +43,10 @@ export function useOAuthLogin(
   redirectTo?: string
 ) {
   const { t } = useTranslation()
-  const { handleLoginSuccess } = useAuthRedirect()
+  const { handleLoginSuccess, redirectTo2FA } = useAuthRedirect()
+  const setPending2FAFlowToken = useAuthStore(
+    (state) => state.auth.setPending2FAFlowToken
+  )
   const [isLoading, setIsLoading] = useState(false)
   const [isTelegramDialogOpen, setIsTelegramDialogOpen] = useState(false)
   const [isTelegramPending, setIsTelegramPending] = useState(false)
@@ -188,6 +193,15 @@ export function useOAuthLogin(
     setIsTelegramPending(true)
     try {
       const response = await telegramLogin(authorization)
+      const challenge = response.success
+        ? getTwoFAChallenge(response.data)
+        : null
+      if (challenge) {
+        setPending2FAFlowToken(challenge.flow_token)
+        setIsTelegramDialogOpen(false)
+        redirectTo2FA()
+        return
+      }
       if (!response.success || !isAuthBundle(response.data)) {
         toast.error(t('Login failed'))
         return

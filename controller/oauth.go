@@ -219,6 +219,9 @@ func HandleOAuth(c *gin.Context) {
 	}
 
 	// 9. Setup login
+	if requireTwoFAAfterPrimaryAuth(user, loginMethodFromContext(c), c) {
+		return
+	}
 	setupLogin(user, c)
 }
 

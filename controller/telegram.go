@@ -268,6 +268,9 @@ func TelegramLogin(c *gin.Context) {
 		})
 		return
 	}
+	if requireTwoFAAfterPrimaryAuth(&user, loginMethodFromContext(c), c) {
+		return
+	}
 	setupLogin(&user, c)
 }
 

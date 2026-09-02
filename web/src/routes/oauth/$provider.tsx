@@ -33,6 +33,7 @@ import {
   OAUTH_BIND_RESULT_MESSAGE,
 } from '@/features/auth/constants'
 import { sanitizeAuthRedirect } from '@/features/auth/lib/auth-redirect'
+import { getTwoFAChallenge } from '@/features/auth/lib/twofa-challenge'
 import {
   parseTelegramBindCallback,
   postTelegramBindResult,
@@ -44,6 +45,7 @@ import {
 } from '@/features/auth/lib/oauth-callback-mode'
 import { api, applyAuthBundle, isAuthBundle } from '@/lib/api'
 import { getServerErrorMessageKey } from '@/lib/server-error-message'
+import { useAuthStore } from '@/stores/auth-store'
 
 type OAuthRequestConfig = AxiosRequestConfig & {
   skipBusinessError?: boolean
@@ -73,6 +75,9 @@ function OAuthCallback() {
     error_code?: string
   }
   const callbackState = search.state ?? ''
+  const setPending2FAFlowToken = useAuthStore(
+    (state) => state.auth.setPending2FAFlowToken
+  )
   const isTelegramBindCallback =
     provider === 'telegram' &&
     (search.telegram_bind === 'success' || search.telegram_bind === 'error')
@@ -198,11 +203,19 @@ function OAuthCallback() {
           skipBusinessError: true,
         }
         const response = await api.get(`/api/oauth/${provider}`, config)
-        if (response.data?.success && isAuthBundle(response.data?.data)) {
-          applyAuthBundle(response.data.data)
-          safeNavigate(search.redirect)
-          toast.success(i18next.t('Signed in successfully!'))
-          return
+        if (response.data?.success) {
+          const challenge = getTwoFAChallenge(response.data?.data)
+          if (challenge) {
+            setPending2FAFlowToken(challenge.flow_token)
+            safeNavigate('/otp', '/otp')
+            return
+          }
+          if (isAuthBundle(response.data?.data)) {
+            applyAuthBundle(response.data.data)
+            safeNavigate(search.redirect)
+            toast.success(i18next.t('Signed in successfully!'))
+            return
+          }
         }
         const messageKey = getServerErrorMessageKey(response.data)
         toast.error(
@@ -238,6 +251,7 @@ function OAuthCallback() {
     search.flow_token,
     search.redirect,
     search.telegram_bind,
+    setPending2FAFlowToken,
   ])
 
   return <OAuthCallbackScreen provider={provider} mode={mode} />
