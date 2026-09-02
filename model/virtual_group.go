@@ -22,12 +22,13 @@ func init() {
 	virtualGroupStore.Store(&empty)
 }
 
-// LoadVirtualModelGroups 解析并原子替换虚拟模型组配置；非法条目静默剔除。
-func LoadVirtualModelGroups(value string) error {
+// ParseVirtualModelGroups validates and normalizes virtual model groups without
+// changing runtime state. Invalid JSON must be rejected before persistence.
+func ParseVirtualModelGroups(value string) (map[string][]string, error) {
 	cfg := map[string][]string{}
 	if value != "" {
 		if err := json.Unmarshal([]byte(value), &cfg); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	clean := map[string][]string{}
@@ -47,6 +48,15 @@ func LoadVirtualModelGroups(value string) error {
 		if len(dedup) > 0 {
 			clean[name] = dedup
 		}
+	}
+	return clean, nil
+}
+
+// LoadVirtualModelGroups atomically replaces runtime state only after parsing.
+func LoadVirtualModelGroups(value string) error {
+	clean, err := ParseVirtualModelGroups(value)
+	if err != nil {
+		return err
 	}
 	virtualGroupStore.Store(&clean)
 	virtualGroupVersion.Add(1)

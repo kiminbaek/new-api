@@ -174,7 +174,7 @@ func InitOptionMap() {
 	common.OptionMap["HealthCheckJitterEnabled"] = strconv.FormatBool(common.HealthCheckJitterEnabled) // [CUSTOM] 检测抖动开关
 	common.OptionMap["SentinelEnabled"] = strconv.FormatBool(common.SentinelEnabled)                   // [CUSTOM] 哨兵推送总开关
 	common.OptionMap["SentinelWebhookURL"] = common.SentinelWebhookURL                                 // [CUSTOM] 哨兵 webhook（QQ 网关等）
-	common.OptionMap["SentinelWebhookAuth"] = common.SentinelWebhookAuth                             // [CUSTOM] 哨兵 webhook Bearer token
+	common.OptionMap["SentinelWebhookAuth"] = common.SentinelWebhookAuth                               // [CUSTOM] 哨兵 webhook Bearer token
 	common.OptionMap["SentinelEmailTo"] = common.SentinelEmailTo                                       // [CUSTOM] 哨兵邮件收件人
 	common.OptionMap["SentinelDailyHour"] = strconv.Itoa(common.SentinelDailyHour)                     // [CUSTOM] 每日一报小时点
 	common.OptionMap["AutoPriorityIntervalSec"] = strconv.Itoa(common.AutoPriorityIntervalSec)
@@ -240,6 +240,10 @@ func validateOptionValue(key string, value string) error {
 	if key == "MaxTokenAutoGroups" {
 		return setting.ValidateMaxTokenAutoGroups(value)
 	}
+	if key == "ModelGroups" {
+		_, err := ParseVirtualModelGroups(value)
+		return err
+	}
 	return nil
 }
 
@@ -252,12 +256,16 @@ func UpdateOption(key string, value string) error {
 		Key: key,
 	}
 	// https://gorm.io/docs/update.html#Save-All-Fields
-	DB.FirstOrCreate(&option, Option{Key: key})
+	if err := DB.FirstOrCreate(&option, Option{Key: key}).Error; err != nil {
+		return err
+	}
 	option.Value = value
 	// Save is a combination function.
 	// If save value does not contain primary key, it will execute Create,
 	// otherwise it will execute Update (with all fields).
-	DB.Save(&option)
+	if err := DB.Save(&option).Error; err != nil {
+		return err
+	}
 	// Update OptionMap
 	return updateOptionMap(key, value)
 }
@@ -301,6 +309,9 @@ func UpdateOptionsBulk(values map[string]string) error {
 }
 
 func updateOptionMap(key string, value string) (err error) {
+	if err := validateOptionValue(key, value); err != nil {
+		return err
+	}
 	if key == retiredThemeOptionKey {
 		common.OptionMapRWMutex.Lock()
 		delete(common.OptionMap, key)
@@ -318,7 +329,7 @@ func updateOptionMap(key string, value string) (err error) {
 	// [CUSTOM] 需求5 模型分级：{"top":["a","b"],...} 原子热更（独立于布尔/数值分支）
 	if key == "ModelGroups" {
 		if err := LoadVirtualModelGroups(value); err != nil {
-			common.SysError("Failed to load ModelGroups: " + err.Error())
+			return err
 		}
 	}
 

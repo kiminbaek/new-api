@@ -33,11 +33,17 @@ import type {
 
 export async function getSystemOptions() {
   const res = await api.get<SystemOptionsResponse>('/api/option/')
+  if (!res.data?.success) {
+    throw new Error(res.data?.message || 'Failed to load system settings')
+  }
   return res.data
 }
 
 export async function updateSystemOption(request: UpdateOptionRequest) {
   const res = await api.put<UpdateOptionResponse>('/api/option/', request)
+  if (!res.data?.success) {
+    throw new Error(res.data?.message || 'Failed to update setting')
+  }
   return res.data
 }
 

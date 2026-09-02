@@ -8,7 +8,7 @@ License, or (at your option) any later version.
 */
 // [CUSTOM] Virtual model groups with live candidates and stale-member visibility.
 
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowDown,
   ArrowUp,
@@ -20,10 +20,11 @@ import {
   TriangleAlert,
   X,
 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -45,7 +46,7 @@ import { FormDirtyIndicator } from '../components/form-dirty-indicator'
 import { FormNavigationGuard } from '../components/form-navigation-guard'
 import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
-import { useUpdateOption } from '../hooks/use-update-option'
+import { getSystemOptions, updateSystemOption } from '../api'
 import {
   appendGroupMembers,
   removeUnavailableMembers,
@@ -63,20 +64,37 @@ function membersToText(members: unknown): string {
 }
 
 function parseModelGroups(raw: unknown): GroupRow[] {
-  let object: Record<string, unknown> = {}
-  try {
-    const parsed = JSON.parse(typeof raw === 'string' ? raw || '{}' : '{}')
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      object = parsed as Record<string, unknown>
+  if (typeof raw !== 'string') {
+    throw new Error('ModelGroups must be a JSON string')
+  }
+  const parsed: unknown = JSON.parse(raw || '{}')
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('ModelGroups must be a JSON object')
+  }
+  const object = parsed as Record<string, unknown>
+  for (const [name, members] of Object.entries(object)) {
+    if (!name || !Array.isArray(members) || members.some((item) => typeof item !== 'string')) {
+      throw new Error(`Invalid model group: ${name || '(empty)'}`)
     }
-  } catch {
-    // Invalid server option is represented as an empty editor.
   }
   return Object.entries(object).map(([name, members]) => ({
     key: rowKeySeq++,
     name,
     membersText: membersToText(members),
   }))
+}
+
+function tryParseModelGroups(raw: unknown):
+  | { rows: GroupRow[]; error: null }
+  | { rows: []; error: string } {
+  try {
+    return { rows: parseModelGroups(raw), error: null }
+  } catch (error) {
+    return {
+      rows: [],
+      error: error instanceof Error ? error.message : 'Invalid ModelGroups',
+    }
+  }
 }
 
 function serializeGroups(rows: GroupRow[]): string {
@@ -97,18 +115,19 @@ type ModelGroupsSectionProps = {
 
 export function ModelGroupsSection({ defaultValues }: ModelGroupsSectionProps) {
   const { t } = useTranslation()
-  const updateOption = useUpdateOption()
+  const queryClient = useQueryClient()
+  const [isSaving, setIsSaving] = useState(false)
   const initialRaw =
     typeof defaultValues?.ModelGroups === 'string'
       ? defaultValues.ModelGroups
       : '{}'
+  const initialParse = useMemo(() => tryParseModelGroups(initialRaw), [initialRaw])
   const initialCanonical = useMemo(
-    () => serializeGroups(parseModelGroups(initialRaw)),
-    [initialRaw]
+    () => initialParse.error ? initialRaw : serializeGroups(initialParse.rows),
+    [initialParse, initialRaw]
   )
-  const [rows, setRows] = useState<GroupRow[]>(() =>
-    parseModelGroups(initialRaw)
-  )
+  const [savedCanonical, setSavedCanonical] = useState(initialCanonical)
+  const [rows, setRows] = useState<GroupRow[]>(() => initialParse.rows)
   const [search, setSearch] = useState('')
   const [selectedChannelId, setSelectedChannelId] = useState('')
   const [upstreamCandidates, setUpstreamCandidates] = useState<string[]>([])
@@ -137,7 +156,13 @@ export function ModelGroupsSection({ defaultValues }: ModelGroupsSectionProps) {
   }, [liveModels, search, upstreamCandidates])
   const channels = channelsQuery.data?.data?.items || []
   const currentCanonical = useMemo(() => serializeGroups(rows), [rows])
-  const isDirty = currentCanonical !== initialCanonical
+  const isDirty = currentCanonical !== savedCanonical
+
+  useEffect(() => {
+    if (initialParse.error || currentCanonical !== savedCanonical) return
+    setRows(initialParse.rows)
+    setSavedCanonical(serializeGroups(initialParse.rows))
+  }, [initialRaw, initialCanonical]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const patchRow = (key: number, patch: Partial<Omit<GroupRow, 'key'>>) => {
     setRows((previous) =>
@@ -204,15 +229,53 @@ export function ModelGroupsSection({ defaultValues }: ModelGroupsSectionProps) {
         )
       }
     }
+    const submitted = serializeGroups(rows)
+    setIsSaving(true)
     try {
-      await updateOption.mutateAsync({
+      await updateSystemOption({
         key: 'ModelGroups',
-        value: serializeGroups(rows),
+        value: submitted,
       })
-      toast.success(t('Model groups saved'))
-    } catch {
-      // mutation layer reports the error
+      const reloaded = await getSystemOptions()
+      const persistedRaw = reloaded.data?.find(
+        (option) => option.key === 'ModelGroups'
+      )?.value
+      if (typeof persistedRaw !== 'string') {
+        throw new Error(t('Saved setting was not returned by the server'))
+      }
+      const persistedRows = parseModelGroups(persistedRaw)
+      const persisted = serializeGroups(persistedRows)
+      if (persisted !== submitted) {
+        throw new Error(t('Saved setting does not match the submitted value'))
+      }
+      setRows(persistedRows)
+      setSavedCanonical(persisted)
+      await queryClient.invalidateQueries({ queryKey: ['system-options'] })
+      toast.success(t('Model groups saved and verified'))
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : t('Failed to save model groups')
+      )
+    } finally {
+      setIsSaving(false)
     }
+  }
+
+  if (initialParse.error) {
+    return (
+      <SettingsSection title={t('Model Groups')}>
+        <Alert variant='destructive'>
+          <TriangleAlert />
+          <AlertTitle>{t('Invalid saved model groups')}</AlertTitle>
+          <AlertDescription>
+            {t('Editing is disabled to prevent overwriting the saved value.')}
+            <span className='mt-2 block font-mono text-xs'>
+              {initialParse.error}
+            </span>
+          </AlertDescription>
+        </Alert>
+      </SettingsSection>
+    )
   }
 
   return (
@@ -226,7 +289,7 @@ export function ModelGroupsSection({ defaultValues }: ModelGroupsSectionProps) {
       <FormDirtyIndicator isDirty={isDirty} />
       <SettingsPageFormActions
         onSave={handleSave}
-        isSaving={updateOption.isPending}
+        isSaving={isSaving}
       />
 
       <div className='bg-muted/20 grid gap-3 rounded-xl border p-3 lg:grid-cols-[minmax(0,1fr)_260px_auto]'>
