@@ -63,6 +63,7 @@ import {
   sideDrawerSectionClassName,
   sideDrawerSwitchItemClassName,
 } from '@/components/drawer-layout'
+import { ErrorState } from '@/components/error-state'
 import { JsonCodeEditor } from '@/components/json-code-editor'
 import { JsonEditor } from '@/components/json-editor'
 import { MultiSelect } from '@/components/multi-select'
@@ -112,6 +113,7 @@ import {
   useSecureVerification,
 } from '@/features/auth/secure-verification'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
+import { requireSuccessfulResponse } from '@/lib/api-response'
 import { useHiddenClickUnlock } from '@/hooks/use-hidden-click-unlock'
 import {
   ADMIN_PERMISSION_ACTIONS,
@@ -684,11 +686,16 @@ export function ChannelMutateDrawer({
   const sensitiveLocked = isEditing && !canEditSensitive
 
   // Fetch channel details if editing
-  const { data: channelData, isLoading: isChannelLoading } = useQuery({
+  const channelQuery = useQuery({
     queryKey: channelsQueryKeys.detail(channelId || 0),
-    queryFn: () => getChannel(channelId || 0),
+    queryFn: async () =>
+      requireSuccessfulResponse(
+        await getChannel(channelId || 0),
+        t('Failed to load channel details')
+      ),
     enabled: isEditing && Boolean(channelId),
   })
+  const channelData = channelQuery.data
 
   // Fetch available groups
   const { data: groupsData, isLoading: isLoadingGroups } = useQuery({
@@ -878,7 +885,10 @@ export function ChannelMutateDrawer({
   // Helper computed values
   const isBatchMode =
     multiKeyMode === 'batch' || multiKeyMode === 'multi_to_single'
-  const isChannelDetailLoading = isEditing && isChannelLoading
+  const isChannelDetailLoading = isEditing && channelQuery.isLoading
+  const channelEditUnavailable =
+    isEditing &&
+    (channelQuery.isLoading || channelQuery.isError || !channelData?.data)
   const supportsMultiKeyAddMode =
     currentType !== 57 && !(currentType === 41 && vertexKeyType === 'api_key')
   const addModeOptions = useMemo(
@@ -1659,6 +1669,11 @@ export function ChannelMutateDrawer({
   // Submit handler
   const onSubmit = useCallback(
     async (data: ChannelFormValues) => {
+      if (channelEditUnavailable) {
+        toast.error(t('Channel details must load before editing'))
+        return
+      }
+
       // Validate key is required when creating
       if (!isEditing && !data.key?.trim()) {
         form.setError('key', {
@@ -1759,6 +1774,7 @@ export function ChannelMutateDrawer({
     },
     [
       isEditing,
+      channelEditUnavailable,
       sensitiveLocked,
       form,
       confirmMissingModelMappings,
@@ -1978,11 +1994,24 @@ export function ChannelMutateDrawer({
               id='channel-form'
               ref={channelFormRef}
               onSubmit={form.handleSubmit(onSubmit, onInvalid)}
+              aria-busy={channelEditUnavailable}
+              inert={channelEditUnavailable ? true : undefined}
               className={sideDrawerFormClassName('gap-5')}
             >
-              {isChannelDetailLoading ? (
-                <ChannelEditorLoadingState />
-              ) : (
+              {isChannelDetailLoading && <ChannelEditorLoadingState />}
+              {channelQuery.isError && (
+                <ErrorState
+                  title={t('Unable to load channel details')}
+                  description={channelQuery.error.message}
+                  onRetry={
+                    channelQuery.isFetching
+                      ? undefined
+                      : () => void channelQuery.refetch()
+                  }
+                  className='min-h-[280px]'
+                />
+              )}
+              {!channelEditUnavailable && (
                 <div className='grid gap-5 lg:grid-cols-[13rem_minmax(0,1fr)] lg:items-start'>
                   <ChannelEditorNav
                     providerLogo={
@@ -5099,7 +5128,11 @@ export function ChannelMutateDrawer({
             >
               {t('Cancel')}
             </SheetClose>
-            <Button form='channel-form' type='submit' disabled={isSubmitting}>
+            <Button
+              form='channel-form'
+              type='submit'
+              disabled={isSubmitting || channelEditUnavailable}
+            >
               {isSubmitting && (
                 <Loader2 className='mr-2 h-4 w-4 animate-spin' />
               )}

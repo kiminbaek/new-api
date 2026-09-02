@@ -84,7 +84,10 @@ function installApiFixtures(createdPayloads: Array<Record<string, unknown>>) {
   }
 }
 
-async function renderCreateDrawer(): Promise<void> {
+async function renderDrawer(
+  currentRow?: Record<string, unknown>,
+  waitForReady = true
+): Promise<void> {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
@@ -125,18 +128,24 @@ async function renderCreateDrawer(): Promise<void> {
     <QueryClientProvider client={queryClient}>
       <I18nextProvider i18n={i18n}>
         <ApiKeysProvider>
-          <ApiKeysMutateDrawer open onOpenChange={() => undefined} />
+          <ApiKeysMutateDrawer
+            open
+            onOpenChange={() => undefined}
+            currentRow={currentRow as never}
+          />
         </ApiKeysProvider>
       </I18nextProvider>
     </QueryClientProvider>
   )
-  await waitFor(
-    () => {
-      const saveButton = findButton('Save changes', false)
-      expect(saveButton).toBeEnabled()
-    },
-    { timeout: 1500 }
-  )
+  if (waitForReady) {
+    await waitFor(
+      () => {
+        const saveButton = findButton('Save changes', false)
+        expect(saveButton).toBeEnabled()
+      },
+      { timeout: 1500 }
+    )
+  }
 }
 
 function findButton(text: string, required: true): HTMLButtonElement
@@ -207,7 +216,7 @@ describe('API keys mutate drawer Auto group integration', () => {
   test('inherits the root Auto order and sends an empty override for every batch-created key', async () => {
     const createdPayloads: Array<Record<string, unknown>> = []
     installApiFixtures(createdPayloads)
-    await renderCreateDrawer()
+    await renderDrawer()
 
     const groupTrigger = getControlByLabel('Group')
     expect(groupTrigger.textContent?.includes('auto')).toBe(true)
@@ -240,7 +249,7 @@ describe('API keys mutate drawer Auto group integration', () => {
   test('preserves an unsaved custom order and mode after Auto to ordinary to Auto changes', async () => {
     const createdPayloads: Array<Record<string, unknown>> = []
     installApiFixtures(createdPayloads)
-    await renderCreateDrawer()
+    await renderDrawer()
 
     const autoOrderControl = getControlByLabel('Auto group order')
     const addGroupTrigger = autoOrderControl.querySelector<HTMLButtonElement>(
@@ -276,5 +285,26 @@ describe('API keys mutate drawer Auto group integration', () => {
     fireEvent.click(findButton('Save changes', true))
     await waitFor(() => expect(createdPayloads).toHaveLength(1))
     expect(createdPayloads[0]?.auto_groups).toEqual(['vip'])
+  })
+
+  test('keeps update disabled when the API key details fail to load', async () => {
+    const createdPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures(createdPayloads)
+    const fixtureGet = apiClient.get
+    apiClient.get = async (url) => {
+      if (url === '/api/token/7') {
+        return { data: { success: false, message: 'token unavailable' } }
+      }
+      return fixtureGet(url)
+    }
+
+    await renderDrawer({ id: 7, name: 'stale row' }, false)
+
+    expect(
+      await screen.findByText('Unable to load API key editor data')
+    ).toBeInTheDocument()
+    expect(screen.getByText('token unavailable')).toBeInTheDocument()
+    expect(findButton('Save changes', true)).toBeDisabled()
+    expect(createdPayloads).toHaveLength(0)
   })
 })

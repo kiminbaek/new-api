@@ -25,6 +25,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { DateTimePicker } from '@/components/datetime-picker'
+import { ErrorState } from '@/components/error-state'
 import {
   SideDrawerSection,
   SideDrawerSectionHeader,
@@ -64,6 +65,7 @@ import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { useStatus } from '@/hooks/use-status'
 import { getUserModels, getUserGroups } from '@/lib/api'
+import { requireSuccessfulResponse } from '@/lib/api-response'
 import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
 import { cn } from '@/lib/utils'
 
@@ -121,38 +123,47 @@ export function ApiKeysMutateDrawer({
   })
 
   // Fetch groups
-  const {
-    data: groupsData,
-    isFetched: groupsFetched,
-    isFetching: groupsFetching,
-  } = useQuery({
+  const groupsQuery = useQuery({
     queryKey: ['user-groups'],
-    queryFn: getUserGroups,
+    queryFn: async () =>
+      requireSuccessfulResponse(
+        await getUserGroups(),
+        t('Failed to load groups')
+      ),
     enabled: open,
     staleTime: 0,
   })
+  const groupsData = groupsQuery.data
+  const groupsFetched = groupsQuery.isFetched
+  const groupsFetching = groupsQuery.isFetching
 
-  const {
-    data: apiKeyData,
-    isFetched: apiKeyFetched,
-    isFetching: apiKeyFetching,
-  } = useQuery({
+  const apiKeyQuery = useQuery({
     queryKey: ['api-key', currentRowId],
-    queryFn: () => getApiKey(currentRowId ?? 0),
+    queryFn: async () =>
+      requireSuccessfulResponse(
+        await getApiKey(currentRowId ?? 0),
+        t('Failed to load API key details')
+      ),
     enabled: open && isUpdate && currentRowId !== undefined,
     staleTime: 0,
   })
+  const apiKeyData = apiKeyQuery.data
+  const apiKeyFetched = apiKeyQuery.isFetched
+  const apiKeyFetching = apiKeyQuery.isFetching
 
-  const {
-    data: autoGroupsData,
-    isFetched: autoGroupsFetched,
-    isFetching: autoGroupsFetching,
-  } = useQuery({
+  const autoGroupsQuery = useQuery({
     queryKey: ['token-auto-groups'],
-    queryFn: getTokenAutoGroups,
+    queryFn: async () =>
+      requireSuccessfulResponse(
+        await getTokenAutoGroups(),
+        t('Failed to load Auto group settings')
+      ),
     enabled: open,
     staleTime: 0,
   })
+  const autoGroupsData = autoGroupsQuery.data
+  const autoGroupsFetched = autoGroupsQuery.isFetched
+  const autoGroupsFetching = autoGroupsQuery.isFetching
 
   const models = modelsData?.data || []
   const groups = useMemo<ApiKeyGroupOption[]>(
@@ -257,6 +268,8 @@ export function ApiKeysMutateDrawer({
   const formTarget =
     isUpdate && currentRow ? `update:${currentRow.id}` : 'create'
   const isFormInitialized = initializedTarget === formTarget
+  const initializationError =
+    groupsQuery.error || autoGroupsQuery.error || apiKeyQuery.error
   const selectedGroup = form.watch('group')
 
   // Correct group after groups load: if the form value is not in available groups, fall back
@@ -278,6 +291,10 @@ export function ApiKeysMutateDrawer({
   }, [groups, form, selectedGroup])
 
   const onSubmit = async (data: ApiKeyFormValues) => {
+    if (!isFormInitialized || initializationError) {
+      toast.error(t('API key data must load before saving'))
+      return
+    }
     setIsSubmitting(true)
     try {
       const basePayload = transformFormDataToPayload(data)
@@ -383,6 +400,18 @@ export function ApiKeysMutateDrawer({
               : t('Add a new API key by providing necessary info.')}
           </SheetDescription>
         </SheetHeader>
+        {initializationError && (
+          <ErrorState
+            title={t('Unable to load API key editor data')}
+            description={initializationError.message}
+            onRetry={() => {
+              if (groupsQuery.isError) void groupsQuery.refetch()
+              if (autoGroupsQuery.isError) void autoGroupsQuery.refetch()
+              if (apiKeyQuery.isError) void apiKeyQuery.refetch()
+            }}
+            className='min-h-[220px]'
+          />
+        )}
         <Form {...form}>
           <form
             id='api-key-form'
@@ -759,7 +788,7 @@ export function ApiKeysMutateDrawer({
           <Button
             type='button'
             onClick={form.handleSubmit(onSubmit, onInvalid)}
-            disabled={!isFormInitialized || isSubmitting}
+            disabled={!isFormInitialized || isSubmitting || !!initializationError}
             className='w-full sm:w-auto'
           >
             {isSubmitting ? t('Saving...') : t('Save changes')}
