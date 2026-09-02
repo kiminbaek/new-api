@@ -16,6 +16,8 @@ type Sample struct {
 	Success      bool
 	OutputTokens int64
 	GenerationMs int64
+	FailureKind  string
+	RetryCount   int64
 }
 
 type QueryParams struct {
@@ -48,12 +50,18 @@ type QueryResult struct {
 }
 
 type ModelSummary struct {
-	ModelName          string    `json:"model_name"`
-	AvgLatencyMs       int64     `json:"avg_latency_ms"`
-	SuccessRate        float64   `json:"success_rate"`
-	AvgTps             float64   `json:"avg_tps"`
-	RecentSuccessRates []float64 `json:"recent_success_rates,omitempty"`
-	RequestCount       int64     `json:"-"`
+	ModelName           string    `json:"model_name"`
+	AvgLatencyMs        int64     `json:"avg_latency_ms"`
+	SuccessRate         float64   `json:"success_rate"`
+	AvgTps              float64   `json:"avg_tps"`
+	RecentSuccessRates  []float64 `json:"recent_success_rates,omitempty"`
+	RequestCount        int64     `json:"-"`
+	SuccessCount        int64     `json:"-"`
+	RateLimitCount      int64     `json:"-"`
+	ChannelFailureCount int64     `json:"-"`
+	ClientCancelCount   int64     `json:"-"`
+	OtherFailureCount   int64     `json:"-"`
+	RetryCount          int64     `json:"-"`
 }
 
 type SummaryAllResult struct {
@@ -67,29 +75,53 @@ type bucketKey struct {
 }
 
 type counters struct {
-	requestCount   int64
-	successCount   int64
-	totalLatencyMs int64
-	ttftSumMs      int64
-	ttftCount      int64
-	outputTokens   int64
-	generationMs   int64
+	requestCount        int64
+	successCount        int64
+	totalLatencyMs      int64
+	ttftSumMs           int64
+	ttftCount           int64
+	outputTokens        int64
+	generationMs        int64
+	rateLimitCount      int64
+	channelFailureCount int64
+	clientCancelCount   int64
+	otherFailureCount   int64
+	retryCount          int64
 }
 
 type atomicBucket struct {
-	requestCount   atomic.Int64
-	successCount   atomic.Int64
-	totalLatencyMs atomic.Int64
-	ttftSumMs      atomic.Int64
-	ttftCount      atomic.Int64
-	outputTokens   atomic.Int64
-	generationMs   atomic.Int64
+	requestCount        atomic.Int64
+	successCount        atomic.Int64
+	totalLatencyMs      atomic.Int64
+	ttftSumMs           atomic.Int64
+	ttftCount           atomic.Int64
+	outputTokens        atomic.Int64
+	generationMs        atomic.Int64
+	rateLimitCount      atomic.Int64
+	channelFailureCount atomic.Int64
+	clientCancelCount   atomic.Int64
+	otherFailureCount   atomic.Int64
+	retryCount          atomic.Int64
 }
 
 func (b *atomicBucket) add(sample Sample) {
 	b.requestCount.Add(1)
 	if sample.Success {
 		b.successCount.Add(1)
+	} else {
+		switch sample.FailureKind {
+		case "rate_limit":
+			b.rateLimitCount.Add(1)
+		case "channel_failure":
+			b.channelFailureCount.Add(1)
+		case "client_cancelled":
+			b.clientCancelCount.Add(1)
+		default:
+			b.otherFailureCount.Add(1)
+		}
+	}
+	if sample.RetryCount > 0 {
+		b.retryCount.Add(sample.RetryCount)
 	}
 	if sample.LatencyMs > 0 {
 		b.totalLatencyMs.Add(sample.LatencyMs)
@@ -113,6 +145,8 @@ func (b *atomicBucket) snapshot() counters {
 		ttftCount:      b.ttftCount.Load(),
 		outputTokens:   b.outputTokens.Load(),
 		generationMs:   b.generationMs.Load(),
+		rateLimitCount: b.rateLimitCount.Load(), channelFailureCount: b.channelFailureCount.Load(),
+		clientCancelCount: b.clientCancelCount.Load(), otherFailureCount: b.otherFailureCount.Load(), retryCount: b.retryCount.Load(),
 	}
 }
 
@@ -125,6 +159,8 @@ func (b *atomicBucket) drain() counters {
 		ttftCount:      b.ttftCount.Swap(0),
 		outputTokens:   b.outputTokens.Swap(0),
 		generationMs:   b.generationMs.Swap(0),
+		rateLimitCount: b.rateLimitCount.Swap(0), channelFailureCount: b.channelFailureCount.Swap(0),
+		clientCancelCount: b.clientCancelCount.Swap(0), otherFailureCount: b.otherFailureCount.Swap(0), retryCount: b.retryCount.Swap(0),
 	}
 }
 
@@ -149,5 +185,20 @@ func (b *atomicBucket) addCounters(c counters) {
 	}
 	if c.generationMs != 0 {
 		b.generationMs.Add(c.generationMs)
+	}
+	if c.rateLimitCount != 0 {
+		b.rateLimitCount.Add(c.rateLimitCount)
+	}
+	if c.channelFailureCount != 0 {
+		b.channelFailureCount.Add(c.channelFailureCount)
+	}
+	if c.clientCancelCount != 0 {
+		b.clientCancelCount.Add(c.clientCancelCount)
+	}
+	if c.otherFailureCount != 0 {
+		b.otherFailureCount.Add(c.otherFailureCount)
+	}
+	if c.retryCount != 0 {
+		b.retryCount.Add(c.retryCount)
 	}
 }

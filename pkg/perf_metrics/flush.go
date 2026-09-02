@@ -79,13 +79,18 @@ func cleanupExpiredMetrics(retentionDays int) {
 
 func redisCounters(values map[string]string) counters {
 	return counters{
-		requestCount:   parseRedisInt(values["req"]),
-		successCount:   parseRedisInt(values["ok"]),
-		totalLatencyMs: parseRedisInt(values["lat"]),
-		ttftSumMs:      parseRedisInt(values["ttft"]),
-		ttftCount:      parseRedisInt(values["ttft_n"]),
-		outputTokens:   parseRedisInt(values["out"]),
-		generationMs:   parseRedisInt(values["gen_ms"]),
+		requestCount:        parseRedisInt(values["req"]),
+		successCount:        parseRedisInt(values["ok"]),
+		totalLatencyMs:      parseRedisInt(values["lat"]),
+		ttftSumMs:           parseRedisInt(values["ttft"]),
+		ttftCount:           parseRedisInt(values["ttft_n"]),
+		outputTokens:        parseRedisInt(values["out"]),
+		generationMs:        parseRedisInt(values["gen_ms"]),
+		rateLimitCount:      parseRedisInt(values["fail_rate"]),
+		channelFailureCount: parseRedisInt(values["fail_channel"]),
+		clientCancelCount:   parseRedisInt(values["fail_client"]),
+		otherFailureCount:   parseRedisInt(values["fail_other"]),
+		retryCount:          parseRedisInt(values["retry"]),
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +23,27 @@ const seriesSchema = "dbcd0a3c01b55203"
 
 func Init() {
 	go flushLoop()
+}
+
+func classifyRelayFailure(info *relaycommon.RelayInfo) string {
+	if info == nil || info.LastError == nil {
+		return "other"
+	}
+	if info.StreamStatus != nil && info.StreamStatus.EndReason == relaycommon.StreamEndReasonClientGone {
+		return "client_cancelled"
+	}
+	status := info.LastError.StatusCode
+	text := strings.ToLower(info.LastError.Error() + " " + string(info.LastError.GetErrorCode()))
+	switch {
+	case status == 429 || strings.Contains(text, "rate limit") || strings.Contains(text, "too many requests"):
+		return "rate_limit"
+	case strings.Contains(text, "context canceled") || strings.Contains(text, "client gone") || strings.Contains(text, "client disconnected"):
+		return "client_cancelled"
+	case status >= 500 || strings.Contains(text, "timeout") || strings.Contains(text, "connection reset") || strings.Contains(text, "empty stream") || strings.Contains(text, "0 chunks") || strings.Contains(text, "upstream"):
+		return "channel_failure"
+	default:
+		return "other"
+	}
 }
 
 func RecordRelaySample(info *relaycommon.RelayInfo, success bool, outputTokens int64) {
@@ -51,6 +73,8 @@ func RecordRelaySample(info *relaycommon.RelayInfo, success bool, outputTokens i
 		Success:      success,
 		OutputTokens: outputTokens,
 		GenerationMs: generationMs,
+		FailureKind:  classifyRelayFailure(info),
+		RetryCount:   int64(info.RetryIndex),
 	})
 }
 
@@ -97,13 +121,18 @@ func Query(params QueryParams) (QueryResult, error) {
 			group:    row.Group,
 			bucketTs: row.BucketTs,
 		}, counters{
-			requestCount:   row.RequestCount,
-			successCount:   row.SuccessCount,
-			totalLatencyMs: row.TotalLatencyMs,
-			ttftSumMs:      row.TtftSumMs,
-			ttftCount:      row.TtftCount,
-			outputTokens:   row.OutputTokens,
-			generationMs:   row.GenerationMs,
+			requestCount:        row.RequestCount,
+			successCount:        row.SuccessCount,
+			totalLatencyMs:      row.TotalLatencyMs,
+			ttftSumMs:           row.TtftSumMs,
+			ttftCount:           row.TtftCount,
+			outputTokens:        row.OutputTokens,
+			generationMs:        row.GenerationMs,
+			rateLimitCount:      row.RateLimitCount,
+			channelFailureCount: row.ChannelFailureCount,
+			clientCancelCount:   row.ClientCancelCount,
+			otherFailureCount:   row.OtherFailureCount,
+			retryCount:          row.RetryCount,
 		})
 	}
 
@@ -142,11 +171,16 @@ func QuerySummaryAll(hours int, groups []string) (SummaryAllResult, error) {
 	modelBuckets := map[string]map[int64]counters{}
 	for _, row := range rows {
 		value := counters{
-			requestCount:   row.RequestCount,
-			successCount:   row.SuccessCount,
-			totalLatencyMs: row.TotalLatencyMs,
-			outputTokens:   row.OutputTokens,
-			generationMs:   row.GenerationMs,
+			requestCount:        row.RequestCount,
+			successCount:        row.SuccessCount,
+			totalLatencyMs:      row.TotalLatencyMs,
+			outputTokens:        row.OutputTokens,
+			generationMs:        row.GenerationMs,
+			rateLimitCount:      row.RateLimitCount,
+			channelFailureCount: row.ChannelFailureCount,
+			clientCancelCount:   row.ClientCancelCount,
+			otherFailureCount:   row.OtherFailureCount,
+			retryCount:          row.RetryCount,
 		}
 		mergeModelTotals(totals, row.ModelName, value)
 		mergeModelBucket(modelBuckets, row.ModelName, row.BucketTs, value)
@@ -183,12 +217,18 @@ func QuerySummaryAll(hours int, groups []string) (SummaryAllResult, error) {
 			avgTps = float64(total.outputTokens) / (float64(total.generationMs) / 1000.0)
 		}
 		models = append(models, ModelSummary{
-			ModelName:          name,
-			AvgLatencyMs:       avgLatency,
-			SuccessRate:        math.Round(successRate*100) / 100,
-			AvgTps:             math.Round(avgTps*100) / 100,
-			RecentSuccessRates: recentSuccessRates(modelBuckets[name], 3),
-			RequestCount:       total.requestCount,
+			ModelName:           name,
+			AvgLatencyMs:        avgLatency,
+			SuccessRate:         math.Round(successRate*100) / 100,
+			AvgTps:              math.Round(avgTps*100) / 100,
+			RecentSuccessRates:  recentSuccessRates(modelBuckets[name], 3),
+			RequestCount:        total.requestCount,
+			SuccessCount:        total.successCount,
+			RateLimitCount:      total.rateLimitCount,
+			ChannelFailureCount: total.channelFailureCount,
+			ClientCancelCount:   total.clientCancelCount,
+			OtherFailureCount:   total.otherFailureCount,
+			RetryCount:          total.retryCount,
 		})
 	}
 	sort.Slice(models, func(i, j int) bool {
@@ -210,6 +250,11 @@ func mergeModelTotals(totals map[string]counters, modelName string, value counte
 	current.ttftCount += value.ttftCount
 	current.outputTokens += value.outputTokens
 	current.generationMs += value.generationMs
+	current.rateLimitCount += value.rateLimitCount
+	current.channelFailureCount += value.channelFailureCount
+	current.clientCancelCount += value.clientCancelCount
+	current.otherFailureCount += value.otherFailureCount
+	current.retryCount += value.retryCount
 	totals[modelName] = current
 }
 
@@ -228,6 +273,11 @@ func mergeModelBucket(modelBuckets map[string]map[int64]counters, modelName stri
 	current.ttftCount += value.ttftCount
 	current.outputTokens += value.outputTokens
 	current.generationMs += value.generationMs
+	current.rateLimitCount += value.rateLimitCount
+	current.channelFailureCount += value.channelFailureCount
+	current.clientCancelCount += value.clientCancelCount
+	current.otherFailureCount += value.otherFailureCount
+	current.retryCount += value.retryCount
 	modelBuckets[modelName][bucketTs] = current
 }
 
@@ -283,6 +333,11 @@ func mergeCounters(merged map[bucketKey]counters, key bucketKey, value counters)
 	current.ttftCount += value.ttftCount
 	current.outputTokens += value.outputTokens
 	current.generationMs += value.generationMs
+	current.rateLimitCount += value.rateLimitCount
+	current.channelFailureCount += value.channelFailureCount
+	current.clientCancelCount += value.clientCancelCount
+	current.otherFailureCount += value.otherFailureCount
+	current.retryCount += value.retryCount
 	merged[key] = current
 }
 
@@ -326,6 +381,11 @@ func buildQueryResult(modelName string, merged map[bucketKey]counters) QueryResu
 			total.ttftCount += value.ttftCount
 			total.outputTokens += value.outputTokens
 			total.generationMs += value.generationMs
+			total.rateLimitCount += value.rateLimitCount
+			total.channelFailureCount += value.channelFailureCount
+			total.clientCancelCount += value.clientCancelCount
+			total.otherFailureCount += value.otherFailureCount
+			total.retryCount += value.retryCount
 			series = append(series, bucketPoint(ts, value))
 		}
 
@@ -389,6 +449,20 @@ func recordRedis(key bucketKey, sample Sample) {
 	pipe.HIncrBy(ctx, redisKey, "req", 1)
 	if sample.Success {
 		pipe.HIncrBy(ctx, redisKey, "ok", 1)
+	} else {
+		switch sample.FailureKind {
+		case "rate_limit":
+			pipe.HIncrBy(ctx, redisKey, "fail_rate", 1)
+		case "channel_failure":
+			pipe.HIncrBy(ctx, redisKey, "fail_channel", 1)
+		case "client_cancelled":
+			pipe.HIncrBy(ctx, redisKey, "fail_client", 1)
+		default:
+			pipe.HIncrBy(ctx, redisKey, "fail_other", 1)
+		}
+	}
+	if sample.RetryCount > 0 {
+		pipe.HIncrBy(ctx, redisKey, "retry", sample.RetryCount)
 	}
 	if sample.LatencyMs > 0 {
 		pipe.HIncrBy(ctx, redisKey, "lat", sample.LatencyMs)
