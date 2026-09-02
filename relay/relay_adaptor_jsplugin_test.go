@@ -4,14 +4,18 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/model"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	jspluginadaptor "github.com/QuantumNous/new-api/relay/channel/task/jsplugin"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestGetTaskAdaptorMapsMigratedPlatformsToFactoryPlugins(t *testing.T) {
@@ -95,4 +99,31 @@ func TestGetTaskAdaptorForRequestPinsLegacyMappedPlugin(t *testing.T) {
 	require.NotNil(t, pinned.Plugin)
 	assert.Equal(t, "sora", pinned.Plugin.Meta.Key)
 	assert.Same(t, pinned.Generation, pluginruntime.DefaultRegistry.Generation())
+}
+
+func TestGetTaskAdaptorForTaskLoadsPersistedPinnedVersion(t *testing.T) {
+	originalDB := model.DB
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&model.TaskPlugin{}))
+	model.DB = database
+	t.Cleanup(func() { model.DB = originalDB })
+
+	key := "pinned-history-probe"
+	v1Source := `
+export const meta = {apiVersion:1,key:"pinned-history-probe",name:"Pinned V1",version:"1.0.0",author:{name:"Test"},models:["m"],fetchMode:"per_task"};
+export function buildSubmitRequest(){return {}} export function parseSubmitResponse(){return {taskId:"1"}} export function buildQueryRequest(){return {}} export function parseTaskResult(){return {status:"SUCCESS"}}
+`
+	v2Source := strings.Replace(v1Source, `name:"Pinned V1",version:"1.0.0"`, `name:"Pinned V2",version:"2.0.0"`, 1)
+	require.NoError(t, model.SaveTaskPlugin(&model.TaskPlugin{Key: key, APIVersion: 1, Version: "1.0.0", Source: v1Source, SourceHash: "hash-v1", Enabled: true}))
+	require.NoError(t, model.SaveTaskPlugin(&model.TaskPlugin{Key: key, APIVersion: 1, Version: "2.0.0", Source: v2Source, SourceHash: "hash-v2", Enabled: true}))
+	require.NoError(t, model.ActivateTaskPlugin(key, "2.0.0"))
+	_, err = pluginruntime.DefaultRegistry.Register(v2Source, pluginruntime.Options{Key: key, Version: "2.0.0"})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pluginruntime.DefaultRegistry.Unregister(key) })
+
+	task := &model.Task{Platform: constant.TaskPlatform(key), PluginKey: key, PluginVersion: "1.0.0"}
+	adaptor := GetTaskAdaptorForTask(task)
+	require.NotNil(t, adaptor)
+	assert.Equal(t, "Pinned V1", adaptor.GetChannelName())
 }

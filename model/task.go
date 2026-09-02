@@ -57,6 +57,8 @@ type Task struct {
 	UpdatedAt      int64                 `json:"updated_at"`
 	TaskID         string                `json:"task_id" gorm:"type:varchar(191);index"` // 第三方id，不一定有/ song id\ Task id
 	Platform       constant.TaskPlatform `json:"platform" gorm:"type:varchar(30);index"` // 平台
+	PluginKey      string                `json:"-" gorm:"type:varchar(128);index:idx_task_plugin_version,priority:1"`
+	PluginVersion  string                `json:"-" gorm:"type:varchar(64);index:idx_task_plugin_version,priority:2"`
 	UserId         int                   `json:"user_id" gorm:"index"`
 	Group          string                `json:"group" gorm:"type:varchar(50)"` // 修正计费用
 	ChannelId      int                   `json:"channel_id" gorm:"index"`

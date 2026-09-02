@@ -191,6 +191,21 @@ func SetTaskPluginEnabled(key string, enabled bool) error {
 	return nil
 }
 
+func CountTaskPluginVersionReferences(key, version string) (int64, error) {
+	var count int64
+	err := DB.Model(&Task{}).Where("plugin_key = ? AND plugin_version = ?", key, version).Count(&count).Error
+	return count, err
+}
+
+func CountInFlightTaskPluginVersionReferences(key, version string) (int64, error) {
+	var count int64
+	err := DB.Model(&Task{}).Where(
+		"((plugin_key = ? AND plugin_version != ?) OR (plugin_key = '' AND platform = ?)) AND status NOT IN ?",
+		key, version, key, []TaskStatus{TaskStatusSuccess, TaskStatusFailure},
+	).Count(&count).Error
+	return count, err
+}
+
 type TaskPluginDeleteResult struct {
 	DeletedActive bool
 	Promoted      *TaskPlugin

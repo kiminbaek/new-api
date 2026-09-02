@@ -222,6 +222,8 @@ func TestExecuteTaskSubmissionPersistsPinnedPluginProvenance(t *testing.T) {
 	require.NotNil(t, stored.PrivateData.Execution)
 	require.NotNil(t, stored.PrivateData.Execution.TaskPlugin)
 	assert.Equal(t, "document-parser", stored.PrivateData.Execution.TaskPlugin.Key)
+	assert.Equal(t, "document-parser", stored.PluginKey)
+	assert.Equal(t, "1.2.3", stored.PluginVersion)
 	require.NotNil(t, stored.PrivateData.Execution.TaskPlugin.Author)
 	assert.Equal(t, "Community Author", stored.PrivateData.Execution.TaskPlugin.Author.Name)
 	assert.Equal(t, "upstream-private", stored.PrivateData.UpstreamTaskID)

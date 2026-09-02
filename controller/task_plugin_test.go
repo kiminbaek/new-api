@@ -112,10 +112,10 @@ func TestDisableThirdPartyPluginSupportsCascadeAndForce(t *testing.T) {
 	context.Request.Header.Set("Content-Type", "application/json")
 	SetTaskPluginStatus(context)
 
-	assert.Contains(t, recorder.Body.String(), `"success":true`)
+	assert.Contains(t, recorder.Body.String(), `"success":false`)
 	updated, err := model.GetChannelById(channel.Id, true)
 	require.NoError(t, err)
-	assert.Equal(t, common.ChannelStatusManuallyDisabled, updated.Status)
+	assert.Equal(t, common.ChannelStatusEnabled, updated.Status)
 }
 
 func setupTaskPluginFactoryDisableTest(t *testing.T) {
@@ -1165,4 +1165,46 @@ func TestUpdateTaskPluginMarketplaceSourcesValidation(t *testing.T) {
 			assert.Zero(t, count)
 		})
 	}
+}
+
+func TestDeleteTaskPluginVersionRejectsPersistedTaskReference(t *testing.T) {
+	setupTaskPluginControllerTest(t)
+	key := "referenced-delete-probe"
+	source := taskPluginControllerTestSource(key, "1.0.0")
+	require.NoError(t, model.SaveTaskPlugin(&model.TaskPlugin{Key: key, APIVersion: 1, Version: "1.0.0", Source: source, SourceHash: "hash-v1", Enabled: true}))
+	require.NoError(t, model.DB.Create(&model.Task{TaskID: "history-1", Platform: constant.TaskPlatform(key), PluginKey: key, PluginVersion: "1.0.0", Status: model.TaskStatusSuccess}).Error)
+
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Params = gin.Params{{Key: "key", Value: key}, {Key: "version", Value: "1.0.0"}}
+	context.Request = httptest.NewRequest(http.MethodDelete, "/api/plugin/task/"+key+"/versions/1.0.0", nil)
+	DeleteTaskPluginVersion(context)
+
+	assert.Contains(t, recorder.Body.String(), `"success":false`)
+	assert.Contains(t, recorder.Body.String(), `"task_reference_count":1`)
+	_, err := model.GetTaskPluginVersion(key, "1.0.0")
+	require.NoError(t, err)
+}
+
+func TestActivateTaskPluginRejectsOtherVersionInFlight(t *testing.T) {
+	setupTaskPluginControllerTest(t)
+	key := "referenced-activate-probe"
+	for _, version := range []string{"1.0.0", "2.0.0"} {
+		source := taskPluginControllerTestSource(key, version)
+		require.NoError(t, model.SaveTaskPlugin(&model.TaskPlugin{Key: key, APIVersion: 1, Version: version, Source: source, SourceHash: "hash-" + version, Enabled: true}))
+	}
+	require.NoError(t, model.DB.Create(&model.Task{TaskID: "running-v1", Platform: constant.TaskPlatform(key), PluginKey: key, PluginVersion: "1.0.0", Status: model.TaskStatusInProgress}).Error)
+
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Params = gin.Params{{Key: "key", Value: key}}
+	context.Request = httptest.NewRequest(http.MethodPost, "/api/plugin/task/"+key+"/activate", strings.NewReader(`{"version":"2.0.0"}`))
+	context.Request.Header.Set("Content-Type", "application/json")
+	ActivateTaskPlugin(context)
+
+	assert.Contains(t, recorder.Body.String(), `"success":false`)
+	assert.Contains(t, recorder.Body.String(), `"in_flight_count":1`)
+	active, err := model.GetTaskPluginVersion(key, "")
+	require.NoError(t, err)
+	assert.Equal(t, "1.0.0", active.Version)
 }

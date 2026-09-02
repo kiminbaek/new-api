@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"sort"
 	"strings"
@@ -368,6 +369,15 @@ func DeleteTaskPluginVersion(c *gin.Context) {
 		common.ApiError(c, lookupErr)
 		return
 	}
+	references, referenceErr := model.CountTaskPluginVersionReferences(key, version)
+	if referenceErr != nil {
+		common.ApiError(c, referenceErr)
+		return
+	}
+	if references > 0 {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "task plugin version is referenced by persisted tasks", "data": gin.H{"task_reference_count": references}})
+		return
+	}
 	if plugin.Active && !taskPluginHasFactory(key) {
 		channels, inFlight, usageErr := model.GetTaskPluginUsage(key)
 		if usageErr != nil {
@@ -421,6 +431,15 @@ func ActivateTaskPlugin(c *gin.Context) {
 		common.ApiErrorMsg(c, "plugin version not found")
 		return
 	}
+	inFlight, usageErr := model.CountInFlightTaskPluginVersionReferences(target.Key, target.Version)
+	if usageErr != nil {
+		common.ApiError(c, usageErr)
+		return
+	}
+	if inFlight > 0 {
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "another plugin version still has in-flight tasks", "data": gin.H{"in_flight_count": inFlight}})
+		return
+	}
 	if _, err = jsplugin.NewRegistry().Register(target.Source, jsplugin.Options{Key: target.Key, Version: target.Version}); err != nil {
 		common.ApiErrorMsg(c, err.Error())
 		return
@@ -455,9 +474,8 @@ func SetTaskPluginStatus(c *gin.Context) {
 			return
 		}
 		cascade := c.Query("cascade") == "true"
-		force := c.Query("force") == "true"
-		if (len(channels) > 0 && !cascade) || (inFlight > 0 && !force) {
-			c.JSON(200, gin.H{"success": false, "message": "task plugin is still in use", "data": gin.H{"channels": channels, "in_flight_count": inFlight}})
+		if (len(channels) > 0 && !cascade) || inFlight > 0 {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "task plugin is still in use", "data": gin.H{"channels": channels, "in_flight_count": inFlight}})
 			return
 		}
 		if cascade {

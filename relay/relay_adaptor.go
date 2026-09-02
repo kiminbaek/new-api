@@ -3,8 +3,10 @@ package relay
 import (
 	"fmt"
 	"strconv"
+	"sync"
 
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/model"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	_ "github.com/QuantumNous/new-api/plugins"
 	"github.com/QuantumNous/new-api/relay/channel"
@@ -183,6 +185,39 @@ func TaskPlatformUnavailableError(platform constant.TaskPlatform) (string, strin
 		}
 	}
 	return "invalid_api_platform", fmt.Sprintf("invalid api platform: %s", platform)
+}
+
+var taskPluginVersionCache sync.Map
+
+// GetTaskAdaptorForTask resolves the immutable override version captured when
+// the task was submitted. Legacy/factory tasks without a durable version keep
+// the current-generation fallback behavior.
+func GetTaskAdaptorForTask(task *model.Task) channel.TaskAdaptor {
+	if task == nil || task.PluginKey == "" || task.PluginVersion == "" {
+		if task == nil {
+			return nil
+		}
+		return GetTaskAdaptor(task.Platform)
+	}
+	if current, ok := pluginruntime.DefaultRegistry.Get(task.PluginKey); ok && current.Meta.Version == task.PluginVersion {
+		return jspluginadaptor.New(current)
+	}
+	cacheKey := task.PluginKey + "\x00" + task.PluginVersion
+	if cached, ok := taskPluginVersionCache.Load(cacheKey); ok {
+		return jspluginadaptor.New(cached.(*pluginruntime.LoadedPlugin))
+	}
+	stored, err := model.GetTaskPluginVersion(task.PluginKey, task.PluginVersion)
+	if err != nil {
+		// Never interpret a version-pinned task with different code. Embedded
+		// factory versions are available only while that exact version is active.
+		return nil
+	}
+	compiled, err := pluginruntime.CompilePlugin(stored.Source, pluginruntime.Options{Key: stored.Key, Version: stored.Version})
+	if err != nil {
+		return nil
+	}
+	actual, _ := taskPluginVersionCache.LoadOrStore(cacheKey, compiled)
+	return jspluginadaptor.New(actual.(*pluginruntime.LoadedPlugin))
 }
 
 func GetTaskAdaptor(platform constant.TaskPlatform) channel.TaskAdaptor {
