@@ -31,6 +31,7 @@ import {
   sideDrawerFormClassName,
   sideDrawerHeaderClassName,
 } from '@/components/drawer-layout'
+import { ErrorState } from '@/components/error-state'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
@@ -65,10 +66,10 @@ import { Textarea } from '@/components/ui/textarea'
 import {
   ADMIN_PERMISSION_ACTIONS,
   ADMIN_PERMISSION_RESOURCES,
-  EMPTY_PERMISSION_CATALOG,
   hasPermission,
   normalizeAdminPermissions,
 } from '@/lib/admin-permissions'
+import { requireSuccessfulResponse } from '@/lib/api-response'
 import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
 import { formatQuota, parseQuotaFromDollars } from '@/lib/format'
 import { ROLE } from '@/lib/roles'
@@ -89,7 +90,7 @@ import {
   transformFormDataToPayload,
   transformUserToFormDefaults,
 } from '../lib'
-import { type User } from '../types'
+import type { User } from '../types'
 import { UserQuotaDialog } from './user-quota-dialog'
 import { useUsers } from './users-provider'
 
@@ -110,21 +111,38 @@ export function UsersMutateDrawer({
   const currentUser = useAuthStore((s) => s.auth.user)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [quotaDialogOpen, setQuotaDialogOpen] = useState(false)
+  const [initializedUserId, setInitializedUserId] = useState<number | null>(null)
+  const canEditAdminPermissions = currentUser?.role === ROLE.SUPER_ADMIN
 
   // Fetch groups
-  const { data: groupsData } = useQuery({
+  const groupsQuery = useQuery({
     queryKey: ['groups'],
-    queryFn: getGroups,
+    queryFn: async () =>
+      requireSuccessfulResponse(await getGroups(), t('Failed to load groups')),
+    enabled: open,
     staleTime: 5 * 60 * 1000,
   })
+  const groups = groupsQuery.data?.data || []
 
-  const groups = groupsData?.data || []
-
-  // Permission catalog is owned by the backend; fetched once and reused.
-  const { data: permissionCatalog = EMPTY_PERMISSION_CATALOG } = useQuery({
+  // Only a super administrator may edit the permission matrix. Do not fetch or
+  // submit a catalog for ordinary administrators.
+  const permissionCatalogQuery = useQuery({
     queryKey: ['admin-permission-catalog'],
     queryFn: getPermissionCatalog,
+    enabled: open && canEditAdminPermissions,
     staleTime: 5 * 60 * 1000,
+  })
+  const permissionCatalog = permissionCatalogQuery.data
+
+  const userQuery = useQuery({
+    queryKey: ['user', currentRow?.id],
+    queryFn: async () =>
+      requireSuccessfulResponse(
+        await getUser(currentRow?.id ?? 0),
+        t('Failed to load user details')
+      ),
+    enabled: open && isUpdate && currentRow !== undefined,
+    staleTime: 0,
   })
 
   const form = useForm<UserFormValues>({
@@ -132,20 +150,22 @@ export function UsersMutateDrawer({
     defaultValues: USER_FORM_DEFAULT_VALUES,
   })
 
-  // Load existing data when updating
+  // Load existing data only after the fresh detail request succeeds.
   useEffect(() => {
-    if (open && isUpdate && currentRow) {
-      // For update, fetch fresh data
-      getUser(currentRow.id).then((result) => {
-        if (result.success && result.data) {
-          form.reset(transformUserToFormDefaults(result.data))
-        }
-      })
-    } else if (open && !isUpdate) {
-      // For create, reset to defaults
-      form.reset(USER_FORM_DEFAULT_VALUES)
+    if (!open) {
+      setInitializedUserId(null)
+      return
     }
-  }, [open, isUpdate, currentRow, form])
+    if (!isUpdate) {
+      form.reset(USER_FORM_DEFAULT_VALUES)
+      setInitializedUserId(null)
+      return
+    }
+    if (currentRow && userQuery.data?.data) {
+      form.reset(transformUserToFormDefaults(userQuery.data.data))
+      setInitializedUserId(currentRow.id)
+    }
+  }, [open, isUpdate, currentRow, form, userQuery.data])
 
   const { meta: currencyMeta } = getCurrencyDisplay()
   const currencyLabel = getCurrencyLabel()
@@ -153,10 +173,22 @@ export function UsersMutateDrawer({
 
   const currentQuotaRaw = form.watch('quota_dollars') || 0
   const selectedRole = form.watch('role')
-  const canEditAdminPermissions = currentUser?.role === ROLE.SUPER_ADMIN
   const targetIsAdmin = (selectedRole ?? currentRow?.role ?? 0) >= ROLE.ADMIN
+  const userEditorError =
+    groupsQuery.error ||
+    (isUpdate ? userQuery.error : null) ||
+    (canEditAdminPermissions ? permissionCatalogQuery.error : null)
+  const userEditorReady =
+    groupsQuery.isSuccess &&
+    (!isUpdate || initializedUserId === currentRow?.id) &&
+    (!canEditAdminPermissions || permissionCatalogQuery.isSuccess) &&
+    !userEditorError
 
   const onSubmit = async (data: UserFormValues) => {
+    if (!userEditorReady) {
+      toast.error(t('User data must load before saving'))
+      return
+    }
     if (!isUpdate) {
       const passwordLength = data.password?.length || 0
       if (passwordLength < 8 || passwordLength > 20) {
@@ -173,7 +205,7 @@ export function UsersMutateDrawer({
       const payload = transformFormDataToPayload(
         data,
         currentRow?.id,
-        permissionCatalog
+        canEditAdminPermissions ? permissionCatalog : undefined
       )
       const result = isUpdate
         ? await updateUser(payload as typeof payload & { id: number })
@@ -195,7 +227,7 @@ export function UsersMutateDrawer({
               : t(ERROR_MESSAGES.CREATE_FAILED))
         )
       }
-    } catch (_error) {
+    } catch {
       toast.error(t(ERROR_MESSAGES.UNEXPECTED))
     } finally {
       setIsSubmitting(false)
@@ -204,9 +236,10 @@ export function UsersMutateDrawer({
 
   const refreshUserData = async () => {
     if (!currentRow) return
-    const result = await getUser(currentRow.id)
-    if (result.success && result.data) {
-      form.reset(transformUserToFormDefaults(result.data))
+    const result = await userQuery.refetch()
+    if (result.data?.data) {
+      form.reset(transformUserToFormDefaults(result.data.data))
+      setInitializedUserId(currentRow.id)
     }
     triggerRefresh()
   }
@@ -235,10 +268,26 @@ export function UsersMutateDrawer({
                 : t('Add a new user by providing necessary info.')}
             </SheetDescription>
           </SheetHeader>
+          {userEditorError && (
+            <ErrorState
+              title={t('Unable to load user editor data')}
+              description={userEditorError.message}
+              onRetry={() => {
+                if (userQuery.isError) void userQuery.refetch()
+                if (groupsQuery.isError) void groupsQuery.refetch()
+                if (permissionCatalogQuery.isError) {
+                  void permissionCatalogQuery.refetch()
+                }
+              }}
+              className='min-h-[220px]'
+            />
+          )}
           <Form {...form}>
             <form
               id='user-form'
               onSubmit={form.handleSubmit(onSubmit)}
+              aria-busy={!userEditorReady}
+              inert={!userEditorReady || isSubmitting ? true : undefined}
               className={sideDrawerFormClassName()}
             >
               {/* Basic Information */}
@@ -278,7 +327,7 @@ export function UsersMutateDrawer({
                             { value: '10', label: t('Admin') },
                           ]}
                           onValueChange={(value) =>
-                            value !== null && field.onChange(parseInt(value))
+                            value !== null && field.onChange(Number.parseInt(value))
                           }
                           value={String(field.value)}
                         >
@@ -360,12 +409,10 @@ export function UsersMutateDrawer({
                       <FormItem>
                         <FormLabel>{t('Group')}</FormLabel>
                         <Select
-                          items={[
-                            ...groups.map((group) => ({
-                              value: group,
-                              label: group,
-                            })),
-                          ]}
+                          items={groups.map((group) => ({
+                            value: group,
+                            label: group,
+                          }))}
                           onValueChange={field.onChange}
                           value={field.value}
                         >
@@ -452,6 +499,7 @@ export function UsersMutateDrawer({
 
               {canEditAdminPermissions &&
                 targetIsAdmin &&
+                permissionCatalog &&
                 permissionCatalog.resources.length > 0 && (
                   <SideDrawerSection>
                     <h3 className='text-sm font-medium'>
@@ -577,7 +625,11 @@ export function UsersMutateDrawer({
             <SheetClose render={<Button variant='outline' />}>
               {t('Close')}
             </SheetClose>
-            <Button form='user-form' type='submit' disabled={isSubmitting}>
+            <Button
+              form='user-form'
+              type='submit'
+              disabled={isSubmitting || !userEditorReady}
+            >
               {isSubmitting ? t('Saving...') : t('Save changes')}
             </Button>
           </SheetFooter>
