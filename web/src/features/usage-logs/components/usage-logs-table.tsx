@@ -20,7 +20,6 @@ import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import type { ColumnDef } from '@tanstack/react-table'
 import { useTranslation } from 'react-i18next'
-import { toast } from 'sonner'
 
 import {
   DataTablePage,
@@ -29,6 +28,7 @@ import {
 } from '@/components/data-table'
 import { useMediaQuery } from '@/hooks'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
+import { requireSuccessfulResponse } from '@/lib/api-response'
 import { cn } from '@/lib/utils'
 
 import {
@@ -125,7 +125,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     ],
   })
 
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: [
       'logs',
       logCategory,
@@ -146,12 +146,11 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
         columnFilters,
       })
 
-      if (!result?.success) {
-        toast.error(result?.message || t('Failed to load logs'))
-        return DEFAULT_LOGS_DATA
-      }
-
-      return result.data || DEFAULT_LOGS_DATA
+      const successful = requireSuccessfulResponse(
+        result,
+        t('Failed to load logs')
+      )
+      return successful.data || DEFAULT_LOGS_DATA
     },
     placeholderData: (previousData, previousQuery) => {
       if (
@@ -194,6 +193,8 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       columns={columns as ColumnDef<Record<string, unknown>>[]}
       isLoading={isLoadingData}
       isFetching={isFetching}
+      error={error}
+      onRetry={isFetching ? undefined : () => void refetch()}
       emptyTitle={t('No Logs Found')}
       emptyDescription={t(
         'No usage logs available. Logs will appear here once API calls are made.'

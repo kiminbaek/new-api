@@ -24,6 +24,7 @@ import { useTranslation } from 'react-i18next'
 import { DataTablePage, useDataTable } from '@/components/data-table'
 import { useMediaQuery } from '@/hooks'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
+import { requireSuccessfulResponse } from '@/lib/api-response'
 
 import { getModels, searchModels, getVendors } from '../api'
 import {
@@ -120,7 +121,7 @@ export function ModelsTable() {
 
   // Fetch models data
   // eslint-disable-next-line @tanstack/query/exhaustive-deps
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: modelsQueryKeys.list({
       keyword: globalFilter,
       vendor: activeVendorFilter,
@@ -130,20 +131,20 @@ export function ModelsTable() {
       page_size: pagination.pageSize,
     }),
     queryFn: async () => {
-      if (shouldSearch) {
-        return searchModels({
-          keyword: globalFilter,
-          vendor: activeVendorFilter,
-          status: statusFilterValue,
-          sync_official: syncFilterValue,
-          p: pagination.pageIndex + 1,
-          page_size: pagination.pageSize,
-        })
-      }
-      return getModels({
-        p: pagination.pageIndex + 1,
-        page_size: pagination.pageSize,
-      })
+      const result = shouldSearch
+        ? await searchModels({
+            keyword: globalFilter,
+            vendor: activeVendorFilter,
+            status: statusFilterValue,
+            sync_official: syncFilterValue,
+            p: pagination.pageIndex + 1,
+            page_size: pagination.pageSize,
+          })
+        : await getModels({
+            p: pagination.pageIndex + 1,
+            page_size: pagination.pageSize,
+          })
+      return requireSuccessfulResponse(result, t('Failed to load models'))
     },
   })
 
@@ -194,6 +195,8 @@ export function ModelsTable() {
       columns={columns}
       isLoading={isLoading}
       isFetching={isFetching}
+      error={error}
+      onRetry={isFetching ? undefined : () => void refetch()}
       emptyTitle={t('No Models Found')}
       emptyDescription={t(
         'No models available. Create your first model to get started.'
