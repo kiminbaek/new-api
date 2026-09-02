@@ -804,3 +804,36 @@ func TestVideoChannelLookupFailurePreservesTaskForRetry(t *testing.T) {
 	assert.Equal(t, task.Progress, reloaded.Progress)
 	assert.Equal(t, 800, reloaded.Quota)
 }
+
+func TestBatchTerminalPendingTaskRetriesBillingWithoutStatusTransition(t *testing.T) {
+	truncate(t)
+	const userID, channelID, quota = 460, 460, 1400
+	seedUser(t, userID, 5000)
+	seedChannel(t, channelID)
+	seedChargedAccounting(t, userID, channelID, 0, quota, 1)
+	task := makeTask(userID, channelID, quota, 0, BillingSourceWallet, 0)
+	task.TaskID = "task_pending_retry"
+	task.PrivateData.UpstreamTaskID = "upstream_pending_retry"
+	task.Platform = constant.TaskPlatformSuno
+	task.Status = model.TaskStatusFailure
+	task.Progress = "100%"
+	task.FailReason = "upstream failed"
+	task.BillingPending = true
+	require.NoError(t, model.DB.Create(task).Error)
+
+	adaptor := &batchPollingAdaptor{results: map[string]*BatchTaskResult{
+		task.GetUpstreamTaskID(): {TaskInfo: relaycommon.TaskInfo{
+			TaskID: task.GetUpstreamTaskID(), Status: model.TaskStatusFailure, Reason: task.FailReason,
+		}},
+	}}
+	require.NoError(t, updateBatchTasks(context.Background(), adaptor, channelID,
+		[]string{task.GetUpstreamTaskID()}, map[string]*model.Task{task.GetUpstreamTaskID(): task}))
+
+	var reloaded model.Task
+	require.NoError(t, model.DB.First(&reloaded, task.ID).Error)
+	assert.EqualValues(t, model.TaskStatusFailure, reloaded.Status)
+	assert.False(t, reloaded.BillingPending)
+	assert.Zero(t, reloaded.Quota)
+	assert.Equal(t, 5000+quota, getUserQuota(t, userID))
+	assert.Equal(t, int64(1), countLogs(t))
+}

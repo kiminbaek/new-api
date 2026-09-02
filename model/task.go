@@ -5,6 +5,8 @@ import (
 	"context"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -12,6 +14,8 @@ import (
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	commonRelay "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type TaskStatus string
@@ -48,24 +52,25 @@ const (
 const TaskRefundLegacyCutoff int64 = 1771718400 // 2026-02-22 00:00:00 UTC
 
 type Task struct {
-	ID         int64                 `json:"id" gorm:"primary_key;AUTO_INCREMENT"`
-	CreatedAt  int64                 `json:"created_at" gorm:"index"`
-	UpdatedAt  int64                 `json:"updated_at"`
-	TaskID     string                `json:"task_id" gorm:"type:varchar(191);index"` // 第三方id，不一定有/ song id\ Task id
-	Platform   constant.TaskPlatform `json:"platform" gorm:"type:varchar(30);index"` // 平台
-	UserId     int                   `json:"user_id" gorm:"index"`
-	Group      string                `json:"group" gorm:"type:varchar(50)"` // 修正计费用
-	ChannelId  int                   `json:"channel_id" gorm:"index"`
-	Quota      int                   `json:"quota"`
-	Action     string                `json:"action" gorm:"type:varchar(40);index"` // 任务类型, song, lyrics, description-mode
-	Status     TaskStatus            `json:"status" gorm:"type:varchar(20);index"` // 任务状态
-	FailReason string                `json:"fail_reason"`
-	SubmitTime int64                 `json:"submit_time" gorm:"index"`
-	StartTime  int64                 `json:"start_time" gorm:"index"`
-	FinishTime int64                 `json:"finish_time" gorm:"index"`
-	Progress   string                `json:"progress" gorm:"type:varchar(20);index"`
-	Properties Properties            `json:"properties" gorm:"type:json"`
-	Username   string                `json:"username,omitempty" gorm:"-"`
+	ID             int64                 `json:"id" gorm:"primary_key;AUTO_INCREMENT"`
+	CreatedAt      int64                 `json:"created_at" gorm:"index"`
+	UpdatedAt      int64                 `json:"updated_at"`
+	TaskID         string                `json:"task_id" gorm:"type:varchar(191);index"` // 第三方id，不一定有/ song id\ Task id
+	Platform       constant.TaskPlatform `json:"platform" gorm:"type:varchar(30);index"` // 平台
+	UserId         int                   `json:"user_id" gorm:"index"`
+	Group          string                `json:"group" gorm:"type:varchar(50)"` // 修正计费用
+	ChannelId      int                   `json:"channel_id" gorm:"index"`
+	Quota          int                   `json:"quota"`
+	BillingPending bool                  `json:"-" gorm:"index"`
+	Action         string                `json:"action" gorm:"type:varchar(40);index"` // 任务类型, song, lyrics, description-mode
+	Status         TaskStatus            `json:"status" gorm:"type:varchar(20);index"` // 任务状态
+	FailReason     string                `json:"fail_reason"`
+	SubmitTime     int64                 `json:"submit_time" gorm:"index"`
+	StartTime      int64                 `json:"start_time" gorm:"index"`
+	FinishTime     int64                 `json:"finish_time" gorm:"index"`
+	Progress       string                `json:"progress" gorm:"type:varchar(20);index"`
+	Properties     Properties            `json:"properties" gorm:"type:json"`
+	Username       string                `json:"username,omitempty" gorm:"-"`
 	// 禁止返回给用户，内部可能包含key等隐私信息
 	PrivateData TaskPrivateData `json:"-" gorm:"column:private_data;type:json"`
 	Data        json.RawMessage `json:"data" gorm:"type:json"`
@@ -356,7 +361,8 @@ func GetAllUnFinishSyncTasks(limit int) []*Task {
 	var tasks []*Task
 	var err error
 	// get all tasks progress is not 100%
-	err = DB.Where("progress != ?", "100%").Where("status != ?", TaskStatusFailure).Where("status != ?", TaskStatusSuccess).Limit(limit).Order("id").Find(&tasks).Error
+	err = DB.Where("(progress != ? AND status != ? AND status != ?) OR billing_pending = ?",
+		"100%", TaskStatusFailure, TaskStatusSuccess, true).Limit(limit).Order("id").Find(&tasks).Error
 	if err != nil {
 		return nil
 	}
@@ -370,9 +376,8 @@ func GetAllUnFinishSyncTasks(limit int) []*Task {
 func HasUnfinishedSyncTasks() bool {
 	var id int64
 	err := DB.Model(&Task{}).
-		Where("progress != ?", "100%").
-		Where("status != ?", TaskStatusFailure).
-		Where("status != ?", TaskStatusSuccess).
+		Where("(progress != ? AND status != ? AND status != ?) OR billing_pending = ?",
+			"100%", TaskStatusFailure, TaskStatusSuccess, true).
 		Limit(1).
 		Pluck("id", &id).Error
 	return err == nil && id != 0
@@ -522,6 +527,117 @@ func (t *Task) UpdateWithStatus(fromStatus TaskStatus) (bool, error) {
 		return false, result.Error
 	}
 	return result.RowsAffected > 0, nil
+}
+
+// ApplyTaskBillingAdjustment atomically applies one durable async-task billing
+// transition. delta = finalQuota - expectedQuota: positive charges more, negative
+// refunds. The task quota + billing_pending predicate is the idempotency guard.
+func ApplyTaskBillingAdjustment(task *Task, expectedQuota int, finalQuota int) (bool, error) {
+	if task == nil || task.ID <= 0 {
+		return false, errors.New("invalid task")
+	}
+	delta := finalQuota - expectedQuota
+	var tokenKey string
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var persisted Task
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND quota = ? AND billing_pending = ?", task.ID, expectedQuota, true).
+			First(&persisted).Error; err != nil {
+			return err
+		}
+
+		if delta != 0 {
+			if persisted.PrivateData.BillingSource == "subscription" && persisted.PrivateData.SubscriptionId > 0 {
+				var sub UserSubscription
+				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&sub, persisted.PrivateData.SubscriptionId).Error; err != nil {
+					return err
+				}
+				newUsed := sub.AmountUsed + int64(delta)
+				if newUsed < 0 || (sub.AmountTotal > 0 && newUsed > sub.AmountTotal) {
+					return fmt.Errorf("subscription billing delta out of range: used=%d total=%d", newUsed, sub.AmountTotal)
+				}
+				if err := tx.Model(&UserSubscription{}).Where("id = ?", sub.Id).Update("amount_used", newUsed).Error; err != nil {
+					return err
+				}
+			} else {
+				walletDelta := -delta
+				query := tx.Model(&User{}).Where("id = ?", persisted.UserId)
+				if walletDelta > 0 {
+					query = query.Where("quota <= ?", common.MaxWalletQuota-walletDelta)
+				}
+				result := query.Update("quota", gorm.Expr("quota + ?", walletDelta))
+				if result.Error != nil {
+					return result.Error
+				}
+				if result.RowsAffected != 1 {
+					return ErrWalletQuotaLimitExceeded
+				}
+			}
+
+			if persisted.PrivateData.TokenId > 0 {
+				var token Token
+				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&token, persisted.PrivateData.TokenId).Error; err != nil {
+					return err
+				}
+				tokenKey = token.Key
+				result := tx.Model(&Token{}).Where("id = ?", token.Id).Updates(map[string]any{
+					"remain_quota":  gorm.Expr("remain_quota - ?", delta),
+					"used_quota":    gorm.Expr("used_quota + ?", delta),
+					"accessed_time": common.GetTimestamp(),
+				})
+				if result.Error != nil {
+					return result.Error
+				}
+				if result.RowsAffected != 1 {
+					return gorm.ErrRecordNotFound
+				}
+			}
+
+			if result := tx.Model(&User{}).Where("id = ?", persisted.UserId).
+				Update("used_quota", gorm.Expr("used_quota + ?", delta)); result.Error != nil || result.RowsAffected != 1 {
+				if result.Error != nil {
+					return result.Error
+				}
+				return gorm.ErrRecordNotFound
+			}
+			if persisted.ChannelId > 0 {
+				if result := tx.Model(&Channel{}).Where("id = ?", persisted.ChannelId).
+					Update("used_quota", gorm.Expr("used_quota + ?", delta)); result.Error != nil || result.RowsAffected != 1 {
+					if result.Error != nil {
+						return result.Error
+					}
+					return gorm.ErrRecordNotFound
+				}
+			}
+		}
+
+		result := tx.Model(&Task{}).Where("id = ? AND quota = ? AND billing_pending = ?", persisted.ID, expectedQuota, true).Updates(map[string]any{
+			"quota": finalQuota, "billing_pending": false, "private_data": task.PrivateData,
+		})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return gorm.ErrRecordNotFound
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	task.Quota = finalQuota
+	task.BillingPending = false
+	if common.RedisEnabled {
+		if err := invalidateUserCache(task.UserId); err != nil {
+			common.SysLog("failed to invalidate user cache after task billing: " + err.Error())
+		}
+		if tokenKey != "" {
+			if err := invalidateTokenCacheForMutation(tokenKey); err != nil {
+				common.SysLog("failed to invalidate token cache after task billing: " + err.Error())
+			}
+		}
+	}
+	return true, nil
 }
 
 // TaskBulkUpdateByID performs an unconditional bulk UPDATE by primary key IDs.

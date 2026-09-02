@@ -86,6 +86,9 @@ func sweepTimedOutTasks(ctx context.Context) {
 			task.Quota = 0
 		} else {
 			task.FailReason = reason
+			if task.Quota != 0 {
+				task.BillingPending = true
+			}
 		}
 
 		won, err := task.UpdateWithStatus(oldStatus)
@@ -188,6 +191,9 @@ func failTaskWithoutUpstreamID(ctx context.Context, task *model.Task) bool {
 	task.Progress = "100%"
 	task.FinishTime = time.Now().Unix()
 	task.FailReason = "任务缺少上游任务 ID，已终止并退还预扣额度"
+	if task.Quota != 0 {
+		task.BillingPending = true
+	}
 	won, err := task.UpdateWithStatus(oldStatus)
 	if err != nil {
 		logger.LogError(ctx, fmt.Sprintf("fail task without upstream ID: task=%d error=%v", task.ID, err))
@@ -315,16 +321,21 @@ func updateBatchTasks(ctx context.Context, adaptor BatchTaskPollingAdaptor, chan
 
 		isDone := task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure
 		terminalTransition := isDone && snap.Status != task.Status
-		won, updateErr := task.UpdateWithStatus(snap.Status)
-		if updateErr != nil {
-			common.SysLog("UpdateSunoTask task error: " + updateErr.Error())
-			continue
+		if terminalTransition && task.Quota != 0 {
+			task.BillingPending = true
 		}
-		if !won {
-			logger.LogWarn(ctx, fmt.Sprintf("Batch task %s already transitioned by another process, skip billing", task.TaskID))
-			continue
+		if terminalTransition || !snap.Equal(task.Snapshot()) {
+			won, updateErr := task.UpdateWithStatus(snap.Status)
+			if updateErr != nil {
+				common.SysLog("UpdateSunoTask task error: " + updateErr.Error())
+				continue
+			}
+			if !won {
+				logger.LogWarn(ctx, fmt.Sprintf("Batch task %s already transitioned by another process, skip billing", task.TaskID))
+				continue
+			}
 		}
-		if terminalTransition {
+		if terminalTransition || task.BillingPending {
 			billingSettled := settleTaskBillingOnComplete(ctx, adaptor, task, &responseItem.TaskInfo)
 			if task.Status == model.TaskStatusFailure && !billingSettled && task.Quota != 0 {
 				RefundTaskQuota(ctx, task, task.FailReason)
@@ -564,6 +575,9 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 
 	isDone := task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure
 	if isDone && snap.Status != task.Status {
+		if task.Quota != 0 {
+			task.BillingPending = true
+		}
 		won, err := task.UpdateWithStatus(snap.Status)
 		if err != nil {
 			logger.LogError(ctx, fmt.Sprintf("UpdateWithStatus failed for task %s: %s", task.TaskID, err.Error()))
@@ -581,7 +595,7 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 		logger.LogDebug(ctx, "No update needed for task %s", task.TaskID)
 	}
 
-	if shouldFinalizeBilling {
+	if shouldFinalizeBilling || task.BillingPending {
 		billingSettled := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
 		if task.Status == model.TaskStatusFailure && !billingSettled && task.Quota != 0 {
 			RefundTaskQuota(ctx, task, task.FailReason)
@@ -646,25 +660,23 @@ func settleTaskBillingOnComplete(ctx context.Context, adaptor TaskPollingAdaptor
 		result, err := billingexpr.ComputeTieredQuotaWithRequest(bc.TieredSnapshot, billingexpr.TokenParams{}, billingexpr.RequestInput{Usage: usageFacts})
 		if err != nil {
 			logger.LogWarn(ctx, fmt.Sprintf("任务 %s 表达式结算失败，保留预扣额度: %v", task.TaskID, err))
-			return true
+			return RecalculateTaskQuota(ctx, task, task.Quota, "任务用量表达式结算失败，保留预扣额度")
 		}
 		if result.Clamp != nil {
 			logger.LogWarn(ctx, fmt.Sprintf("任务 %s 表达式结算额度发生饱和: %+v", task.TaskID, result.Clamp))
 		}
 		bc.TieredSnapshot.UsageFacts = usageFacts
 		bc.TieredSnapshot.EstimatedTier = result.MatchedTier
-		RecalculateTaskQuota(ctx, task, result.ActualQuotaAfterGroup, "任务用量表达式结算", result.Clamp)
-		return true
+		return RecalculateTaskQuota(ctx, task, result.ActualQuotaAfterGroup, "任务用量表达式结算", result.Clamp)
 	}
 	// 按次计费的成功任务保持预扣；失败任务由调用方全额退款。
 	if bc := task.PrivateData.BillingContext; bc != nil && bc.PerCallBilling {
-		logger.LogInfo(ctx, fmt.Sprintf("任务 %s 按次计费，跳过差额结算", task.TaskID))
-		return false
+		logger.LogInfo(ctx, fmt.Sprintf("任务 %s 按次计费，确认预扣额度为最终额度", task.TaskID))
+		return RecalculateTaskQuota(ctx, task, task.Quota, "按次计费确认")
 	}
 	// 优先让 adaptor 决定最终额度。
 	if actualQuota := adaptor.AdjustBillingOnComplete(task, taskResult); actualQuota > 0 {
-		RecalculateTaskQuota(ctx, task, actualQuota, "adaptor计费调整")
-		return true
+		return RecalculateTaskQuota(ctx, task, actualQuota, "adaptor计费调整")
 	}
 	// 回退到 token 重算。
 	tokens := taskResult.TotalTokens
@@ -673,6 +685,9 @@ func settleTaskBillingOnComplete(ctx context.Context, adaptor TaskPollingAdaptor
 	}
 	if tokens > 0 {
 		return RecalculateTaskQuotaByTokens(ctx, task, tokens)
+	}
+	if task.Status == model.TaskStatusSuccess {
+		return RecalculateTaskQuota(ctx, task, task.Quota, "无完成用量，保留预扣额度")
 	}
 	return false
 }

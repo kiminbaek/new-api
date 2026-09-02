@@ -24,6 +24,7 @@ const (
 
 var batchUpdateStores []map[int]int
 var batchUpdateLocks []sync.Mutex
+var batchUpdateFlushMu sync.Mutex
 
 func init() {
 	for i := 0; i < BatchUpdateTypeCount; i++ {
@@ -62,7 +63,10 @@ func addNewRecord(type_ int, id int, value int) {
 	batchUpdateStores[type_][id] = sum
 }
 
-func batchUpdate() {
+func batchUpdate() bool {
+	batchUpdateFlushMu.Lock()
+	defer batchUpdateFlushMu.Unlock()
+
 	// check if there's any data to update
 	hasData := false
 	for i := 0; i < BatchUpdateTypeCount; i++ {
@@ -76,9 +80,10 @@ func batchUpdate() {
 	}
 
 	if !hasData {
-		return
+		return true
 	}
 
+	allSucceeded := true
 	common.SysLog("batch update started")
 	stores := make([]map[int]int, BatchUpdateTypeCount)
 	for i := 0; i < BatchUpdateTypeCount; i++ {
@@ -98,11 +103,13 @@ func batchUpdate() {
 				if err := increaseTokenQuota(key, value); err != nil {
 					common.SysLog("failed to batch update token quota, queued for retry: " + err.Error())
 					addNewRecord(i, key, value)
+					allSucceeded = false
 				}
 			case BatchUpdateTypeChannelUsedQuota:
 				if err := updateChannelUsedQuota(key, value); err != nil {
 					common.SysLog("failed to batch update channel quota, queued for retry: " + err.Error())
 					addNewRecord(i, key, value)
+					allSucceeded = false
 				}
 			}
 		}
@@ -128,9 +135,23 @@ func batchUpdate() {
 			addNewRecord(BatchUpdateTypeUserQuota, key, userQuotaStore[key])
 			addNewRecord(BatchUpdateTypeUsedQuota, key, usedQuotaStore[key])
 			addNewRecord(BatchUpdateTypeRequestCount, key, requestCountStore[key])
+			allSucceeded = false
 		}
 	}
 	common.SysLog("batch update finished")
+	return allSucceeded
+}
+
+// FlushBatchUpdates synchronously persists queued accounting before a durable
+// multi-row billing transition. Failed deltas remain queued for retry.
+func FlushBatchUpdates() error {
+	if !common.BatchUpdateEnabled {
+		return nil
+	}
+	if !batchUpdate() {
+		return errors.New("batch accounting flush incomplete")
+	}
+	return nil
 }
 
 func RecordExist(err error) (bool, error) {
