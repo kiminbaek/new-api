@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"net/http"
@@ -819,6 +820,25 @@ func TestDryRunTaskPluginExecutesHookAndRendererMember(t *testing.T) {
 	memberRecorder := runTaskPluginDryRun(t, `{"hook":"native","member":"info","args":[{}, {"id":"t-1"}]}`)
 	assert.Contains(t, memberRecorder.Body.String(), `"success":true`)
 	assert.Contains(t, memberRecorder.Body.String(), "task:t-1")
+}
+
+func TestDryRunTaskPluginHonorsRequestCancellation(t *testing.T) {
+	setupTaskPluginControllerTest(t)
+	require.NoError(t, model.SaveTaskPlugin(&model.TaskPlugin{Key: "dryrun-probe", APIVersion: 1, Version: "1.0.0", Source: dryRunPluginSource, SourceHash: "hash", Enabled: true}))
+
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	ginContext.Params = gin.Params{{Key: "key", Value: "dryrun-probe"}}
+	request := httptest.NewRequest(http.MethodPost, "/api/plugin/task/dryrun-probe/dryrun", strings.NewReader(`{"hook":"buildSubmitRequest","args":[{"model":"doc-1"}]}`))
+	request.Header.Set("Content-Type", "application/json")
+	requestContext, cancel := context.WithCancel(request.Context())
+	cancel()
+	ginContext.Request = request.WithContext(requestContext)
+
+	DryRunTaskPlugin(ginContext)
+
+	assert.Contains(t, recorder.Body.String(), `"success":false`)
+	assert.Contains(t, recorder.Body.String(), "context canceled")
 }
 
 func TestDryRunTaskPluginReportsUnknownHook(t *testing.T) {

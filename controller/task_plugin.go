@@ -343,10 +343,11 @@ func DryRunTaskPlugin(c *gin.Context) {
 		}
 	}
 	var output any
+	requestContext := c.Request.Context()
 	if request.Member == "" {
-		output, err = loaded.Engine.Call(context.Background(), request.Hook, args...)
+		output, err = loaded.Engine.Call(requestContext, request.Hook, args...)
 	} else {
-		output, err = loaded.Engine.CallMember(context.Background(), request.Hook, request.Member, args...)
+		output, err = loaded.Engine.CallMember(requestContext, request.Hook, request.Member, args...)
 	}
 	if err != nil {
 		common.ApiErrorMsg(c, err.Error())

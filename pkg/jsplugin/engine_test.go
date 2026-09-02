@@ -230,6 +230,27 @@ func TestEngineHookErrorExtractsSanitizedJSMessage(t *testing.T) {
 	}
 }
 
+func TestEngineRejectsAlreadyCanceledContexts(t *testing.T) {
+	t.Parallel()
+	engine, err := Compile(`
+export function run() { return "unexpected"; }
+export const value = 1;
+`, Options{Key: "pre-canceled", Version: "1"})
+	require.NoError(t, err)
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = engine.Call(canceled, "run")
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = engine.Export(canceled, "value")
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = engine.HasExport(canceled, "run")
+	require.ErrorIs(t, err, context.Canceled)
+	_, err = engine.HasCallablePath(canceled, "run")
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 func TestEngineReportsProtocolAdmissionTimeoutSeparately(t *testing.T) {
 	engine, err := Compile(`
 export const protocols = {

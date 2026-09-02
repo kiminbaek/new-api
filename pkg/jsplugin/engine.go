@@ -184,6 +184,9 @@ func Compile(source string, options Options) (*Engine, error) {
 // Export returns one module export without exposing Sobek values outside the
 // engine boundary. It is used for declarative exports such as meta.
 func (e *Engine) Export(ctx context.Context, exportName string) (result any, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	select {
 	case e.semaphore <- struct{}{}:
 		defer func() { <-e.semaphore }()
@@ -231,6 +234,9 @@ func (e *Engine) Export(ctx context.Context, exportName string) (result any, err
 // HasExport reports whether a module export exists. Optional contract hooks
 // should be detected with this method instead of relying on engine errors.
 func (e *Engine) HasExport(ctx context.Context, exportName string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	select {
 	case e.semaphore <- struct{}{}:
 		defer func() { <-e.semaphore }()
@@ -252,6 +258,9 @@ func (e *Engine) HasExport(ctx context.Context, exportName string) (bool, error)
 // HasCallablePath reports whether an exported value, or a nested member below
 // it, exists and is callable.
 func (e *Engine) HasCallablePath(ctx context.Context, exportName string, members ...string) (found bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	select {
 	case e.semaphore <- struct{}{}:
 		defer func() { <-e.semaphore }()
@@ -413,6 +422,9 @@ func (e *Engine) call(
 }
 
 func (e *Engine) acquireCallSlot(ctx context.Context, admissionTimeout time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if admissionTimeout <= 0 {
 		select {
 		case e.semaphore <- struct{}{}:
