@@ -294,8 +294,7 @@ export function parseTaskResult(){return {status:"SUCCESS"}}
 func TestTaskAdaptorReDecodesFinalCandidateAndRejectsModelDrift(t *testing.T) {
 	source := `
 export const meta = {apiVersion:1,key:"redecode",name:"Redecode",version:"1.0.0",author:{name:"Test"},models:["claimed-model"],fetchMode:"per_task",protocols:[{name:"openai_responses",supports:["sync","background"]}]};
-let calls = 0;
-export const protocols = {openai_responses:{decodeRequest:function(ctx){calls++;return {kind:"submit",model:calls === 1 ? ctx.model : "drifted-model",requestBody:ctx.body.value};},renderFinal:function(){return {};}}};
+export const protocols = {openai_responses:{decodeRequest:function(ctx){return {kind:"submit",model:ctx.body.value.forceDrift ? "drifted-model" : ctx.model,requestBody:ctx.body.value};},renderFinal:function(){return {};}}};
 export function buildSubmitRequest(ctx){return {url:ctx.baseUrl+"/submit"}} export function parseSubmitResponse(){return {taskId:"one"}} export function buildQueryRequest(){return {}} export function parseTaskResult(){return {status:"SUCCESS"}}
 `
 	plugin, err := pluginruntime.NewRegistry().Register(source, pluginruntime.Options{})
@@ -306,6 +305,7 @@ export function buildSubmitRequest(ctx){return {url:ctx.baseUrl+"/submit"}} expo
 	}
 	_, err = plugin.Engine.CallPath(context.Background(), "protocols", []string{"openai_responses", "decodeRequest"}, protocolContext.JSValue())
 	require.NoError(t, err)
+	protocolContext.Body = map[string]any{"kind": "json", "value": map[string]any{"model": "claimed-model", "forceDrift": true}}
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 	c.Set(pluginruntime.ContextKeyPinnedEndpoint, pluginruntime.PinnedEndpoint{Plugin: plugin, Protocol: "openai_responses", Model: "claimed-model"})
