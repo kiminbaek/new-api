@@ -206,3 +206,14 @@ func TestGeneralOpenAIRequestGetSystemRoleName(t *testing.T) {
 		})
 	}
 }
+
+func TestGeneralOpenAIRequestPreservesVLLMThinkingTokenBudget(t *testing.T) {
+	raw := []byte(`{"model":"custom-vllm-model","thinking_token_budget":256}`)
+	var req GeneralOpenAIRequest
+	require.NoError(t, kitutil.Unmarshal(raw, &req))
+	encoded, err := kitutil.Marshal(req)
+	require.NoError(t, err)
+	value := gjson.GetBytes(encoded, "thinking_token_budget")
+	assert.True(t, value.Exists())
+	assert.Equal(t, int64(256), value.Int())
+}
