@@ -450,3 +450,16 @@ func TestAwsStreamHandlerStopsAtClientCancellation(t *testing.T) {
 		t.Fatal("upstream producer did not observe the closed stream")
 	}
 }
+
+func TestAwsStreamHandlerRejectsEmptyEventStream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	client := newAwsTestClient(awsHTTPClientFunc(func(request *http.Request) (*http.Response, error) {
+		return newAwsStreamResponse(request, io.NopCloser(bytes.NewReader(nil))), nil
+	}))
+	c := newAwsTestContext(httptest.NewRecorder(), context.Background())
+	adaptor := &Adaptor{AwsClient: client, AwsReq: newAwsStreamInput()}
+	err, usage := awsStreamHandler(c, newAwsTestRelayInfo(), adaptor)
+	require.NotNil(t, err)
+	assert.Equal(t, http.StatusBadGateway, err.StatusCode)
+	assert.Nil(t, usage)
+}

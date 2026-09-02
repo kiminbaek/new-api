@@ -278,6 +278,7 @@ func awsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) (
 	}
 
 	events := stream.Events()
+	validEvents := 0
 streamLoop:
 	for {
 		select {
@@ -298,6 +299,7 @@ streamLoop:
 				if respErr != nil {
 					return respErr, nil
 				}
+				validEvents++
 			case *bedrockruntimeTypes.UnknownUnionMember:
 				fmt.Println("unknown tag:", v.Tag)
 				return types.NewError(errors.New("unknown response type"), types.ErrorCodeInvalidRequest), nil
@@ -309,6 +311,13 @@ streamLoop:
 	}
 
 	_ = stream.Close()
+	if requestContext.Err() != nil {
+		// Client cancellation is not an upstream failure and must not trigger retry.
+		return nil, claudeInfo.Usage
+	}
+	if validEvents == 0 || (claudeInfo.ResponseText.Len() == 0 && !claudeInfo.Done) {
+		return types.NewOpenAIError(fmt.Errorf("aws stream ended without valid output (events=%d)", validEvents), types.ErrorCodeBadResponse, http.StatusBadGateway), nil
+	}
 	claude.HandleStreamFinalResponse(c, info, claudeInfo)
 	return nil, claudeInfo.Usage
 }
