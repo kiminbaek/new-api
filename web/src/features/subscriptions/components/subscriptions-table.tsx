@@ -21,6 +21,7 @@ import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { DataTablePage, useDataTable } from '@/components/data-table'
+import { requireSuccessfulResponse } from '@/lib/api-response'
 
 import { getAdminPlans } from '../api'
 import { useSubscriptionsColumns } from './subscriptions-columns'
@@ -31,10 +32,13 @@ export function SubscriptionsTable() {
   const columns = useSubscriptionsColumns()
   const { refreshTrigger } = useSubscriptions()
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ['admin-subscription-plans', refreshTrigger],
     queryFn: async () => {
-      const result = await getAdminPlans()
+      const result = requireSuccessfulResponse(
+        await getAdminPlans(),
+        t('Failed to load subscription plans')
+      )
       return result.data || []
     },
     placeholderData: (prev) => prev,
@@ -54,6 +58,9 @@ export function SubscriptionsTable() {
       table={table}
       columns={columns}
       isLoading={isLoading}
+      isFetching={isFetching}
+      error={error}
+      onRetry={isFetching ? undefined : () => void refetch()}
       emptyTitle={t('No subscription plans yet')}
       emptyDescription={t(
         'Click "Create Plan" to create your first subscription plan'

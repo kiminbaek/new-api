@@ -44,6 +44,7 @@ import {
 } from '@/components/ui/tooltip'
 import { useMediaQuery } from '@/hooks'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
+import { requireSuccessfulResponse } from '@/lib/api-response'
 import { getLobeIcon } from '@/lib/lobe-icon'
 
 import { getChannels, searchChannels, getGroups } from '../api'
@@ -220,7 +221,7 @@ export function ChannelsTable() {
 
   // Fetch channels data
   // eslint-disable-next-line @tanstack/query/exhaustive-deps
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: channelsQueryKeys.list({
       keyword: globalFilter,
       model: modelFilter,
@@ -243,8 +244,8 @@ export function ChannelsTable() {
       page_size: pagination.pageSize,
     }),
     queryFn: async () => {
-      if (shouldSearch) {
-        return searchChannels({
+      const result = shouldSearch
+        ? await searchChannels({
           keyword: globalFilter,
           model: modelFilter,
           group:
@@ -265,8 +266,7 @@ export function ChannelsTable() {
           p: pagination.pageIndex + 1,
           page_size: pagination.pageSize,
         })
-      } else {
-        return getChannels({
+        : await getChannels({
           group:
             groupFilter.length > 0 && !groupFilter.includes('all')
               ? groupFilter[0]
@@ -285,7 +285,7 @@ export function ChannelsTable() {
           p: pagination.pageIndex + 1,
           page_size: pagination.pageSize,
         })
-      }
+      return requireSuccessfulResponse(result, t('Failed to load channels'))
     },
     placeholderData: (previousData) => previousData,
   })
@@ -413,6 +413,8 @@ export function ChannelsTable() {
       columns={columns}
       isLoading={isLoading}
       isFetching={isFetching}
+      error={error}
+      onRetry={isFetching ? undefined : () => void refetch()}
       emptyTitle={t('No Channels Found')}
       emptyDescription={t(
         'No channels available. Create your first channel to get started.'

@@ -41,6 +41,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import * as React from 'react'
 
+import { ErrorState } from '@/components/error-state'
 import { PageFooterPortal } from '@/components/layout/components/page-footer'
 import { useMediaQuery } from '@/hooks'
 import { cn } from '@/lib/utils'
@@ -91,6 +92,15 @@ export type DataTablePageProps<TData> = {
    * Refetch / background loading — dims the table without removing rows.
    */
   isFetching?: boolean
+
+  /**
+   * Query error. When present, keeps the toolbar but replaces stale/empty data
+   * with a retryable error state on both desktop and mobile.
+   */
+  error?: Error | null
+
+  /** Retry the current query without resetting URL-backed table state. */
+  onRetry?: () => void
 
   /**
    * Empty-state title (used for both desktop {@link TableEmpty} and mobile fallback).
@@ -329,9 +339,20 @@ export function DataTablePage<TData>(props: DataTablePageProps<TData>) {
   ) : undefined
 
   const toolbarNode = renderToolbar(props, viewToggle)
-  const mobileNode = renderMobile(props, showMobile, cardViewActive, viewMode)
-  const desktopNode = renderDesktop(props, showMobile, cardViewActive, viewMode)
-  const paginationNode = renderPagination(props)
+  const errorNode = props.error ? (
+    <ErrorState
+      title={props.error.message || undefined}
+      description='The list could not be loaded. Your filters and page are preserved.'
+      onRetry={props.onRetry}
+      className='min-h-[240px] flex-1'
+    />
+  ) : null
+  const mobileNode = errorNode ??
+    renderMobile(props, showMobile, cardViewActive, viewMode)
+  const desktopNode = errorNode
+    ? null
+    : renderDesktop(props, showMobile, cardViewActive, viewMode)
+  const paginationNode = props.error ? null : renderPagination(props)
 
   return (
     <>
@@ -351,7 +372,7 @@ export function DataTablePage<TData>(props: DataTablePageProps<TData>) {
 
       {/* Bulk actions are typically a fixed-position toolbar; let the consumer
           handle its own visibility, we just gate it to non-mobile. */}
-      {!showMobile && props.bulkActions}
+      {!props.error && !showMobile && props.bulkActions}
 
       {paginationNode}
     </>
