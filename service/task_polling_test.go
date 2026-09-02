@@ -739,3 +739,68 @@ func TestCloneTaskForPollingIsDeepCopy(t *testing.T) {
 	assert.Empty(t, src.PrivateData.BillingContext.OriginModelName)
 	assert.Equal(t, float64(2), src.PrivateData.BillingContext.OtherRatios["duration"])
 }
+
+func TestFailTaskWithoutUpstreamIDUsesCASAndRefunds(t *testing.T) {
+	truncate(t)
+	const userID, channelID, quota = 450, 450, 1200
+	seedUser(t, userID, 5000)
+	seedChannel(t, channelID)
+	seedChargedAccounting(t, userID, channelID, 0, quota, 1)
+	task := makeTask(userID, channelID, quota, 0, BillingSourceWallet, 0)
+	task.TaskID = ""
+	task.Status = model.TaskStatusInProgress
+	task.Progress = "50%"
+	require.NoError(t, model.DB.Create(task).Error)
+
+	assert.True(t, failTaskWithoutUpstreamID(context.Background(), task))
+	var reloaded model.Task
+	require.NoError(t, model.DB.First(&reloaded, task.ID).Error)
+	assert.EqualValues(t, model.TaskStatusFailure, reloaded.Status)
+	assert.Equal(t, "100%", reloaded.Progress)
+	assert.Zero(t, reloaded.Quota)
+	assert.Equal(t, 5000+quota, getUserQuota(t, userID))
+	assert.Equal(t, int64(1), countLogs(t))
+
+	stale := *task
+	stale.Status = model.TaskStatusInProgress
+	stale.Quota = quota
+	assert.False(t, failTaskWithoutUpstreamID(context.Background(), &stale))
+	assert.Equal(t, 5000+quota, getUserQuota(t, userID))
+	assert.Equal(t, int64(1), countLogs(t))
+}
+
+func TestBatchChannelLookupFailurePreservesTaskForRetry(t *testing.T) {
+	truncate(t)
+	task := makeTask(451, 9451, 900, 0, BillingSourceWallet, 0)
+	task.TaskID = "task_batch_channel_retry"
+	task.PrivateData.UpstreamTaskID = "upstream_batch_retry"
+	require.NoError(t, model.DB.Create(task).Error)
+
+	err := updateBatchTasks(context.Background(), &batchPollingAdaptor{}, task.ChannelId,
+		[]string{task.GetUpstreamTaskID()}, map[string]*model.Task{task.GetUpstreamTaskID(): task})
+	require.Error(t, err)
+
+	var reloaded model.Task
+	require.NoError(t, model.DB.First(&reloaded, task.ID).Error)
+	assert.EqualValues(t, model.TaskStatusInProgress, reloaded.Status)
+	assert.Equal(t, task.Progress, reloaded.Progress)
+	assert.Equal(t, 900, reloaded.Quota)
+}
+
+func TestVideoChannelLookupFailurePreservesTaskForRetry(t *testing.T) {
+	truncate(t)
+	task := makeTask(452, 9452, 800, 0, BillingSourceWallet, 0)
+	task.TaskID = "task_video_channel_retry"
+	task.PrivateData.UpstreamTaskID = "upstream_video_retry"
+	require.NoError(t, model.DB.Create(task).Error)
+
+	err := updateVideoTasks(context.Background(), constant.TaskPlatformSuno, task.ChannelId,
+		[]string{task.GetUpstreamTaskID()}, map[string]*model.Task{task.GetUpstreamTaskID(): task})
+	require.Error(t, err)
+
+	var reloaded model.Task
+	require.NoError(t, model.DB.First(&reloaded, task.ID).Error)
+	assert.EqualValues(t, model.TaskStatusInProgress, reloaded.Status)
+	assert.Equal(t, task.Progress, reloaded.Progress)
+	assert.Equal(t, 800, reloaded.Quota)
+}

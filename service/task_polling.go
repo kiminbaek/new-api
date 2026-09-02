@@ -155,28 +155,16 @@ func RunTaskPollingOnce(ctx context.Context, report func(processed, total int)) 
 		summary.PlatformsScanned++
 		taskChannelM := make(map[int][]string)
 		taskM := make(map[string]*model.Task)
-		nullTaskIds := make([]int64, 0)
 		for _, task := range tasks {
 			upstreamID := task.GetUpstreamTaskID()
 			if upstreamID == "" {
-				// 统计失败的未完成任务
-				nullTaskIds = append(nullTaskIds, task.ID)
+				if failTaskWithoutUpstreamID(ctx, task) {
+					summary.NullTasksFailed++
+				}
 				continue
 			}
 			taskM[upstreamID] = task
 			taskChannelM[task.ChannelId] = append(taskChannelM[task.ChannelId], upstreamID)
-		}
-		if len(nullTaskIds) > 0 {
-			summary.NullTasksFailed += len(nullTaskIds)
-			err := model.TaskBulkUpdateByID(nullTaskIds, map[string]any{
-				"status":   "FAILURE",
-				"progress": "100%",
-			})
-			if err != nil {
-				logger.LogError(ctx, fmt.Sprintf("Fix null task_id task error: %v", err))
-			} else {
-				logger.LogInfo(ctx, fmt.Sprintf("Fix null task_id task success: %v", nullTaskIds))
-			}
 		}
 		if len(taskChannelM) == 0 {
 			continue
@@ -189,6 +177,30 @@ func RunTaskPollingOnce(ctx context.Context, report func(processed, total int)) 
 	}
 	common.SysLog("任务进度轮询完成")
 	return summary
+}
+
+func failTaskWithoutUpstreamID(ctx context.Context, task *model.Task) bool {
+	if task == nil {
+		return false
+	}
+	oldStatus := task.Status
+	task.Status = model.TaskStatusFailure
+	task.Progress = "100%"
+	task.FinishTime = time.Now().Unix()
+	task.FailReason = "任务缺少上游任务 ID，已终止并退还预扣额度"
+	won, err := task.UpdateWithStatus(oldStatus)
+	if err != nil {
+		logger.LogError(ctx, fmt.Sprintf("fail task without upstream ID: task=%d error=%v", task.ID, err))
+		return false
+	}
+	if !won {
+		logger.LogInfo(ctx, fmt.Sprintf("task without upstream ID already transitioned: task=%d", task.ID))
+		return false
+	}
+	if task.Quota != 0 && !RefundTaskQuota(ctx, task, task.FailReason) {
+		logger.LogError(ctx, fmt.Sprintf("failed to refund task without upstream ID: task=%d", task.ID))
+	}
+	return true
 }
 
 // DispatchPlatformUpdate 按平台分发轮询更新
@@ -235,23 +247,9 @@ func updateBatchTasks(ctx context.Context, adaptor BatchTaskPollingAdaptor, chan
 	}
 	ch, err := model.CacheGetChannel(channelId)
 	if err != nil {
-		common.SysLog(fmt.Sprintf("CacheGetChannel: %v", err))
-		// Collect DB primary key IDs for bulk update (taskIds are upstream IDs, not task_id column values)
-		var failedIDs []int64
-		for _, upstreamID := range taskIds {
-			if t, ok := taskM[upstreamID]; ok {
-				failedIDs = append(failedIDs, t.ID)
-			}
-		}
-		err = model.TaskBulkUpdateByID(failedIDs, map[string]any{
-			"fail_reason": fmt.Sprintf("获取渠道信息失败，请联系管理员，渠道ID：%d", channelId),
-			"status":      "FAILURE",
-			"progress":    "100%",
-		})
-		if err != nil {
-			common.SysLog(fmt.Sprintf("UpdateSunoTask error: %v", err))
-		}
-		return err
+		// Channel lookup failures can be transient. Keep tasks unfinished so the
+		// next polling pass can retry instead of terminally losing their charge.
+		return fmt.Errorf("CacheGetChannel failed for channel %d: %w", channelId, err)
 	}
 	proxy := ch.GetSetting().Proxy
 	baseURL := ch.GetBaseURL()
@@ -377,22 +375,9 @@ func updateVideoTasks(ctx context.Context, platform constant.TaskPlatform, chann
 	}
 	cacheGetChannel, err := model.CacheGetChannel(channelId)
 	if err != nil {
-		// Collect DB primary key IDs for bulk update (taskIds are upstream IDs, not task_id column values)
-		var failedIDs []int64
-		for _, upstreamID := range taskIds {
-			if t, ok := taskM[upstreamID]; ok {
-				failedIDs = append(failedIDs, t.ID)
-			}
-		}
-		errUpdate := model.TaskBulkUpdateByID(failedIDs, map[string]any{
-			"fail_reason": fmt.Sprintf("Failed to get channel info, channel ID: %d", channelId),
-			"status":      "FAILURE",
-			"progress":    "100%",
-		})
-		if errUpdate != nil {
-			common.SysLog(fmt.Sprintf("UpdateVideoTask error: %v", errUpdate))
-		}
-		return fmt.Errorf("CacheGetChannel failed: %w", err)
+		// A missing/unavailable channel cache is not a task terminal result.
+		// Preserve status and quota for a later retry or explicit timeout refund.
+		return fmt.Errorf("CacheGetChannel failed for channel %d: %w", channelId, err)
 	}
 	adaptor := GetTaskAdaptorFunc(platform)
 	if adaptor == nil {
