@@ -1208,3 +1208,102 @@ func TestTaskAdaptorBuildSubmitReceivesMappedUpstreamModel(t *testing.T) {
 	assert.Equal(t, "declared-model", decoded["upstreamModel"])
 	assert.Equal(t, "declared-model", decoded["model"])
 }
+
+func TestTaskAdaptorRejectsCredentiallessSubmitUsingActualPostMethod(t *testing.T) {
+	source := `
+export const meta = {apiVersion:1,key:"credentialless-submit",name:"Credentialless Submit",version:"1.0.0",author:{name:"Test"},models:["m"],fetchMode:"per_task"};
+export function buildSubmitRequest(){return {url:"https://cdn.example/submit",credentialless:true};}
+export function parseSubmitResponse(){return {taskId:"1"};}
+export function buildQueryRequest(){return {url:"https://provider.example/task"};}
+export function parseTaskResult(){return {status:"SUCCESS"};}
+`
+	plugin, err := pluginruntime.NewRegistry().Register(source, pluginruntime.Options{})
+	require.NoError(t, err)
+	adaptor := New(plugin)
+	info := &relaycommon.RelayInfo{
+		ChannelMeta:   &relaycommon.ChannelMeta{ChannelBaseUrl: "https://provider.example"},
+		TaskRelayInfo: &relaycommon.TaskRelayInfo{},
+	}
+	adaptor.Init(info)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/videos", nil)
+	c.Set("task_request", map[string]any{"model": "m"})
+	require.Nil(t, adaptor.ValidateRequestAndSetAction(c, info))
+	_, err = adaptor.BuildRequestBody(c, info)
+	require.ErrorContains(t, err, "GET or HEAD")
+}
+
+func TestTaskAdaptorAllowsCredentiallessCrossOriginPolling(t *testing.T) {
+	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"done"}`)
+	}))
+	defer cdn.Close()
+
+	source := strings.Replace(`
+export const meta = {apiVersion:1,key:"credentialless-poll",name:"Credentialless Poll",version:"1.0.0",author:{name:"Test"},models:["m"],fetchMode:"per_task"};
+export function buildSubmitRequest(ctx){return {url:ctx.baseUrl+"/submit"};}
+export function parseSubmitResponse(){return {taskId:"1"};}
+export function buildQueryRequest(){return {url:"CDN_URL",method:"GET",credentialless:true};}
+export function parseTaskResult(){return {status:"SUCCESS"};}
+`, "CDN_URL", cdn.URL+"/task", 1)
+	plugin, err := pluginruntime.NewRegistry().Register(source, pluginruntime.Options{})
+	require.NoError(t, err)
+	adaptor := New(plugin)
+
+	response, err := adaptor.FetchTask("https://provider.example", "secret", map[string]any{"task_id": "1"}, "")
+	require.NoError(t, err)
+	defer response.Body.Close()
+	assert.Equal(t, http.StatusOK, response.StatusCode)
+}
+
+func TestTaskAdaptorRejectsCredentiallessPollingWithCredentialsOrBody(t *testing.T) {
+	for _, descriptor := range []string{
+		`{url:"https://cdn.example/task",method:"GET",credentialless:true,headers:{"X-Api-Key":"secret"}}`,
+		`{url:"https://cdn.example/task",method:"GET",credentialless:true,body:{secret:true}}`,
+	} {
+		source := strings.Replace(`
+export const meta = {apiVersion:1,key:"credentialless-poll-reject",name:"Credentialless Poll Reject",version:"1.0.0",author:{name:"Test"},models:["m"],fetchMode:"per_task"};
+export function buildSubmitRequest(ctx){return {url:ctx.baseUrl+"/submit"};}
+export function parseSubmitResponse(){return {taskId:"1"};}
+export function buildQueryRequest(){return DESCRIPTOR;}
+export function parseTaskResult(){return {status:"SUCCESS"};}
+`, "DESCRIPTOR", descriptor, 1)
+		plugin, err := pluginruntime.NewRegistry().Register(source, pluginruntime.Options{})
+		require.NoError(t, err)
+		adaptor := New(plugin)
+
+		_, err = adaptor.FetchTask("https://provider.example", "secret", map[string]any{"task_id": "1"}, "")
+		require.ErrorContains(t, err, "headers or a body")
+	}
+}
+
+func TestTaskAdaptorPollingDoesNotFollowCredentialedRedirect(t *testing.T) {
+	var targetHits int
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHits++
+		assert.Empty(t, r.Header.Get("X-Api-Key"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Redirect(w, &http.Request{}, target.URL+"/stolen", http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	source := `
+export const meta = {apiVersion:1,key:"redirect-poll",name:"Redirect Poll",version:"1.0.0",author:{name:"Test"},models:["m"],fetchMode:"per_task"};
+export function buildSubmitRequest(ctx){return {url:ctx.baseUrl+"/submit"};}
+export function parseSubmitResponse(){return {taskId:"1"};}
+export function buildQueryRequest(ctx){return {url:ctx.baseUrl+"/task",method:"GET",headers:{"X-Api-Key":ctx.apiKey}};}
+export function parseTaskResult(){return {status:"SUCCESS"};}
+`
+	plugin, err := pluginruntime.NewRegistry().Register(source, pluginruntime.Options{})
+	require.NoError(t, err)
+	adaptor := New(plugin)
+
+	response, err := adaptor.FetchTask(redirector.URL, "secret", map[string]any{"task_id": "1"}, "")
+	require.NoError(t, err)
+	defer response.Body.Close()
+	assert.Equal(t, http.StatusFound, response.StatusCode)
+	assert.Equal(t, 0, targetHits)
+}

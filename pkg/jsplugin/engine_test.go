@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -354,6 +355,28 @@ export const protocols = {
 	require.ErrorContains(t, err, "not found")
 }
 
+func TestValidateCredentiallessRequest(t *testing.T) {
+	t.Parallel()
+	require.NoError(t, ValidateCredentiallessRequest("https://cdn.example/file", http.MethodGet, nil, nil))
+	require.NoError(t, ValidateCredentiallessRequest("http://cdn.example/file", http.MethodHead, nil, nil))
+	for _, test := range []struct {
+		name, target, method, want string
+		headers                    map[string]string
+		body                       any
+	}{
+		{name: "post", target: "https://cdn.example/file", method: http.MethodPost, want: "GET or HEAD"},
+		{name: "headers", target: "https://cdn.example/file", method: http.MethodGet, headers: map[string]string{"Authorization": "secret"}, want: "headers or a body"},
+		{name: "body", target: "https://cdn.example/file", method: http.MethodGet, body: map[string]any{"x": true}, want: "headers or a body"},
+		{name: "userinfo", target: "https://user:secret@cdn.example/file", method: http.MethodGet, want: "userinfo"},
+		{name: "scheme", target: "file://cdn.example/file", method: http.MethodGet, want: "HTTP(S)"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateCredentiallessRequest(test.target, test.method, test.headers, test.body)
+			require.ErrorContains(t, err, test.want)
+		})
+	}
+}
+
 func TestCompileInterruptsLongRunningInitialization(t *testing.T) {
 	t.Parallel()
 	_, err := Compile(`while (true) {}; export function run() {}`, Options{
@@ -376,7 +399,12 @@ func TestValidateRequestURL(t *testing.T) {
 		{name: "default port", requestURL: "https://api.example.com:443/v1/task", baseURL: "https://api.example.com"},
 		{name: "approved host", requestURL: "https://upload.example.com/task", baseURL: "https://api.example.com", allowedHosts: []string{"upload.example.com"}},
 		{name: "subdomain is not implicit", requestURL: "https://evil.api.example.com/task", baseURL: "https://api.example.com", wantError: "not allowed"},
-		{name: "userinfo trick", requestURL: "https://api.example.com@evil.example/task", baseURL: "https://api.example.com", wantError: "not allowed"},
+		{name: "userinfo trick", requestURL: "https://api.example.com@evil.example/task", baseURL: "https://api.example.com", wantError: "userinfo"},
+		{name: "same host userinfo", requestURL: "https://user:secret@api.example.com/task", baseURL: "https://api.example.com", wantError: "userinfo"},
+		{name: "https downgrade", requestURL: "http://api.example.com/task", baseURL: "https://api.example.com", wantError: "downgrade"},
+		{name: "non http scheme", requestURL: "ftp://api.example.com/task", baseURL: "https://api.example.com", wantError: "HTTP(S)"},
+		{name: "fragment", requestURL: "https://api.example.com/task#secret", baseURL: "https://api.example.com", wantError: "fragment"},
+		{name: "surrounding whitespace", requestURL: " https://api.example.com/task", baseURL: "https://api.example.com", wantError: "whitespace"},
 		{name: "relative URL", requestURL: "/v1/task", baseURL: "https://api.example.com", wantError: "absolute"},
 	}
 	for _, test := range tests {
@@ -389,5 +417,21 @@ func TestValidateRequestURL(t *testing.T) {
 			require.Error(t, err)
 			assert.True(t, strings.Contains(err.Error(), test.wantError), err.Error())
 		})
+	}
+}
+
+func TestValidateRequestHeaders(t *testing.T) {
+	t.Parallel()
+	require.NoError(t, ValidateRequestHeaders(map[string]string{
+		"Authorization": "Bearer secret",
+		"X-Api-Key":     "secret",
+	}))
+	for _, headers := range []map[string]string{
+		{"Host": "evil.example"},
+		{"Content-Length": "1"},
+		{"Connection": "keep-alive"},
+		{"X-Test": "ok\r\nX-Injected: yes"},
+	} {
+		require.Error(t, ValidateRequestHeaders(headers))
 	}
 }

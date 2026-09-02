@@ -22,12 +22,12 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
-	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 )
@@ -202,12 +202,35 @@ func (a *TaskAdaptor) BuildRequestURL(info *relaycommon.RelayInfo) (string, erro
 	if a.submit == nil {
 		return "", fmt.Errorf("plugin submit request was not built")
 	}
+	if a.submit.Credentialless {
+		err := pluginruntime.ValidateCredentiallessRequest(
+			a.submit.URL, http.MethodGet, nil, nil,
+		)
+		return a.submit.URL, err
+	}
 	return a.submit.URL, pluginruntime.ValidateRequestURL(a.submit.URL, info.ChannelBaseUrl, a.plugin.Meta.AllowedHosts)
 }
 
 func (a *TaskAdaptor) BuildRequestHeader(_ *gin.Context, req *http.Request, _ *relaycommon.RelayInfo) error {
 	if a.submit == nil {
 		return fmt.Errorf("plugin submit request was not built")
+	}
+	if req == nil {
+		return fmt.Errorf("plugin submit request is missing")
+	}
+	if err := pluginruntime.ValidateRequestHeaders(a.submit.Headers); err != nil {
+		return err
+	}
+	if a.submit.Credentialless {
+		body := a.submit.Body
+		if a.submit.BodyType != "" || len(a.submit.Parts) != 0 {
+			body = struct{}{}
+		}
+		if err := pluginruntime.ValidateCredentiallessRequest(
+			a.submit.URL, req.Method, a.submit.Headers, body,
+		); err != nil {
+			return err
+		}
 	}
 	for name, value := range a.submit.Headers {
 		req.Header.Set(name, value)
@@ -219,6 +242,21 @@ func (a *TaskAdaptor) BuildRequestBody(c *gin.Context, info *relaycommon.RelayIn
 	descriptor, err := a.buildSubmit(c, info)
 	if err != nil {
 		return nil, err
+	}
+	if descriptor.Credentialless {
+		method := ""
+		if c != nil && c.Request != nil {
+			method = c.Request.Method
+		}
+		body := descriptor.Body
+		if descriptor.BodyType != "" || len(descriptor.Parts) != 0 {
+			body = struct{}{}
+		}
+		if err = pluginruntime.ValidateCredentiallessRequest(
+			descriptor.URL, method, descriptor.Headers, body,
+		); err != nil {
+			return nil, err
+		}
 	}
 	if descriptor.BodyType == "multipart" {
 		form, parseErr := common.ParseMultipartFormReusable(c)
@@ -553,7 +591,22 @@ func (a *TaskAdaptor) doFetchDescriptor(baseURL, proxy string, value any) (*http
 	if err := convert(value, &descriptor); err != nil {
 		return nil, err
 	}
-	if err := pluginruntime.ValidateRequestURL(descriptor.URL, baseURL, a.plugin.Meta.AllowedHosts); err != nil {
+	if err := pluginruntime.ValidateRequestHeaders(descriptor.Headers); err != nil {
+		return nil, err
+	}
+	method := strings.ToUpper(strings.TrimSpace(descriptor.Method))
+	if method == "" {
+		method = http.MethodGet
+	}
+	if descriptor.Credentialless {
+		if err := pluginruntime.ValidateCredentiallessRequest(
+			descriptor.URL, method, descriptor.Headers, descriptor.Body,
+		); err != nil {
+			return nil, err
+		}
+	} else if err := pluginruntime.ValidateRequestURL(
+		descriptor.URL, baseURL, a.plugin.Meta.AllowedHosts,
+	); err != nil {
 		return nil, err
 	}
 	var requestBody io.Reader
@@ -568,10 +621,6 @@ func (a *TaskAdaptor) doFetchDescriptor(baseURL, proxy string, value any) (*http
 			requestBody = bytes.NewReader(encoded)
 		}
 	}
-	method := strings.ToUpper(strings.TrimSpace(descriptor.Method))
-	if method == "" {
-		method = http.MethodGet
-	}
 	req, err := http.NewRequest(method, descriptor.URL, requestBody)
 	if err != nil {
 		return nil, err
@@ -583,8 +632,12 @@ func (a *TaskAdaptor) doFetchDescriptor(baseURL, proxy string, value any) (*http
 	if err != nil {
 		return nil, err
 	}
+	requestClient := *client
+	requestClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	started := time.Now()
-	resp, err := client.Do(req)
+	resp, err := requestClient.Do(req)
 	if err != nil {
 		logger.LogDebug(
 			context.Background(),
@@ -986,7 +1039,16 @@ func (a *TaskAdaptor) buildSubmit(c *gin.Context, info *relaycommon.RelayInfo) (
 		logger.LogDebug(c, "task_plugin subsystem=adaptor event=build_submit_failed plugin=%q stage=validate_url reason=empty_url", a.plugin.Meta.Key)
 		return nil, fmt.Errorf("plugin returned an empty submit URL")
 	}
-	if err = pluginruntime.ValidateRequestURL(descriptor.URL, info.ChannelBaseUrl, a.plugin.Meta.AllowedHosts); err != nil {
+	if descriptor.Credentialless {
+		err = pluginruntime.ValidateCredentiallessRequest(
+			descriptor.URL, http.MethodGet, nil, nil,
+		)
+	} else {
+		err = pluginruntime.ValidateRequestURL(
+			descriptor.URL, info.ChannelBaseUrl, a.plugin.Meta.AllowedHosts,
+		)
+	}
+	if err != nil {
 		logger.LogDebug(c, "task_plugin subsystem=adaptor event=build_submit_failed plugin=%q stage=validate_url reason=url_not_allowed", a.plugin.Meta.Key)
 		return nil, err
 	}
