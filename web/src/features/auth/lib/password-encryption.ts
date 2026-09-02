@@ -20,6 +20,8 @@ import { t } from 'i18next'
 
 import { api } from '@/lib/api'
 
+import { buildPasswordVerificationPayload } from './password-verification-payload'
+
 interface PasswordEncryptionKey {
   kid: string
   public_key: string
@@ -31,6 +33,31 @@ export interface EncryptedPassword {
 }
 
 const KEY_CACHE_TTL_MS = 5 * 60_000
+
+export async function preparePasswordVerificationPayload(
+  password: string
+): Promise<
+  | { password: string }
+  | { password_encrypted: string; encryption_key_id: string }
+> {
+  const response = await api.get<{
+    success: boolean
+    data?: PasswordEncryptionKey & { enabled?: boolean }
+  }>('/api/user/login/encryption-key')
+  const capability = response.data?.data
+  if (!response.data?.success) {
+    throw new Error(t('Verification failed'))
+  }
+  try {
+    return await buildPasswordVerificationPayload(
+      password,
+      capability ?? {},
+      rsaOaepEncrypt
+    )
+  } catch (error) {
+    throw new Error(t('Verification failed'), { cause: error })
+  }
+}
 
 let cachedKey: PasswordEncryptionKey | null = null
 let cachedAt = 0

@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import i18next from 'i18next'
 
+import { preparePasswordVerificationPayload } from '@/features/auth/lib/password-encryption'
 import type { ApiResponse } from '@/features/auth/types'
 import { api, get2FAStatus } from '@/lib/api'
 import {
@@ -59,6 +60,7 @@ export async function checkVerificationMethods(): Promise<VerificationMethods> {
     return {
       has2FA,
       hasPasskey,
+      hasPassword: Boolean(passkeyResponse?.data?.has_password),
       passkeySupported,
     }
   } catch (error) {
@@ -67,6 +69,7 @@ export async function checkVerificationMethods(): Promise<VerificationMethods> {
     return {
       has2FA: false,
       hasPasskey: false,
+      hasPassword: false,
       passkeySupported: false,
     }
   }
@@ -85,6 +88,8 @@ export async function verify(
       return verifyTwoFA(scope, code)
     case 'passkey':
       return verifyPasskey(scope)
+    case 'password':
+      return verifyPassword(scope, code)
     default:
       throw new Error(
         i18next.t('Unsupported verification method: {{method}}', { method })
@@ -112,6 +117,28 @@ async function verifyTwoFA(
     scope,
   })
 
+  if (!res.data?.success) {
+    throw new Error(res.data?.message || i18next.t('Verification failed'))
+  }
+  if (!res.data.data?.proof_token) {
+    throw new Error(i18next.t('Verification proof was not returned'))
+  }
+  return res.data.data
+}
+
+async function verifyPassword(
+  scope: SecurityProofScope,
+  password?: string | null
+): Promise<SecurityProof> {
+  if (!password || !password.trim()) {
+    throw new Error(i18next.t('Please enter your current password'))
+  }
+  const credentials = await preparePasswordVerificationPayload(password)
+  const res = await api.post<ApiResponse<SecurityProof>>('/api/verify', {
+    method: 'password',
+    scope,
+    ...credentials,
+  })
   if (!res.data?.success) {
     throw new Error(res.data?.message || i18next.t('Verification failed'))
   }

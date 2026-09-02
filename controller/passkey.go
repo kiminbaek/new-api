@@ -64,7 +64,7 @@ func PasskeyRegisterBegin(c *gin.Context) {
 		return
 	}
 
-	if !requirePasskeyRegistrationVerification(c, user.Id) {
+	if !requirePasskeyRegistrationVerification(c, user) {
 		return
 	}
 
@@ -141,7 +141,7 @@ func PasskeyRegisterFinish(c *gin.Context) {
 		})
 		return
 	}
-	if !requirePasskeyRegistrationVerification(c, user.Id) {
+	if !requirePasskeyRegistrationVerification(c, user) {
 		return
 	}
 
@@ -265,13 +265,19 @@ func PasskeyStatus(c *gin.Context) {
 		return
 	}
 
+	hasPassword, err := model.HasUserPassword(user.Id)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	credential, err := model.GetPasskeyByUserID(user.Id)
 	if errors.Is(err, model.ErrPasskeyNotFound) {
 		c.JSON(http.StatusOK, gin.H{
 			"success": true,
 			"message": "",
 			"data": gin.H{
-				"enabled": false,
+				"enabled":      false,
+				"has_password": hasPassword,
 			},
 		})
 		return
@@ -283,6 +289,7 @@ func PasskeyStatus(c *gin.Context) {
 
 	data := gin.H{
 		"enabled":      true,
+		"has_password": hasPassword,
 		"last_used_at": credential.LastUsedAt,
 	}
 
@@ -666,16 +673,41 @@ func getAuthenticatedUser(c *gin.Context) (*model.User, error) {
 	return user, nil
 }
 
-func requirePasskeyRegistrationVerification(c *gin.Context, userID int) bool {
-	twoFA, err := model.GetTwoFAByUserId(userID)
+func requirePasskeyRegistrationVerification(c *gin.Context, user *model.User) bool {
+	if user == nil || user.Id <= 0 {
+		common.ApiError(c, errors.New("用户不存在"))
+		return false
+	}
+	allowedMethods := make([]string, 0, 2)
+	twoFA, err := model.GetTwoFAByUserId(user.Id)
 	if err != nil {
 		common.ApiError(c, err)
 		return false
 	}
-	if twoFA == nil || !twoFA.IsEnabled {
-		return true
+	if twoFA != nil && twoFA.IsEnabled {
+		allowedMethods = append(allowedMethods, secureVerificationMethod2FA)
 	}
-	return middleware.RequireSecurityProof(c, securityProofScopePasskeyRegister, []string{secureVerificationMethod2FA})
+	if _, err = model.GetPasskeyByUserID(user.Id); err == nil {
+		allowedMethods = append(allowedMethods, secureVerificationMethodPasskey)
+	} else if !errors.Is(err, model.ErrPasskeyNotFound) {
+		common.ApiError(c, err)
+		return false
+	}
+	if len(allowedMethods) == 0 {
+		hasPassword, err := model.HasUserPassword(user.Id)
+		if err != nil {
+			common.ApiError(c, err)
+			return false
+		}
+		if hasPassword {
+			allowedMethods = append(allowedMethods, secureVerificationMethodPassword)
+		}
+	}
+	if len(allowedMethods) == 0 {
+		c.JSON(http.StatusForbidden, gin.H{"success": false, "code": "SECURITY_VERIFICATION_UNAVAILABLE", "message": "请先设置密码或重新认证已绑定账号"})
+		return false
+	}
+	return middleware.RequireSecurityProof(c, securityProofScopePasskeyRegister, allowedMethods)
 }
 
 func requirePasskeyDeleteVerification(c *gin.Context, userID int) bool {

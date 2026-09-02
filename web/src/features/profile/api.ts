@@ -87,8 +87,14 @@ export async function deleteUserAccount(
 /**
  * Generate/regenerate system access token
  */
-export async function generateAccessToken(): Promise<ApiResponse<string>> {
-  const res = await api.get('/api/user/token')
+export async function generateAccessToken(
+  proofToken?: string
+): Promise<ApiResponse<string>> {
+  const res = await api.post(
+    '/api/user/token',
+    undefined,
+    { headers: proofToken ? { 'X-Security-Proof': proofToken } : undefined }
+  )
   return res.data
 }
 

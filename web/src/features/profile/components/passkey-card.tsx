@@ -98,6 +98,8 @@ export function PasskeyCard({ loading: pageLoading }: PasskeyCardProps) {
       has2FA: restrictedMethod === '2fa' && verificationMethods.has2FA,
       hasPasskey:
         restrictedMethod === 'passkey' && verificationMethods.hasPasskey,
+      hasPassword:
+        restrictedMethod === 'password' && verificationMethods.hasPassword,
     }
   }, [restrictedMethod, verificationMethods])
 
@@ -108,20 +110,30 @@ export function PasskeyCard({ loading: pageLoading }: PasskeyCardProps) {
     }
 
     const methods = await fetchVerificationMethods()
-    if (!methods.has2FA) {
-      // Without 2FA enabled, register directly. The browser-level Passkey prompt
-      // is itself a strong proof of presence, so no extra verification is needed.
-      await register()
+    let required: VerificationMethod | null = null
+    if (methods.has2FA) {
+      required = '2fa'
+    } else if (methods.hasPasskey && methods.passkeySupported) {
+      required = 'passkey'
+    } else if (methods.hasPassword) {
+      required = 'password'
+    }
+    if (!required) {
+      toast.error(
+        t(
+          'Set a password or enable Two-factor Authentication before registering a Passkey.'
+        )
+      )
       return
     }
 
-    setRestrictedMethod('2fa')
+    setRestrictedMethod(required)
     await startVerification(register, {
       scope: 'passkey.register',
-      preferredMethod: '2fa',
+      preferredMethod: required,
       title: t('Security verification'),
       description: t(
-        'Confirm your identity with Two-factor Authentication before registering a Passkey.'
+        'Confirm your identity before registering a Passkey.'
       ),
     })
   }, [fetchVerificationMethods, register, startVerification, supported, t])

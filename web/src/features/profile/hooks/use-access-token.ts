@@ -34,10 +34,10 @@ export function useAccessToken() {
   const { copyToClipboard } = useCopyToClipboard({ notify: false })
 
   // Generate new access token
-  const generate = useCallback(async (): Promise<boolean> => {
+  const generate = useCallback(async (proofToken?: string): Promise<boolean> => {
     try {
       setGenerating(true)
-      const response = await generateAccessToken()
+      const response = await generateAccessToken(proofToken)
 
       if (response.success && response.data) {
         setToken(response.data)
@@ -51,8 +51,7 @@ export function useAccessToken() {
     } catch (error) {
       // eslint-disable-next-line no-console
       console.error('Failed to generate token:', error)
-      toast.error(i18next.t('Failed to generate token'))
-      return false
+      throw error
     } finally {
       setGenerating(false)
     }

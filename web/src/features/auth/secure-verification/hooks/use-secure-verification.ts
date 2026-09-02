@@ -43,6 +43,7 @@ interface InternalState extends SecureVerificationState {
 const defaultMethods: VerificationMethods = {
   has2FA: false,
   hasPasskey: false,
+  hasPassword: false,
   passkeySupported: false,
 }
 
@@ -87,15 +88,19 @@ export function useSecureVerification(
       const { preferredMethod, scope, title, description } = config
       const availableMethods = await fetchVerificationMethods()
 
-      if (!availableMethods.has2FA && !availableMethods.hasPasskey) {
+      if (
+        !availableMethods.has2FA &&
+        !availableMethods.hasPasskey &&
+        !availableMethods.hasPassword
+      ) {
         toast.error(
           i18next.t(
-            'Please enable Two-factor Authentication or Passkey before proceeding'
+            'Set a password, enable Two-factor Authentication, or register a Passkey before proceeding'
           )
         )
         onError?.(
           new Error(
-            'No verification methods available. Enable 2FA or Passkey to continue.'
+            'No verification methods available. Set a password, enable 2FA, or register a Passkey to continue.'
           )
         )
         return false
@@ -106,7 +111,8 @@ export function useSecureVerification(
         (defaultMethod === 'passkey' &&
           (!availableMethods.hasPasskey ||
             !availableMethods.passkeySupported)) ||
-        (defaultMethod === '2fa' && !availableMethods.has2FA)
+        (defaultMethod === '2fa' && !availableMethods.has2FA) ||
+        (defaultMethod === 'password' && !availableMethods.hasPassword)
       ) {
         defaultMethod = null
       }
@@ -115,6 +121,8 @@ export function useSecureVerification(
           defaultMethod = 'passkey'
         } else if (availableMethods.has2FA) {
           defaultMethod = '2fa'
+        } else if (availableMethods.hasPassword) {
+          defaultMethod = 'password'
         }
       }
 
@@ -219,6 +227,7 @@ export function useSecureVerification(
   const canUseMethod = useCallback(
     (method: VerificationMethod) => {
       if (method === '2fa') return methods.has2FA
+      if (method === 'password') return methods.hasPassword
       if (method === 'passkey') {
         return methods.hasPasskey && methods.passkeySupported
       }
@@ -230,6 +239,7 @@ export function useSecureVerification(
   const recommendedMethod = useMemo<VerificationMethod | null>(() => {
     if (methods.hasPasskey && methods.passkeySupported) return 'passkey'
     if (methods.has2FA) return '2fa'
+    if (methods.hasPassword) return 'password'
     return null
   }, [methods])
 
@@ -248,7 +258,7 @@ export function useSecureVerification(
     fetchVerificationMethods,
     canUseMethod,
     recommendedMethod,
-    hasAnyMethod: methods.has2FA || methods.hasPasskey,
+    hasAnyMethod: methods.has2FA || methods.hasPasskey || methods.hasPassword,
     isLoading: state.loading,
     currentMethod: state.method,
     code: state.code,

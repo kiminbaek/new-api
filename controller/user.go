@@ -444,7 +444,15 @@ func GetUser(c *gin.Context) {
 }
 
 func GenerateAccessToken(c *gin.Context) {
-	id := c.GetInt("id")
+	identity, ok := middleware.GetSessionAuthIdentity(c)
+	if !ok {
+		c.JSON(http.StatusForbidden, gin.H{"success": false, "code": "AUTH_SESSION_REQUIRED", "message": "a dashboard login session is required"})
+		return
+	}
+	if !middleware.RequireSecurityProof(c, securityProofScopePATRotate, []string{secureVerificationMethod2FA, secureVerificationMethodPasskey, secureVerificationMethodPassword}) {
+		return
+	}
+	id := identity.UserID
 	// get rand int 28-32
 	randI := common.GetRandomInt(4)
 	key, err := common.GenerateRandomKey(29 + randI)
@@ -462,6 +470,7 @@ func GenerateAccessToken(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	recordUserSecurityAudit(c, id, "user.access_token_rotate", nil)
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,

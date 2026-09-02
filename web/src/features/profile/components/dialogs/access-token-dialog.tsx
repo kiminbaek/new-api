@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { KeyRound, Loader2, RefreshCw } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { CopyButton } from '@/components/copy-button'
@@ -33,6 +34,11 @@ import {
 } from '@/components/ui/empty'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import {
+  SecureVerificationDialog,
+  useSecureVerification,
+  type VerificationMethod,
+} from '@/features/auth/secure-verification'
 
 import { useAccessToken } from '../../hooks'
 
@@ -52,6 +58,7 @@ export function AccessTokenDialog({
   const { t } = useTranslation()
   const { token, generating, generate, clearToken } = useAccessToken()
   const [confirmOpen, setConfirmOpen] = useState(false)
+  const verification = useSecureVerification()
 
   const handleOpenChange = (nextOpen: boolean) => {
     if (generating) return
@@ -64,8 +71,28 @@ export function AccessTokenDialog({
   }
 
   const handleGenerate = async () => {
-    if (await generate()) {
-      setConfirmOpen(false)
+    setConfirmOpen(false)
+    try {
+      await verification.withVerification(
+        generate,
+        {
+          scope: 'pat.rotate',
+          title: t('Security verification'),
+          description: t(
+            'Confirm your identity before regenerating the access token.'
+          ),
+        }
+      )
+    } catch {
+      toast.error(t('Failed to generate token'))
+    }
+  }
+
+  const handleVerify = async (method: VerificationMethod, code?: string) => {
+    try {
+      await verification.executeVerification(method, code)
+    } catch {
+      // The verification hook displays the actionable error.
     }
   }
 
@@ -192,6 +219,17 @@ export function AccessTokenDialog({
         destructive
         isLoading={generating}
         handleConfirm={handleGenerate}
+      />
+
+      <SecureVerificationDialog
+        open={verification.open}
+        onOpenChange={verification.setOpen}
+        methods={verification.methods}
+        state={verification.state}
+        onVerify={handleVerify}
+        onCancel={verification.cancel}
+        onCodeChange={verification.setCode}
+        onMethodChange={verification.switchMethod}
       />
     </>
   )

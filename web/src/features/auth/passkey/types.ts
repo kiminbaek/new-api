@@ -24,6 +24,7 @@ export interface ApiResponse<T = unknown> {
 
 export interface PasskeyStatus {
   enabled: boolean
+  has_password?: boolean
   last_used_at?: string | null
   backup_eligible?: boolean
   backup_state?: boolean

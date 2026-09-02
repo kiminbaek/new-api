@@ -16,11 +16,12 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { ShieldCheck, KeyRound, Loader2 } from 'lucide-react'
+import { ShieldCheck, KeyRound, Loader2, LockKeyhole } from 'lucide-react'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Dialog } from '@/components/dialog'
+import { PasswordInput } from '@/components/password-input'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -57,6 +58,7 @@ export function SecureVerificationDialog({
     const tabs: VerificationMethod[] = []
     if (methods.has2FA) tabs.push('2fa')
     if (methods.hasPasskey && methods.passkeySupported) tabs.push('passkey')
+    if (methods.hasPassword) tabs.push('password')
     return tabs
   }, [methods])
 
@@ -73,17 +75,21 @@ export function SecureVerificationDialog({
     state.description ??
     (availableTabs.length
       ? 'Confirm your identity before accessing this sensitive action.'
-      : 'Enable Two-factor Authentication or Passkey in your profile settings to continue.')
+      : 'Set a password, enable Two-factor Authentication, or register a Passkey to continue.')
 
   const handleVerify = () => {
     if (!activeMethod) return
-    const payload = activeMethod === '2fa' ? state.code : undefined
+    const payload =
+      activeMethod === '2fa' || activeMethod === 'password'
+        ? state.code
+        : undefined
     onVerify(activeMethod, payload)
   }
 
   const verifyDisabled =
     state.loading ||
-    (activeMethod === '2fa' && (!state.code.trim() || state.code.length < 6))
+    (activeMethod === '2fa' && (!state.code.trim() || state.code.length < 6)) ||
+    (activeMethod === 'password' && !state.code.trim())
 
   return (
     <Dialog
@@ -132,7 +138,7 @@ export function SecureVerificationDialog({
           </div>
           <p className='text-muted-foreground text-sm'>
             {t(
-              'Enable Two-factor Authentication or Passkey in your profile to unlock sensitive operations.'
+              'Set a password, enable Two-factor Authentication, or register a Passkey to unlock sensitive operations.'
             )}
           </p>
         </div>
@@ -148,6 +154,9 @@ export function SecureVerificationDialog({
             )}
             {methods.hasPasskey && methods.passkeySupported && (
               <TabsTrigger value='passkey'>{t('Passkey')}</TabsTrigger>
+            )}
+            {methods.hasPassword && (
+              <TabsTrigger value='password'>{t('Current password')}</TabsTrigger>
             )}
           </TabsList>
 
@@ -165,6 +174,27 @@ export function SecureVerificationDialog({
               placeholder={t('Enter verification code')}
               disabled={state.loading}
               autoFocus={activeMethod === '2fa'}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !verifyDisabled) {
+                  event.preventDefault()
+                  handleVerify()
+                }
+              }}
+            />
+          </TabsContent>
+
+          <TabsContent value='password' className='space-y-3'>
+            <div className='text-muted-foreground flex items-start gap-3 text-sm'>
+              <LockKeyhole className='text-primary mt-0.5 h-5 w-5 shrink-0' />
+              <p>{t('Enter your current password to confirm this sensitive action.')}</p>
+            </div>
+            <PasswordInput
+              value={state.code}
+              onChange={(event) => onCodeChange(event.target.value)}
+              placeholder={t('Current password')}
+              autoComplete='current-password'
+              disabled={state.loading}
+              autoFocus={activeMethod === 'password'}
               onKeyDown={(event) => {
                 if (event.key === 'Enter' && !verifyDisabled) {
                   event.preventDefault()
