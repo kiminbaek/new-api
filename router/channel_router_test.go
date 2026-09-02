@@ -12,6 +12,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestModelPriorityRouteRequiresChannelRead(t *testing.T) {
+	assertChannelRoutePermission(t, http.MethodGet, "/model-priority", authz.ChannelRead, controller.GetModelPriorityBoard)
+}
+
 func TestChannelStatusRoutesUseOperatePermission(t *testing.T) {
 	assertChannelRoutePermission(t, http.MethodPost, "/:id/status", authz.ChannelOperate, controller.UpdateChannelStatus)
 	assertChannelRoutePermission(t, http.MethodPost, "/status/batch", authz.ChannelOperate, controller.BatchUpdateChannelStatus)
