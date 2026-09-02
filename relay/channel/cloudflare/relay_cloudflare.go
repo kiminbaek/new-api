@@ -3,6 +3,7 @@ package cloudflare
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -37,6 +38,7 @@ func cfStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Res
 	id := helper.GetResponseID(c)
 	var responseText string
 	isFirst := true
+	validFrames := 0
 
 	for scanner.Scan() {
 		data := scanner.Text()
@@ -62,6 +64,7 @@ func cfStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Res
 		}
 		response.Id = id
 		response.Model = info.UpstreamModelName
+		validFrames++
 		err = helper.ObjectData(c, response)
 		if isFirst {
 			isFirst = false
@@ -74,6 +77,10 @@ func cfStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Res
 
 	if err := scanner.Err(); err != nil {
 		logger.LogError(c, "error_scanning_stream_response: "+err.Error())
+		return types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusBadGateway), nil
+	}
+	if validFrames == 0 {
+		return types.NewOpenAIError(fmt.Errorf("cloudflare stream ended with 0 valid frames"), types.ErrorCodeBadResponse, http.StatusBadGateway), nil
 	}
 	usage := service.ResponseText2Usage(c, responseText, info.UpstreamModelName, info.GetEstimatePromptTokens())
 	if info.ShouldIncludeUsage {

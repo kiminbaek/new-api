@@ -97,3 +97,34 @@ func TestOllamaChatHandlerNonStreamToolCalls(t *testing.T) {
 		})
 	}
 }
+
+func TestOllamaStreamRequiresOutputAndTerminalFrame(t *testing.T) {
+	for name, body := range map[string]string{
+		"empty":                "",
+		"done only":            `{"model":"llama","done":true,"prompt_eval_count":1,"eval_count":0}` + "\n",
+		"partial without done": `{"model":"llama","message":{"role":"assistant","content":"partial"},"done":false}` + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
+			_, err := ollamaStreamHandler(c, &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "llama"}}, resp)
+			require.NotNil(t, err)
+			assert.Equal(t, http.StatusBadGateway, err.StatusCode)
+		})
+	}
+}
+
+func TestOllamaStreamAcceptsDeltaAndDone(t *testing.T) {
+	body := `{"model":"llama","message":{"role":"assistant","content":"ok"},"done":false}` + "\n" + `{"model":"llama","done":true,"prompt_eval_count":2,"eval_count":1}` + "\n"
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
+	usage, err := ollamaStreamHandler(c, &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "llama"}}, resp)
+	require.Nil(t, err)
+	require.NotNil(t, usage)
+	assert.Equal(t, 3, usage.TotalTokens)
+	assert.Contains(t, w.Body.String(), "ok")
+}

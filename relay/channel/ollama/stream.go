@@ -108,10 +108,9 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	var responseId = common.GetUUID()
 	var created = time.Now().Unix()
 	var toolCallIndex int
-	start := helper.GenerateStartEmptyResponse(responseId, created, model, nil)
-	if data, err := common.Marshal(start); err == nil {
-		_ = helper.StringData(c, string(data))
-	}
+	startSent := false
+	validFrames := 0
+	doneReceived := false
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -130,6 +129,14 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		created = toUnix(chunk.CreatedAt)
 
 		if !chunk.Done {
+			if !startSent {
+				start := helper.GenerateStartEmptyResponse(responseId, created, model, nil)
+				if data, err := common.Marshal(start); err == nil {
+					_ = helper.StringData(c, string(data))
+				}
+				startSent = true
+			}
+			validFrames++
 			// delta content
 			var content string
 			if chunk.Message != nil {
@@ -173,6 +180,7 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			continue
 		}
 		// done frame
+		doneReceived = true
 		// finalize once and break loop
 		usage.PromptTokens = chunk.PromptEvalCount
 		usage.CompletionTokens = chunk.EvalCount
@@ -202,6 +210,10 @@ func ollamaStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	}
 	if err := scanner.Err(); err != nil && err != io.EOF {
 		logger.LogError(c, "ollama stream scan error: "+err.Error())
+		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusBadGateway)
+	}
+	if validFrames == 0 || !doneReceived {
+		return nil, types.NewOpenAIError(fmt.Errorf("ollama stream ended without valid output (frames=%d done=%t)", validFrames, doneReceived), types.ErrorCodeBadResponse, http.StatusBadGateway)
 	}
 	return usage, nil
 }
