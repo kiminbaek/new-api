@@ -258,6 +258,9 @@ export function ModelQuality() {
                             <TableCell className='tabular-nums'>
                               {r.request_count.toLocaleString()} /{' '}
                               {r.success_count.toLocaleString()}
+                              <div className='text-muted-foreground text-xs'>
+                                额外重试 {r.retry_count.toLocaleString()}
+                              </div>
                             </TableCell>
                             <TableCell>
                               <div className='font-semibold tabular-nums'>
@@ -302,7 +305,8 @@ export function ModelQuality() {
                               {r.model_name}
                             </div>
                             <div className='text-muted-foreground mt-1 text-xs'>
-                              {r.request_count.toLocaleString()} 次调用
+                              {r.request_count.toLocaleString()} 次调用 ·{' '}
+                              {r.retry_count.toLocaleString()} 次额外重试
                             </div>
                           </div>
                           <QualityBadge level={r.quality_level} />
