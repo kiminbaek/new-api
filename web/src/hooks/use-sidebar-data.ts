@@ -125,6 +125,7 @@ export function useSidebarData(): SidebarData {
             title: t('Channels'),
             url: '/channels',
             icon: Radio,
+            requiredPermission: { resource: 'channel', action: 'read' },
           },
           {
             title: t('Models'),
@@ -169,6 +170,7 @@ export function useSidebarData(): SidebarData {
             title: '模型分级',
             url: '/admin/model-priority',
             icon: Gauge,
+            requiredPermission: { resource: 'channel', action: 'read' },
             requiredRole: ROLE.ADMIN,
           },
         ],

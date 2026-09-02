@@ -20,6 +20,7 @@ import { useLocation } from '@tanstack/react-router'
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { canViewSidebarItem } from '@/components/layout/lib/sidebar-permissions'
 import { resolveSidebarView } from '@/components/layout/lib/sidebar-view-registry'
 import type { NavGroup, ResolvedSidebarView } from '@/components/layout/types'
 import { ROLE } from '@/lib/roles'
@@ -47,22 +48,22 @@ const ROOT_VIEW_KEY = '__root'
 export function useSidebarView(): ResolvedSidebarView {
   const { t } = useTranslation()
   const pathname = useLocation({ select: (l) => l.pathname })
-  const userRole = useAuthStore((s) => s.auth.user?.role)
+  const user = useAuthStore((s) => s.auth.user)
   const rootSidebarData = useSidebarData()
   const configFilteredRoot = useSidebarConfig(rootSidebarData.navGroups)
 
   const rootNavGroups = useMemo<NavGroup[]>(() => {
-    const role = userRole ?? ROLE.GUEST
+    const role = user?.role ?? ROLE.GUEST
     const isAdmin = role >= ROLE.ADMIN
     return configFilteredRoot
       .filter((group) => (group.id === 'admin' ? isAdmin : true))
       .map((group) => {
-        const items = group.items.filter(
-          (item) => item.requiredRole === undefined || role >= item.requiredRole
+        const items = group.items.filter((item) =>
+          canViewSidebarItem(item, user)
         )
         return items.length === group.items.length ? group : { ...group, items }
       })
-  }, [configFilteredRoot, userRole])
+  }, [configFilteredRoot, user])
 
   const view = resolveSidebarView(pathname)
 
