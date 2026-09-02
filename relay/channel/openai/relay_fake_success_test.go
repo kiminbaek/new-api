@@ -93,3 +93,13 @@ func fakeResp(body string) *http.Response {
 		Body:       io.NopCloser(strings.NewReader(body)),
 	}
 }
+
+func TestOaiStreamHandler_MalformedDataFrameReturnsError(t *testing.T) {
+	body := "data: not-json\n\n"
+	c, _, info := setupFakeSuccessTest(t, body)
+	usage, apiErr := OaiStreamHandler(c, info, fakeResp(body))
+	require.NotNil(t, apiErr, "malformed data frame must not count as valid upstream output")
+	assert.Nil(t, usage)
+	assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
+	assert.Zero(t, info.ReceivedResponseCount)
+}

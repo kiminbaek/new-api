@@ -234,6 +234,9 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 				ExtendWriteDeadline(c)
 				dataHandler(data, sr)
 			}()
+			if sr.IsAccepted() {
+				info.ReceivedResponseCount++
+			}
 			if sr.IsStopped() {
 				return
 			}
@@ -281,7 +284,6 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			}
 			if !strings.HasPrefix(data, "[DONE]") {
 				info.SetFirstResponseTime()
-				info.ReceivedResponseCount++
 
 				select {
 				case dataChan <- data:

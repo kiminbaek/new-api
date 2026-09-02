@@ -8,8 +8,9 @@ import (
 // to record soft errors, signal fatal stops, or mark normal completion.
 // StreamScannerHandler checks IsStopped() after each callback invocation.
 type StreamResult struct {
-	status  *relaycommon.StreamStatus
-	stopped bool
+	status   *relaycommon.StreamStatus
+	stopped  bool
+	rejected bool
 }
 
 func newStreamResult(status *relaycommon.StreamStatus) *StreamResult {
@@ -23,6 +24,7 @@ func (r *StreamResult) Error(err error) {
 		return
 	}
 	r.status.RecordError(err.Error())
+	r.rejected = true
 }
 
 // Stop records a fatal error and marks the stream to stop after this chunk.
@@ -46,7 +48,12 @@ func (r *StreamResult) IsStopped() bool {
 	return r.stopped
 }
 
+func (r *StreamResult) IsAccepted() bool {
+	return !r.rejected
+}
+
 // reset clears the per-chunk stopped flag so the object can be reused.
 func (r *StreamResult) reset() {
 	r.stopped = false
+	r.rejected = false
 }
