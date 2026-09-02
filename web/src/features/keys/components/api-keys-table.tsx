@@ -22,7 +22,6 @@ import type { Table as TanstackTable } from '@tanstack/react-table'
 import { Database } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { toast } from 'sonner'
 
 import {
   DISABLED_ROW_DESKTOP,
@@ -42,6 +41,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
+import { requireSuccessfulResponse } from '@/lib/api-response'
 import { formatQuota } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
@@ -232,7 +232,7 @@ export function ApiKeysTable() {
 
   // Fetch data with React Query
   // eslint-disable-next-line @tanstack/query/exhaustive-deps
-  const { data, isLoading, isFetching } = useQuery({
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: [
       'keys',
       pagination.pageIndex + 1,
@@ -254,21 +254,17 @@ export function ApiKeysTable() {
             size: pagination.pageSize,
           })
 
-      if (!result.success) {
-        toast.error(
-          result.message ||
-            t(
-              shouldSearch
-                ? ERROR_MESSAGES.SEARCH_FAILED
-                : ERROR_MESSAGES.LOAD_FAILED
-            )
+      const successful = requireSuccessfulResponse(
+        result,
+        t(
+          shouldSearch
+            ? ERROR_MESSAGES.SEARCH_FAILED
+            : ERROR_MESSAGES.LOAD_FAILED
         )
-        return { items: [], total: 0 }
-      }
-
+      )
       return {
-        items: result.data?.items || [],
-        total: result.data?.total || 0,
+        items: successful.data?.items || [],
+        total: successful.data?.total || 0,
       }
     },
     placeholderData: (previousData) => previousData,
@@ -299,6 +295,8 @@ export function ApiKeysTable() {
       columns={columns}
       isLoading={isLoading}
       isFetching={isFetching}
+      error={error}
+      onRetry={isFetching ? undefined : () => void refetch()}
       emptyTitle={t('No API Keys Found')}
       emptyDescription={t(
         'No API keys available. Create your first API key to get started.'
