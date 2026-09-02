@@ -27,10 +27,12 @@ import {
   useDataTable,
 } from '@/components/data-table'
 import { Dialog } from '@/components/dialog'
+import { ErrorState } from '@/components/error-state'
 import { StatusBadge } from '@/components/status-badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
+import { Skeleton } from '@/components/ui/skeleton'
 import {
   Select,
   SelectContent,
@@ -59,6 +61,9 @@ type ChannelSelectorDialogProps = {
   channelEndpoints: Record<number, string>
   onChannelEndpointsChange: (endpoints: Record<number, string>) => void
   onConfirm: (selectedIds: number[]) => void
+  isLoading?: boolean
+  error?: Error | null
+  onRetry?: () => void
 }
 
 // Synthesized presets from `controller/ratio_sync.go` always carry stable
@@ -78,6 +83,9 @@ export function ChannelSelectorDialog({
   channelEndpoints,
   onChannelEndpointsChange,
   onConfirm,
+  isLoading,
+  error,
+  onRetry,
 }: ChannelSelectorDialogProps) {
   const { t } = useTranslation()
   const [search, setSearch] = useState('')
@@ -315,6 +323,51 @@ export function ChannelSelectorDialog({
     onConfirm(selectedIds)
   }
 
+  let content = (
+    <>
+      <DataTableView
+        table={table}
+        containerClassName='min-h-0 flex-1 rounded-md'
+        tableContainerClassName='h-full min-h-0'
+        tableHeaderClassName='[background-color:var(--table-header)]'
+        splitHeaderScrollClassName='h-full'
+        bodyContainerClassName='[scrollbar-gutter:stable]'
+        splitHeader
+        getColumnClassName={(columnId, part) => {
+          if (columnId === 'select') return 'w-11 text-center align-middle'
+          if (columnId === 'status') {
+            return part === 'header' ? 'h-11 align-middle' : 'align-middle'
+          }
+          return part === 'header' ? 'h-11 align-middle' : 'align-middle'
+        }}
+        emptyContent={t('No channels found')}
+        emptyCellClassName='h-24 text-center'
+      />
+      <div className='shrink-0'>
+        <DataTablePagination table={table} />
+      </div>
+    </>
+  )
+  if (isLoading) {
+    const skeletonIds = ['channel-1', 'channel-2', 'channel-3', 'channel-4', 'channel-5']
+    content = (
+      <div className='space-y-2 py-2'>
+        {skeletonIds.map((id) => (
+          <Skeleton key={id} className='h-11 w-full' />
+        ))}
+      </div>
+    )
+  } else if (error) {
+    content = (
+      <ErrorState
+        title={t('Unable to load channels')}
+        description={error.message}
+        onRetry={onRetry}
+        className='min-h-[260px]'
+      />
+    )
+  }
+
   return (
     <Dialog
       open={open}
@@ -331,7 +384,9 @@ export function ChannelSelectorDialog({
           <Button variant='outline' onClick={() => onOpenChange(false)}>
             {t('Cancel')}
           </Button>
-          <Button onClick={handleConfirm}>{t('Confirm Selection')}</Button>
+          <Button onClick={handleConfirm} disabled={isLoading || !!error}>
+            {t('Confirm Selection')}
+          </Button>
         </>
       }
     >
@@ -348,28 +403,7 @@ export function ChannelSelectorDialog({
           </div>
         </div>
 
-        <DataTableView
-          table={table}
-          containerClassName='min-h-0 flex-1 rounded-md'
-          tableContainerClassName='h-full min-h-0'
-          tableHeaderClassName='[background-color:var(--table-header)]'
-          splitHeaderScrollClassName='h-full'
-          bodyContainerClassName='[scrollbar-gutter:stable]'
-          splitHeader
-          getColumnClassName={(columnId, part) => {
-            if (columnId === 'select') return 'w-11 text-center align-middle'
-            if (columnId === 'status') {
-              return part === 'header' ? 'h-11 align-middle' : 'align-middle'
-            }
-            return part === 'header' ? 'h-11 align-middle' : 'align-middle'
-          }}
-          emptyContent={t('No channels found')}
-          emptyCellClassName='h-24 text-center'
-        />
-
-        <div className='shrink-0'>
-          <DataTablePagination table={table} />
-        </div>
+        {content}
       </div>
     </Dialog>
   )

@@ -23,6 +23,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
 import { Button } from '@/components/ui/button'
+import { requireSuccessfulResponse } from '@/lib/api-response'
 
 import {
   fetchUpstreamRatios,
@@ -134,11 +135,16 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
   const [conflictItems, setConflictItems] = useState<ConflictItem[]>([])
   const [confirmLoading, setConfirmLoading] = useState(false)
 
-  const { data: channelsData } = useQuery({
+  const channelsQuery = useQuery({
     queryKey: ['upstream-channels'],
-    queryFn: getUpstreamChannels,
+    queryFn: async () =>
+      requireSuccessfulResponse(
+        await getUpstreamChannels(),
+        t('Failed to load channels')
+      ),
     enabled: channelDialogOpen,
   })
+  const channelsData = channelsQuery.data
 
   // Memoize the channels list so the effect below only re-runs when the query
   // data actually changes, instead of on every render (the `|| []` fallback
@@ -518,6 +524,13 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
         channelEndpoints={channelEndpoints}
         onChannelEndpointsChange={setChannelEndpoints}
         onConfirm={handleConfirmChannelSelection}
+        isLoading={channelsQuery.isLoading}
+        error={channelsQuery.error}
+        onRetry={
+          channelsQuery.isFetching
+            ? undefined
+            : () => void channelsQuery.refetch()
+        }
       />
 
       <ConflictConfirmDialog

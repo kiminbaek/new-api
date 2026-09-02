@@ -24,6 +24,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import { requireSuccessfulResponse } from '@/lib/api-response'
+
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -135,11 +137,19 @@ export function ModelGroupsSection({ defaultValues }: ModelGroupsSectionProps) {
 
   const enabledModelsQuery = useQuery({
     queryKey: ['enabled-models'],
-    queryFn: getEnabledModels,
+    queryFn: async () =>
+      requireSuccessfulResponse(
+        await getEnabledModels(),
+        t('Failed to load enabled models')
+      ),
   })
   const channelsQuery = useQuery({
     queryKey: ['virtual-group-channel-candidates'],
-    queryFn: () => getChannels({ p: 1, page_size: 1000, status: 'enabled' }),
+    queryFn: async () =>
+      requireSuccessfulResponse(
+        await getChannels({ p: 1, page_size: 1000, status: 'enabled' }),
+        t('Failed to load channels')
+      ),
   })
   const liveModels = useMemo(
     () => new Set(enabledModelsQuery.data?.data || []),
@@ -292,6 +302,44 @@ export function ModelGroupsSection({ defaultValues }: ModelGroupsSectionProps) {
         isSaving={isSaving}
       />
 
+      {(enabledModelsQuery.isError || channelsQuery.isError) && (
+        <Alert variant='destructive'>
+          <TriangleAlert />
+          <AlertTitle>{t('Model candidate data is unavailable')}</AlertTitle>
+          <AlertDescription className='space-y-3'>
+            <p>
+              {t(
+                'Saved group members are preserved and will not be marked unavailable until live model data loads successfully.'
+              )}
+            </p>
+            <div className='flex flex-wrap gap-2'>
+              {enabledModelsQuery.isError && (
+                <Button
+                  type='button'
+                  variant='outline'
+                  size='sm'
+                  disabled={enabledModelsQuery.isFetching}
+                  onClick={() => void enabledModelsQuery.refetch()}
+                >
+                  {t('Retry model list')}
+                </Button>
+              )}
+              {channelsQuery.isError && (
+                <Button
+                  type='button'
+                  variant='outline'
+                  size='sm'
+                  disabled={channelsQuery.isFetching}
+                  onClick={() => void channelsQuery.refetch()}
+                >
+                  {t('Retry channel list')}
+                </Button>
+              )}
+            </div>
+          </AlertDescription>
+        </Alert>
+      )}
+
       <div className='bg-muted/20 grid gap-3 rounded-xl border p-3 lg:grid-cols-[minmax(0,1fr)_260px_auto]'>
         <div className='relative'>
           <Search className='text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2' />
@@ -304,6 +352,7 @@ export function ModelGroupsSection({ defaultValues }: ModelGroupsSectionProps) {
         </div>
         <Select
           value={selectedChannelId}
+          disabled={channelsQuery.isLoading || channelsQuery.isError}
           onValueChange={(value) => setSelectedChannelId(value || '')}
         >
           <SelectTrigger>
@@ -320,7 +369,12 @@ export function ModelGroupsSection({ defaultValues }: ModelGroupsSectionProps) {
         <Button
           type='button'
           variant='outline'
-          disabled={!selectedChannelId || loadingUpstream}
+          disabled={
+            !selectedChannelId ||
+            loadingUpstream ||
+            channelsQuery.isLoading ||
+            channelsQuery.isError
+          }
           onClick={() => void fetchSelectedUpstream()}
         >
           <CloudDownload />
