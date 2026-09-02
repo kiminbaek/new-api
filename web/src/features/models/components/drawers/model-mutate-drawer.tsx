@@ -35,6 +35,7 @@ import {
 } from '@/components/drawer-layout'
 import { JsonEditor } from '@/components/json-editor'
 import { TagInput } from '@/components/tag-input'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import {
   Collapsible,
@@ -80,6 +81,7 @@ import { useUpdateOption } from '@/features/system-settings/hooks/use-update-opt
 import { normalizeJsonString } from '@/features/system-settings/models/utils'
 import type { ModelSettings } from '@/features/system-settings/types'
 import { safeJsonParse } from '@/features/system-settings/utils/json-parser'
+import { requireSuccessfulResponse } from '@/lib/api-response'
 
 import { createModel, updateModel, getModel, getVendors } from '../../api'
 import { getNameRuleOptions, ENDPOINT_TEMPLATES } from '../../constants'
@@ -258,25 +260,36 @@ export function ModelMutateDrawer({
   const modelSettingsRef = useRef<ModelSettings | null>(null)
 
   // Fetch vendors for dropdown
-  const { data: vendorsData } = useQuery({
+  const vendorsQuery = useQuery({
     queryKey: vendorsQueryKeys.list(),
-    queryFn: () => getVendors({ page_size: 1000 }),
+    queryFn: async () =>
+      requireSuccessfulResponse(
+        await getVendors({ page_size: 1000 }),
+        t('Failed to load vendors')
+      ),
     enabled: open,
   })
 
-  const vendors = vendorsData?.data?.items || []
+  const vendors = vendorsQuery.data?.data?.items || []
 
-  // Fetch model detail if editing
-  const { data: modelData } = useQuery({
+  // Fetch model detail if editing. Never expose an editable default form until
+  // the persisted model has loaded successfully.
+  const modelQuery = useQuery({
     queryKey: modelsQueryKeys.detail(currentModelId || 0),
-    queryFn: () => {
+    queryFn: async () => {
       if (!currentModelId) {
         throw new Error('Model ID is required')
       }
-      return getModel(currentModelId)
+      return requireSuccessfulResponse(
+        await getModel(currentModelId),
+        t('Failed to load model details')
+      )
     },
     enabled: open && isEditing,
   })
+  const modelData = modelQuery.data
+  const editDataUnavailable =
+    isEditing && (modelQuery.isLoading || modelQuery.isError || !modelData?.data)
 
   // Fetch system options for ratio configuration
   const { data: systemOptionsData } = useSystemOptions()
@@ -764,6 +777,30 @@ export function ModelMutateDrawer({
             )}
             className={sideDrawerFormClassName()}
           >
+            {isEditing && modelQuery.isLoading && (
+              <div className='text-muted-foreground flex min-h-40 items-center justify-center gap-2 text-sm'>
+                <Loader2 className='size-4 animate-spin' />
+                {t('Loading model details...')}
+              </div>
+            )}
+            {isEditing && modelQuery.isError && (
+              <Alert variant='destructive'>
+                <AlertTitle>{t('Unable to load model details')}</AlertTitle>
+                <AlertDescription className='space-y-3'>
+                  <p>{modelQuery.error.message}</p>
+                  <Button
+                    type='button'
+                    variant='outline'
+                    size='sm'
+                    disabled={modelQuery.isFetching}
+                    onClick={() => void modelQuery.refetch()}
+                  >
+                    {t('Retry')}
+                  </Button>
+                </AlertDescription>
+              </Alert>
+            )}
+            <fieldset disabled={editDataUnavailable} className='contents'>
             {/* Basic Information */}
             <SideDrawerSection>
               <h3 className='text-sm font-semibold'>
@@ -835,6 +872,7 @@ export function ModelMutateDrawer({
                   <FormItem>
                     <FormLabel>{t('Vendor')}</FormLabel>
                     <Select
+                      disabled={vendorsQuery.isLoading || vendorsQuery.isError}
                       items={vendors.map((vendor) => ({
                         value: String(vendor.id),
                         label: vendor.name,
@@ -864,6 +902,11 @@ export function ModelMutateDrawer({
                         </SelectGroup>
                       </SelectContent>
                     </Select>
+                    {vendorsQuery.isError && (
+                      <FormDescription className='text-destructive'>
+                        {t('Vendor list could not be loaded. Retry by reopening the editor.')}
+                      </FormDescription>
+                    )}
                     <FormMessage />
                   </FormItem>
                 )}
@@ -1387,6 +1430,7 @@ export function ModelMutateDrawer({
                 )}
               />
             </SideDrawerSection>
+            </fieldset>
           </form>
         </Form>
 
@@ -1396,7 +1440,11 @@ export function ModelMutateDrawer({
           >
             {t('Cancel')}
           </SheetClose>
-          <Button form='model-form' type='submit' disabled={isSubmitting}>
+          <Button
+            form='model-form'
+            type='submit'
+            disabled={isSubmitting || editDataUnavailable}
+          >
             {isSubmitting && <Loader2 className='mr-2 h-4 w-4 animate-spin' />}
             {isEditing ? t('Update Model') : t('Save changes')}
           </Button>
