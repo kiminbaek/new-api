@@ -298,6 +298,11 @@ const SENSITIVE_FORM_FIELDS = [
   'retry_times',
   'timeout_seconds',
   'fail_threshold',
+  'max_concurrency',
+  'max_concurrency_per_key',
+  'concurrency_scope',
+  'concurrency_group',
+  'model_concurrency_text',
   'health_check_mode',
   'health_check_minutes',
   'pass_through_body_enabled',
@@ -361,6 +366,11 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.retry_times != null ||
     values.timeout_seconds != null ||
     values.fail_threshold != null ||
+    values.max_concurrency != null ||
+    values.max_concurrency_per_key != null ||
+    (values.concurrency_scope != null && values.concurrency_scope !== '' && values.concurrency_scope !== 'local') ||
+    Boolean(values.concurrency_group?.trim()) ||
+    Boolean(values.model_concurrency_text?.trim()) ||
     (values.health_check_mode != null &&
       values.health_check_mode !== '' &&
       values.health_check_mode !== 'default') ||
@@ -4575,6 +4585,60 @@ export function ChannelMutateDrawer({
                                 </FormItem>
                               )}
                             />
+
+                            <div className='border-border/60 bg-muted/20 rounded-lg border p-3'>
+                              <div className='mb-3 text-sm font-semibold'>
+                                {t('Upstream Concurrency Protection')}
+                              </div>
+                              <div className='grid gap-4 md:grid-cols-2'>
+                                {(['max_concurrency', 'max_concurrency_per_key'] as const).map((name) => (
+                                  <FormField key={name} control={form.control} name={name} render={({ field }) => (
+                                    <FormItem>
+                                      <FormLabel>{t(name === 'max_concurrency' ? 'Channel Concurrency Limit' : 'Concurrency Limit Per Upstream Key')}</FormLabel>
+                                      <FormControl>
+                                        <Input type='number' min={0} max={10000} placeholder='留空 = 不限制' value={field.value ?? ''} onChange={(e) => field.onChange(e.target.value === '' ? undefined : Number(e.target.value))} />
+                                      </FormControl>
+                                      <FormDescription>{t(name === 'max_concurrency' ? 'Maximum in-flight requests for this channel. Empty or 0 disables this protection.' : 'For multi-key channels, choose an available key instead of reusing a busy key.')}</FormDescription>
+                                      <FormMessage />
+                                    </FormItem>
+                                  )} />
+                                ))}
+                              </div>
+                              <FormField control={form.control} name='model_concurrency_text' render={({ field }) => (
+                                <FormItem className='mt-4'>
+                                  <FormLabel>{t('Per-Model Concurrency Limits')}</FormLabel>
+                                  <FormControl>
+                                    <Textarea rows={2} placeholder='{"claude-opus-4-8": 2, "*": 4}' {...field} />
+                                  </FormControl>
+                                  <FormDescription>{t('JSON model-to-limit map. * is the fallback. Limits apply on this instance only; shared Redis is required across nodes.')}</FormDescription>
+                                  <FormMessage />
+                                </FormItem>
+                              )} />
+                              <div className='mt-4 grid gap-4 md:grid-cols-2'>
+                                <FormField control={form.control} name='concurrency_scope' render={({ field }) => (
+                                  <FormItem>
+                                    <FormLabel>{t('Concurrency Scope')}</FormLabel>
+                                    <Select value={field.value || 'local'} onValueChange={field.onChange}>
+                                      <FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl>
+                                      <SelectContent>
+                                        <SelectItem value='local'>{t('This instance')}</SelectItem>
+                                        <SelectItem value='redis'>{t('Shared Redis')}</SelectItem>
+                                      </SelectContent>
+                                    </Select>
+                                    <FormDescription>{t('Redis scope shares limits across instances; Redis must be configured and available.')}</FormDescription>
+                                    <FormMessage />
+                                  </FormItem>
+                                )} />
+                                <FormField control={form.control} name='concurrency_group' render={({ field }) => (
+                                  <FormItem>
+                                    <FormLabel>{t('Shared Concurrency Group')}</FormLabel>
+                                    <FormControl><Input placeholder='e.g. provider-account-a' {...field} /></FormControl>
+                                    <FormDescription>{t('Channels using the same group share one Redis capacity pool.')}</FormDescription>
+                                    <FormMessage />
+                                  </FormItem>
+                                )} />
+                              </div>
+                            </div>
 
                             <FormField
                               control={form.control}

@@ -243,14 +243,46 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 				continue
 			}
 		}
+		// [CUSTOM] 上游并发额度：在真正触达上游之前同时占用渠道/模型/Key 槽位。
+		// 满载属于本地调度事件，不计作上游失败，也不触发智能禁用；当前请求排除该渠道后继续选路。
+		channelSetting, _ := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting)
+		upstreamKey := common.GetContextKeyString(c, constant.ContextKeyChannelKey)
+		var permit service.ConcurrencyPermit
+		var fullDimension service.ConcurrencyDimension
+		var admitted bool
+		if channel.ChannelInfo.IsMultiKey && (channelSetting.MaxConcurrency != nil || channelSetting.MaxConcurrencyPerKey != nil || len(channelSetting.ModelConcurrency) > 0) {
+			enabledKeys := channel.GetEnabledKeys()
+			candidates := make([]service.ConcurrencyKeyCandidate, 0, len(enabledKeys))
+			for _, candidate := range enabledKeys {
+				candidates = append(candidates, service.ConcurrencyKeyCandidate{Key: candidate.Key, Index: candidate.Index})
+			}
+			var chosen service.ConcurrencyKeyCandidate
+			permit, chosen, fullDimension, admitted = service.TryAcquireChannelConcurrencyForKeys(channel.Id, relayInfo.OriginModelName, candidates, channelSetting)
+			if admitted {
+				upstreamKey = chosen.Key
+				common.SetContextKey(c, constant.ContextKeyChannelKey, chosen.Key)
+				common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, chosen.Index)
+			}
+		} else {
+			permit, fullDimension, admitted = service.TryAcquireChannelConcurrency(channel.Id, relayInfo.OriginModelName, upstreamKey, channelSetting)
+		}
+		if !admitted {
+			logger.LogInfo(c, fmt.Sprintf("[CUSTOM] channel #%d capacity full (%s), trying another channel", channel.Id, fullDimension))
+			retryParam.Exclude(channel.Id)
+			retryParam.ResetRetryNextTry()
+			continue
+		}
+
 		addUsedChannel(c, channel.Id)
 		if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
+			permit.Release()
 			newAPIError = billingErr
 			break
 		}
 
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
+			permit.Release()
 			// Ensure consistent 413 for oversized bodies even when error occurs later (e.g., retry path)
 			if common.IsRequestBodyTooLargeError(bodyErr) || errors.Is(bodyErr, common.ErrRequestBodyTooLarge) {
 				newAPIError = types.NewErrorWithStatusCode(bodyErr, types.ErrorCodeReadRequestBodyFailed, http.StatusRequestEntityTooLarge, types.ErrOptionWithSkipRetry())
@@ -271,6 +303,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		default:
 			newAPIError = relayHandler(c, relayInfo)
 		}
+		// Helpers return only after the upstream response body/stream has completed.
+		// Release here keeps streaming requests counted for their full lifetime.
+		permit.Release()
 
 		if newAPIError == nil {
 			service.RecordRelaySuccess(channel.Id, relayInfo.OriginModelName) // [CUSTOM] 需求4
@@ -395,7 +430,7 @@ func fastTokenCountMetaForPricing(request dto.Request) *types.TokenCountMeta {
 }
 
 func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError) {
-	if info.ChannelMeta == nil {
+	if info.ChannelMeta == nil && len(retryParam.Excluded) == 0 {
 		autoBan := c.GetBool("auto_ban")
 		autoBanInt := 1
 		if !autoBan {

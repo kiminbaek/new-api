@@ -20,6 +20,8 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 	channelRoute := apiRouter.Group("/channel")
 	channelRoute.Use(middleware.AdminAuth())
 
+	channelRoute.GET("/concurrency/status", middleware.RootAuth(), controller.GetChannelConcurrencyStatus)
+
 	channelRoute.POST("/:id/key",
 		middleware.RootAuth(),
 		middleware.CriticalRateLimit(),

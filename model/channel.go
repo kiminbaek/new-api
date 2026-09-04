@@ -201,6 +201,36 @@ func (channel *Channel) GetKeys() []string {
 	return keys
 }
 
+type EnabledChannelKey struct {
+	Key   string
+	Index int
+}
+
+// GetEnabledKeys returns a stable snapshot of enabled upstream keys. It does
+// not advance the polling cursor; capacity-aware selection chooses and admits
+// one key atomically in the concurrency manager.
+func (channel *Channel) GetEnabledKeys() []EnabledChannelKey {
+	if channel == nil {
+		return nil
+	}
+	keys := channel.GetKeys()
+	if !channel.ChannelInfo.IsMultiKey {
+		if len(keys) == 0 {
+			return nil
+		}
+		return []EnabledChannelKey{{Key: keys[0], Index: 0}}
+	}
+	enabled := make([]EnabledChannelKey, 0, len(keys))
+	for index, key := range keys {
+		status, exists := channel.ChannelInfo.MultiKeyStatusList[index]
+		if exists && status != common.ChannelStatusEnabled {
+			continue
+		}
+		enabled = append(enabled, EnabledChannelKey{Key: key, Index: index})
+	}
+	return enabled
+}
+
 func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 	// If not in multi-key mode, return the original key string directly.
 	if !channel.ChannelInfo.IsMultiKey {
@@ -1008,6 +1038,9 @@ func (channel *Channel) ValidateSettings() error {
 		return err
 	}
 	if err := channelParams.ValidateHealthCheck(); err != nil {
+		return err
+	}
+	if err := channelParams.ValidateConcurrency(); err != nil {
 		return err
 	}
 	channelOtherSettings := &dto.ChannelOtherSettings{}

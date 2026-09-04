@@ -654,3 +654,35 @@ func TestChannelOtherSettingsValidateToolLossPolicy(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tool_loss_policy")
 }
+
+func TestChannelSettingsValidateConcurrency(t *testing.T) {
+	negative := -1
+	zero := 0
+	one := 1
+
+	tests := []struct {
+		name    string
+		setting *ChannelSettings
+		wantErr string
+	}{
+		{name: "nil", setting: nil},
+		{name: "disabled zeros", setting: &ChannelSettings{MaxConcurrency: &zero, MaxConcurrencyPerKey: &zero, ModelConcurrency: map[string]int{"*": 0}}},
+		{name: "valid", setting: &ChannelSettings{MaxConcurrency: &one, MaxConcurrencyPerKey: &one, ModelConcurrency: map[string]int{"model-a": 2}}},
+		{name: "negative channel", setting: &ChannelSettings{MaxConcurrency: &negative}, wantErr: "max_concurrency"},
+		{name: "negative key", setting: &ChannelSettings{MaxConcurrencyPerKey: &negative}, wantErr: "max_concurrency_per_key"},
+		{name: "empty model", setting: &ChannelSettings{ModelConcurrency: map[string]int{" ": 1}}, wantErr: "empty model name"},
+		{name: "negative model", setting: &ChannelSettings{ModelConcurrency: map[string]int{"model-a": -1}}, wantErr: "model_concurrency[model-a]"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := test.setting.ValidateConcurrency()
+			if test.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), test.wantErr)
+		})
+	}
+}

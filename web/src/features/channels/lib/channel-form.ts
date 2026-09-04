@@ -271,6 +271,14 @@ export const channelFormSchema = z
     retry_times: z.number().int().min(0).max(99).optional(),
     timeout_seconds: z.number().int().min(1).max(3600).optional(),
     fail_threshold: z.number().int().min(1).max(999).optional(),
+    max_concurrency: z.number().int().min(0).max(10000).optional(),
+    max_concurrency_per_key: z.number().int().min(0).max(10000).optional(),
+    concurrency_scope: z.enum(['', 'local', 'redis']).optional(),
+    concurrency_group: z.string().max(128).optional(),
+    model_concurrency_text: z
+      .string()
+      .optional()
+      .refine(isOptionalJsonObject, ERROR_MESSAGES.INVALID_JSON),
     // [CUSTOM] 分渠道存活检测
     health_check_mode: z
       .enum(['', 'default', 'scheduled', 'passive'])
@@ -463,6 +471,11 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   retry_times: undefined,
   timeout_seconds: undefined,
   fail_threshold: undefined,
+  max_concurrency: undefined,
+  max_concurrency_per_key: undefined,
+  concurrency_scope: '',
+  concurrency_group: '',
+  model_concurrency_text: '',
   pass_through_body_enabled: false,
   system_prompt: '',
   system_prompt_override: false,
@@ -514,6 +527,11 @@ export function transformChannelToFormDefaults(
     chat_to_responses: undefined,
     timeout_seconds: undefined,
     fail_threshold: undefined,
+    max_concurrency: undefined,
+    max_concurrency_per_key: undefined,
+    concurrency_scope: '' as '' | 'local' | 'redis',
+    concurrency_group: '',
+    model_concurrency_text: '',
   }
 
   if (channel.setting) {
@@ -539,6 +557,16 @@ export function transformChannelToFormDefaults(
         retry_times: parsed.retry_times ?? undefined,
         timeout_seconds: parsed.timeout_seconds ?? undefined,
         fail_threshold: parsed.fail_threshold ?? undefined,
+        max_concurrency: parsed.max_concurrency ?? undefined,
+        max_concurrency_per_key: parsed.max_concurrency_per_key ?? undefined,
+        concurrency_scope:
+          parsed.concurrency_scope === 'redis' || parsed.concurrency_scope === 'local'
+            ? parsed.concurrency_scope
+            : '',
+        concurrency_group: parsed.concurrency_group ?? '',
+        model_concurrency_text: parsed.model_concurrency
+          ? JSON.stringify(parsed.model_concurrency, null, 2)
+          : '',
         health_check_mode: parsed.health_check_mode ?? '',
         health_check_minutes: parsed.health_check_minutes ?? undefined,
         chat_to_responses: parsed.chat_to_responses ?? undefined,
@@ -693,6 +721,28 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
   }
   if (formData.fail_threshold != null) {
     settingObj.fail_threshold = formData.fail_threshold
+  }
+  if (formData.max_concurrency != null)
+    settingObj.max_concurrency = formData.max_concurrency
+  if (formData.max_concurrency_per_key != null)
+    settingObj.max_concurrency_per_key = formData.max_concurrency_per_key
+  if (formData.concurrency_scope && formData.concurrency_scope !== 'local')
+    settingObj.concurrency_scope = formData.concurrency_scope
+  if (formData.concurrency_group?.trim())
+    settingObj.concurrency_group = formData.concurrency_group.trim()
+  if (formData.model_concurrency_text?.trim()) {
+    try {
+      const modelConcurrency = JSON.parse(formData.model_concurrency_text)
+      if (
+        modelConcurrency &&
+        typeof modelConcurrency === 'object' &&
+        Object.keys(modelConcurrency).length > 0
+      ) {
+        settingObj.model_concurrency = modelConcurrency
+      }
+    } catch {
+      // schema validation reports malformed JSON
+    }
   }
   // [CUSTOM] 分渠道存活检测（空/default 不写入保持 JSON 等价）
   if (formData.health_check_mode && formData.health_check_mode !== 'default') {

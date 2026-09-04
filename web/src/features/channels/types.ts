@@ -93,6 +93,9 @@ export interface ChannelSettings {
   retry_times?: number
   timeout_seconds?: number
   fail_threshold?: number
+  max_concurrency?: number
+  max_concurrency_per_key?: number
+  model_concurrency?: Record<string, number>
   // [CUSTOM] 分渠道存活检测
   health_check_mode?: '' | 'default' | 'scheduled' | 'passive'
   health_check_minutes?: number

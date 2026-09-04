@@ -56,6 +56,7 @@ import { SettingsSection } from '../components/settings-section'
 import { useResetForm } from '../hooks/use-reset-form'
 import { useUpdateOption } from '../hooks/use-update-option'
 import { safeNumberFieldProps } from '../utils/numeric-field'
+import { ChannelConcurrencyStatusPanel } from './channel-concurrency-status-panel'
 import { SmartDisableStatusPanel } from './smart-disable-status-panel'
 
 const numericString = z.string().refine((value) => {
@@ -951,6 +952,10 @@ export function RoutingReliabilitySection({
               />
             </div>
           </div>
+
+          <Separator />
+
+          <ChannelConcurrencyStatusPanel />
 
           <Separator />
 

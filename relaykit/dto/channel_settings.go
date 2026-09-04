@@ -26,12 +26,18 @@ type ChannelSettings struct {
 	HTTP2ConnectionShards int `json:"http2_connection_shards,omitempty"`
 	// [CUSTOM] 二改扩展：分模型优先级 / 分渠道可靠性（nil或空=继承全局默认）
 	ModelPriorities map[string]int64 `json:"model_priorities,omitempty"`
-	RetryTimes      *int            `json:"retry_times,omitempty"`      // 该渠道每次请求最多被选中的次数(0=单次机会)
-	TimeoutSeconds  *int            `json:"timeout_seconds,omitempty"`  // 仅非流式请求生效
-	FailThreshold   *int            `json:"fail_threshold,omitempty"`   // 连续窗口内失败达到N次才自动禁用(nil=沿用即时禁用)
+	RetryTimes      *int             `json:"retry_times,omitempty"`     // 该渠道每次请求最多被选中的次数(0=单次机会)
+	TimeoutSeconds  *int             `json:"timeout_seconds,omitempty"` // 仅非流式请求生效
+	FailThreshold   *int             `json:"fail_threshold,omitempty"`  // 连续窗口内失败达到N次才自动禁用(nil=沿用即时禁用)
+	// [CUSTOM] 上游并发额度（nil/0=不限制）。三个维度会同时生效，任一维度满载即跳过当前渠道。
+	MaxConcurrency       *int           `json:"max_concurrency,omitempty"`         // 渠道总在途上限
+	MaxConcurrencyPerKey *int           `json:"max_concurrency_per_key,omitempty"` // 单个上游 Key 在途上限
+	ModelConcurrency     map[string]int `json:"model_concurrency,omitempty"`       // 分模型在途上限，支持精确模型名与 "*"
+	ConcurrencyScope     string         `json:"concurrency_scope,omitempty"`       // local(默认) / redis
+	ConcurrencyGroup     string         `json:"concurrency_group,omitempty"`       // 多渠道共享同一上游账号时填写相同组名
 	// [CUSTOM] 分渠道存活检测（nil/空=继承全局监控设置）
-	HealthCheckMode    string   `json:"health_check_mode,omitempty"`     // ""|default=跟随全局; scheduled=定时检测; passive=仅被动恢复(仅被自动禁用后才探测)
-	HealthCheckMinutes *float64 `json:"health_check_minutes,omitempty"`  // 检测间隔覆盖(分钟)，nil=跟随全局
+	HealthCheckMode    string   `json:"health_check_mode,omitempty"`    // ""|default=跟随全局; scheduled=定时检测; passive=仅被动恢复(仅被自动禁用后才探测)
+	HealthCheckMinutes *float64 `json:"health_check_minutes,omitempty"` // 检测间隔覆盖(分钟)，nil=跟随全局
 	// [CUSTOM] chat→responses 自动转换：仅 responses-only 渠道开启。
 	// 开启后该渠道收到 /v1/chat/completions（及 Claude /v1/messages）请求时，
 	// 无论全局 ChatCompletionsToResponsesPolicy 是否命中，都走 chatCompletionsViaResponses 转换链。
@@ -55,6 +61,35 @@ func (s ChannelSettings) EffectiveHealthCheckMode() string {
 }
 
 // ValidateHealthCheck 校验保存时分渠道检测设置。
+// ValidateConcurrency 校验渠道并发额度。nil/0 表示关闭该维度；负数没有明确语义，保存时拒绝。
+func (s *ChannelSettings) ValidateConcurrency() error {
+	if s == nil {
+		return nil
+	}
+	if s.MaxConcurrency != nil && *s.MaxConcurrency < 0 {
+		return fmt.Errorf("max_concurrency must be greater than or equal to 0")
+	}
+	if s.MaxConcurrencyPerKey != nil && *s.MaxConcurrencyPerKey < 0 {
+		return fmt.Errorf("max_concurrency_per_key must be greater than or equal to 0")
+	}
+	scope := strings.TrimSpace(strings.ToLower(s.ConcurrencyScope))
+	if scope != "" && scope != "local" && scope != "redis" {
+		return fmt.Errorf("concurrency_scope must be local or redis")
+	}
+	if len(s.ConcurrencyGroup) > 128 {
+		return fmt.Errorf("concurrency_group must not exceed 128 characters")
+	}
+	for model, limit := range s.ModelConcurrency {
+		if strings.TrimSpace(model) == "" {
+			return fmt.Errorf("model_concurrency contains an empty model name")
+		}
+		if limit < 0 {
+			return fmt.Errorf("model_concurrency[%s] must be greater than or equal to 0", model)
+		}
+	}
+	return nil
+}
+
 func (s *ChannelSettings) ValidateHealthCheck() error {
 	if s == nil {
 		return nil
