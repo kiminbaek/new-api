@@ -71,6 +71,7 @@ const nonNegInt = (min: number, max: number, msg: string) =>
 
 const channelTestModes = [
   'scheduled_all',
+  'scheduled_models',
   'auto_ban_only',
   'passive_recovery',
 ] as const
@@ -218,7 +219,11 @@ type NormalizedRoutingReliabilityValues = {
 }
 
 function normalizeChannelTestMode(value?: string): ChannelTestMode {
-  if (value === 'auto_ban_only' || value === 'passive_recovery') {
+  if (
+    value === 'scheduled_models' ||
+    value === 'auto_ban_only' ||
+    value === 'passive_recovery'
+  ) {
     return value
   }
   return 'scheduled_all'
@@ -359,6 +364,11 @@ export function RoutingReliabilitySection({
   const channelTestMode = form.watch('monitor_setting.channel_test_mode')
   let channelTestModeDescription: string
   switch (channelTestMode) {
+    case 'scheduled_models':
+      channelTestModeDescription = t(
+        'Checks each configured model one by one for each channel. The interval is configurable in minutes and never starts overlapping runs.'
+      )
+      break
     case 'auto_ban_only':
       channelTestModeDescription = t(
         'Periodically checks only channels with auto-disable enabled, excluding manually disabled channels.'
@@ -518,6 +528,10 @@ export function RoutingReliabilitySection({
                           label: t('Actively check all channels'),
                         },
                         {
+                          value: 'scheduled_models',
+                          label: t('Sequentially check every channel model'),
+                        },
+                        {
                           value: 'auto_ban_only',
                           label: t(
                             'Actively check auto-disable-enabled channels'
@@ -540,6 +554,9 @@ export function RoutingReliabilitySection({
                         <SelectGroup>
                           <SelectItem value='scheduled_all'>
                             {t('Actively check all channels')}
+                          </SelectItem>
+                          <SelectItem value='scheduled_models'>
+                            {t('Sequentially check every channel model')}
                           </SelectItem>
                           <SelectItem value='auto_ban_only'>
                             {t('Actively check auto-disable-enabled channels')}

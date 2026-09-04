@@ -50,10 +50,10 @@ func (channelTestHandler) Interval() time.Duration {
 func (channelTestHandler) NewPayload() any { return nil }
 
 // channelTestTaskPayload controls one channel_test run. A nil/empty payload is a
-// scheduled run, which uses the configured monitor ChannelTestMode and does not
-// notify. A manual "test all channels" trigger sets Mode=scheduled_all and
-// Notify=true to reproduce the legacy manual behavior (test every channel and
-// notify root on completion).
+// scheduled run, which uses the configured monitor ChannelTestMode. Sequential
+// model probes notify the root user with the detailed per-model report; legacy
+// channel-only modes keep their existing completion notification behavior.
+// A manual "test all channels" trigger sets Mode=scheduled_all and Notify=true.
 type channelTestTaskPayload struct {
 	Mode   string `json:"mode,omitempty"`
 	Notify bool   `json:"notify,omitempty"`
@@ -65,7 +65,13 @@ func (channelTestHandler) Run(ctx context.Context, task *model.SystemTask, runne
 		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
 		return
 	}
-	summary, err := runChannelTestTask(ctx, payload.Mode, payload.Notify, payload.Mode == "", service.NewSystemTaskProgressReporter(task, runnerID))
+	mode := payload.Mode
+	isScheduled := mode == ""
+	shouldNotify := payload.Notify
+	if isScheduled && operation_setting.GetMonitorSetting().ChannelTestMode == operation_setting.ChannelTestModeScheduledModels {
+		shouldNotify = true
+	}
+	summary, err := runChannelTestTask(ctx, mode, shouldNotify, isScheduled, service.NewSystemTaskProgressReporter(task, runnerID))
 	if err != nil {
 		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
 		return

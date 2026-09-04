@@ -17,6 +17,7 @@ type MonitorSetting struct {
 
 const (
 	ChannelTestModeScheduledAll    = "scheduled_all"
+	ChannelTestModeScheduledModels = "scheduled_models"
 	ChannelTestModeAutoBanOnly     = "auto_ban_only"
 	ChannelTestModePassiveRecovery = "passive_recovery"
 
@@ -54,7 +55,7 @@ func GetMonitorSetting() *MonitorSetting {
 		}
 	}
 	switch monitorSetting.ChannelTestMode {
-	case ChannelTestModeAutoBanOnly, ChannelTestModePassiveRecovery:
+	case ChannelTestModeScheduledModels, ChannelTestModeAutoBanOnly, ChannelTestModePassiveRecovery:
 	default:
 		monitorSetting.ChannelTestMode = ChannelTestModeScheduledAll
 	}

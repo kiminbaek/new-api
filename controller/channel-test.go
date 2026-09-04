@@ -910,11 +910,49 @@ func TestChannel(c *gin.Context) {
 // channelTestSummary records the outcome of one channel test cycle so the
 // system task can persist a per-run result for history.
 type channelTestSummary struct {
-	Tested    int `json:"tested"`
-	Succeeded int `json:"succeeded"`
-	Failed    int `json:"failed"`
-	Disabled  int `json:"disabled"`
-	Enabled   int `json:"enabled"`
+	Tested    int                `json:"tested"`
+	Succeeded int                `json:"succeeded"`
+	Failed    int                `json:"failed"`
+	Disabled  int                `json:"disabled"`
+	Enabled   int                `json:"enabled"`
+	Probes    []modelProbeResult `json:"probes,omitempty"`
+}
+
+type modelProbeResult struct {
+	ChannelID   int    `json:"channel_id"`
+	ChannelName string `json:"channel_name"`
+	Model       string `json:"model"`
+	Success     bool   `json:"success"`
+	ElapsedMS   int64  `json:"elapsed_ms"`
+	Reason      string `json:"reason,omitempty"`
+	Suggestion  string `json:"suggestion,omitempty"`
+}
+
+func probeReason(result testResult) (string, string) {
+	if result.newAPIError == nil && result.localErr == nil {
+		return "检测通过，收到有效模型响应", "无需处理，继续观察响应时间"
+	}
+	err := result.localErr
+	if err == nil && result.newAPIError != nil {
+		err = result.newAPIError
+	}
+	if err == nil {
+		return "检测失败，原因未确定", "稍后重试并查看渠道日志"
+	}
+	message := err.Error()
+	lower := strings.ToLower(message)
+	suggestion := "检查渠道日志、模型名称和上游服务状态"
+	switch {
+	case strings.Contains(lower, "401"), strings.Contains(lower, "403"), strings.Contains(lower, "unauthorized"):
+		suggestion = "检查上游 API Key、账号权限和额度"
+	case strings.Contains(lower, "404"), strings.Contains(lower, "not found"):
+		suggestion = "检查模型名称及上游模型列表，确认模型仍可用"
+	case strings.Contains(lower, "429"), strings.Contains(lower, "rate limit"):
+		suggestion = "降低请求频率或增加备用 Key，检查上游限流额度"
+	case strings.Contains(lower, "timeout"), strings.Contains(lower, "deadline"):
+		suggestion = "检查上游延迟、代理和网络，必要时降低该渠道优先级"
+	}
+	return message, suggestion
 }
 
 func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, testUserID int, allowDisableFn func(*model.Channel) bool, disableThreshold int64) channelTestSummary {
@@ -1123,6 +1161,78 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 // trigger passes ChannelTestModeScheduledAll to test every channel. When notify
 // is set the root user is notified on completion. Cross-instance execution is
 // guarded by the system task per-type lock, so no process-local guard is needed.
+func runSequentialModelProbes(ctx context.Context, channels []*model.Channel, testUserID int, report func(processed, total int)) (channelTestSummary, []modelProbeResult) {
+	summary := channelTestSummary{}
+	total := 0
+	for _, channel := range channels {
+		if len(channel.GetModels()) > 0 {
+			total += len(channel.GetModels())
+		} else {
+			total++
+		}
+	}
+	processed := 0
+	results := make([]modelProbeResult, 0)
+	for _, channel := range channels {
+		if ctx.Err() != nil {
+			break
+		}
+		seen := make(map[string]struct{})
+		modelNames := channel.GetModels()
+		if len(modelNames) == 0 && channel.TestModel != nil && strings.TrimSpace(*channel.TestModel) != "" {
+			modelNames = []string{strings.TrimSpace(*channel.TestModel)}
+		}
+		if len(modelNames) == 0 {
+			modelNames = []string{"gpt-4o-mini"}
+		}
+		for _, modelName := range modelNames {
+			modelName = strings.TrimSpace(modelName)
+			if modelName == "" {
+				continue
+			}
+			if _, ok := seen[modelName]; ok {
+				continue
+			}
+			seen[modelName] = struct{}{}
+			started := time.Now()
+			result := testChannel(ctx, channel, testUserID, modelName, "", shouldUseStreamForAutomaticChannelTest(channel))
+			reason, suggestion := probeReason(result)
+			item := modelProbeResult{ChannelID: channel.Id, ChannelName: channel.Name, Model: modelName, Success: result.newAPIError == nil && result.localErr == nil, ElapsedMS: time.Since(started).Milliseconds(), Reason: reason, Suggestion: suggestion}
+			results = append(results, item)
+			summary.Tested++
+			if item.Success {
+				summary.Succeeded++
+			} else {
+				summary.Failed++
+			}
+			processed++
+			if report != nil {
+				report(processed, total)
+			}
+		}
+	}
+	return summary, results
+}
+
+func formatModelProbeReport(results []modelProbeResult) string {
+	if len(results) == 0 {
+		return "本轮没有可检测的渠道模型。"
+	}
+	var b strings.Builder
+	for index, item := range results {
+		if b.Len() > 7000 {
+			fmt.Fprintf(&b, "\n其余 %d 个模型结果已省略，请在系统任务详情查看完整结果。\n", len(results)-index)
+			break
+		}
+		status := "通过"
+		if !item.Success {
+			status = "异常"
+		}
+		fmt.Fprintf(&b, "\n- 渠道：%s (#%d)\n  模型：%s\n  状态：%s，耗时 %dms\n  原因：%s\n  建议：%s\n", item.ChannelName, item.ChannelID, item.Model, status, item.ElapsedMS, item.Reason, item.Suggestion)
+	}
+	return b.String()
+}
+
 func runChannelTestTask(ctx context.Context, mode string, notify bool, isScheduled bool, report func(processed, total int)) (channelTestSummary, error) {
 	testUserID, err := resolveChannelTestUserID(nil)
 	if err != nil {
@@ -1137,9 +1247,25 @@ func runChannelTestTask(ctx context.Context, mode string, notify bool, isSchedul
 	}
 	selected := selectChannelsForAutomaticTest(channels, mode)
 	if isScheduled {
-		// [CUSTOM] 自动巡检：分渠道间隔覆盖 + 随机抖动过滤 + 乱序（隐蔽性）
+		// Scheduled model probes preserve channel/model order so progress is predictable.
 		selected = filterChannelsByHealthCheckDue(selected)
-		shuffleChannelsForTest(selected)
+		if mode != operation_setting.ChannelTestModeScheduledModels {
+			// Legacy channel-only checks retain randomized ordering.
+			shuffleChannelsForTest(selected)
+		}
+	}
+	if mode == operation_setting.ChannelTestModeScheduledModels {
+		if !isScheduled {
+			selected = filterChannelsByHealthCheckDue(selected)
+		}
+		summary, probes := runSequentialModelProbes(ctx, selected, testUserID, report)
+		summary.Probes = probes
+		recordChannelTestRun(selected)
+		if notify && (ctx == nil || ctx.Err() == nil) {
+			content := fmt.Sprintf("本轮按渠道×模型顺序巡检完成：共 %d 个模型，成功 %d，异常 %d。%s", summary.Tested, summary.Succeeded, summary.Failed, formatModelProbeReport(probes))
+			service.NotifyRootUser(dto.NotifyTypeChannelTest, "模型巡检完成", content)
+		}
+		return summary, nil
 	}
 	allowDisableFn := func(channel *model.Channel) bool {
 		// [CUSTOM] 被动恢复渠道的恢复探测不触发再禁用

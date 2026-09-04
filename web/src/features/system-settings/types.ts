@@ -253,6 +253,7 @@ export type ModelSettings = {
   'monitor_setting.channel_test_concurrency': number
   'monitor_setting.channel_test_mode':
     | 'scheduled_all'
+    | 'scheduled_models'
     | 'auto_ban_only'
     | 'passive_recovery'
   'channel_affinity_setting.enabled': boolean

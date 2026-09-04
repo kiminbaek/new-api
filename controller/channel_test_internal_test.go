@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -462,4 +463,16 @@ func TestTestAllChannelsRejectsExistingActiveTask(t *testing.T) {
 	require.Equal(t, http.StatusConflict, recorder.Code)
 	require.Contains(t, recorder.Body.String(), existing.TaskID)
 	require.Contains(t, recorder.Body.String(), "已有通道测试任务正在运行或等待中")
+}
+
+func TestSequentialModelProbeModelFallbacks(t *testing.T) {
+	withTestModel := "custom-model"
+	channel := &model.Channel{TestModel: &withTestModel, Models: ""}
+	models := channel.GetModels()
+	if len(models) != 0 {
+		t.Fatalf("expected no configured models, got %v", models)
+	}
+	if channel.TestModel == nil || strings.TrimSpace(*channel.TestModel) != "custom-model" {
+		t.Fatalf("expected test model fallback to remain available")
+	}
 }
