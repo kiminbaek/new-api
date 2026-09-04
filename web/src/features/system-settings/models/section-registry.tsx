@@ -38,6 +38,35 @@ function formatJsonForEditor(value: string, fallback: string) {
   }
 }
 
+function routingReliabilityDefaults(settings: ModelSettings) {
+  return {
+    RetryTimes: settings.RetryTimes,
+    ChannelDisableThreshold: settings.ChannelDisableThreshold,
+    AutomaticDisableChannelEnabled: settings.AutomaticDisableChannelEnabled,
+    AutomaticEnableChannelEnabled: settings.AutomaticEnableChannelEnabled,
+    AutomaticDisableKeywords: settings.AutomaticDisableKeywords,
+    AutomaticDisableStatusCodes: settings.AutomaticDisableStatusCodes,
+    AutomaticRetryStatusCodes: settings.AutomaticRetryStatusCodes,
+    'monitor_setting.auto_test_channel_enabled':
+      settings['monitor_setting.auto_test_channel_enabled'],
+    'monitor_setting.auto_test_channel_minutes':
+      settings['monitor_setting.auto_test_channel_minutes'],
+    'monitor_setting.channel_test_concurrency':
+      settings['monitor_setting.channel_test_concurrency'],
+    'monitor_setting.channel_test_mode':
+      settings['monitor_setting.channel_test_mode'],
+    // [CUSTOM] 需求1/4
+    RelayUserAgent: settings.RelayUserAgent,
+    HealthCheckJitterEnabled: settings.HealthCheckJitterEnabled,
+    AutoPriorityEnabled: settings.AutoPriorityEnabled,
+    AutoPriorityIntervalSec: settings.AutoPriorityIntervalSec,
+    AutoPriorityMinSamples: settings.AutoPriorityMinSamples,
+    AutoPriorityScale: settings.AutoPriorityScale,
+    AutoPriorityMaxDelta: settings.AutoPriorityMaxDelta,
+    SmartAutoDisableEnabled: settings.SmartAutoDisableEnabled,
+  }
+}
+
 const MODELS_SECTIONS = [
   {
     id: 'global',
@@ -68,37 +97,44 @@ const MODELS_SECTIONS = [
     ),
   },
   {
-    id: 'routing-reliability',
-    titleKey: 'Routing Reliability',
+    id: 'routing-failure',
+    titleKey: 'Failure Handling',
     build: (settings: ModelSettings) => (
       <RoutingReliabilitySection
-        defaultValues={{
-          RetryTimes: settings.RetryTimes,
-          ChannelDisableThreshold: settings.ChannelDisableThreshold,
-          AutomaticDisableChannelEnabled:
-            settings.AutomaticDisableChannelEnabled,
-          AutomaticEnableChannelEnabled: settings.AutomaticEnableChannelEnabled,
-          AutomaticDisableKeywords: settings.AutomaticDisableKeywords,
-          AutomaticDisableStatusCodes: settings.AutomaticDisableStatusCodes,
-          AutomaticRetryStatusCodes: settings.AutomaticRetryStatusCodes,
-          'monitor_setting.auto_test_channel_enabled':
-            settings['monitor_setting.auto_test_channel_enabled'],
-          'monitor_setting.auto_test_channel_minutes':
-            settings['monitor_setting.auto_test_channel_minutes'],
-          'monitor_setting.channel_test_concurrency':
-            settings['monitor_setting.channel_test_concurrency'],
-          'monitor_setting.channel_test_mode':
-            settings['monitor_setting.channel_test_mode'],
-          // [CUSTOM] 需求1/4
-          RelayUserAgent: settings.RelayUserAgent,
-          HealthCheckJitterEnabled: settings.HealthCheckJitterEnabled,
-          AutoPriorityEnabled: settings.AutoPriorityEnabled,
-          AutoPriorityIntervalSec: settings.AutoPriorityIntervalSec,
-          AutoPriorityMinSamples: settings.AutoPriorityMinSamples,
-          AutoPriorityScale: settings.AutoPriorityScale,
-          AutoPriorityMaxDelta: settings.AutoPriorityMaxDelta,
-          SmartAutoDisableEnabled: settings.SmartAutoDisableEnabled,
-        }}
+        groups={['retry', 'disable']}
+        hideIntro
+        defaultValues={routingReliabilityDefaults(settings)}
+      />
+    ),
+  },
+  {
+    id: 'routing-health-probes',
+    titleKey: 'Health Probes',
+    build: (settings: ModelSettings) => (
+      <RoutingReliabilitySection
+        groups={['health']}
+        hideIntro
+        defaultValues={routingReliabilityDefaults(settings)}
+      />
+    ),
+  },
+  {
+    id: 'routing-smart',
+    titleKey: 'Smart Adjustments',
+    build: (settings: ModelSettings) => (
+      <RoutingReliabilitySection
+        groups={['priority', 'status']}
+        hideIntro
+        defaultValues={routingReliabilityDefaults(settings)}
+      />
+    ),
+  },
+  {
+    id: 'routing-reliability',
+    titleKey: 'Routing Reliability (All)',
+    build: (settings: ModelSettings) => (
+      <RoutingReliabilitySection
+        defaultValues={routingReliabilityDefaults(settings)}
       />
     ),
   },

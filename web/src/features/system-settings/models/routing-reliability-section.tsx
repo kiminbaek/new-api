@@ -166,7 +166,21 @@ type RoutingReliabilitySchema = ReturnType<
 type RoutingReliabilityFormValues = z.output<RoutingReliabilitySchema>
 type RoutingReliabilityFormInput = z.input<RoutingReliabilitySchema>
 
+type RoutingReliabilityGroup =
+  | 'retry'
+  | 'health'
+  | 'disable'
+  | 'stealth'
+  | 'priority'
+  | 'status'
+
 type RoutingReliabilitySectionProps = {
+  /** When set, only these blocks render. Omit to render the full page. */
+  groups?: RoutingReliabilityGroup[]
+  /** Override the section heading. */
+  title?: string
+  /** Hide the intro guidance cards (used by split pages). */
+  hideIntro?: boolean
   defaultValues: {
     RetryTimes: number
     ChannelDisableThreshold: string
@@ -335,7 +349,12 @@ const normalizeFormValues = (
 
 export function RoutingReliabilitySection({
   defaultValues,
+  groups,
+  title,
+  hideIntro,
 }: RoutingReliabilitySectionProps) {
+  const show = (group: RoutingReliabilityGroup) =>
+    !groups || groups.includes(group)
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
   const routingReliabilitySchema = createRoutingReliabilitySchema(t)
@@ -416,7 +435,8 @@ export function RoutingReliabilitySection({
   }
 
   return (
-    <SettingsSection title={t('Routing Reliability')}>
+    <SettingsSection title={title ?? t('Routing Reliability')}>
+      {!hideIntro && !groups && (
       <div className='grid min-w-0 gap-3 md:grid-cols-3'>
         <div className='rounded-xl border p-4'>
           <p className='text-sm font-medium'>{t('Standard routing')}</p>
@@ -443,6 +463,7 @@ export function RoutingReliabilitySection({
           </p>
         </div>
       </div>
+      )}
       <Form {...form}>
         <SettingsForm onSubmit={form.handleSubmit(onSubmit)}>
           <SettingsPageFormActions
@@ -450,6 +471,7 @@ export function RoutingReliabilitySection({
             isSaving={updateOption.isPending}
           />
 
+          {show('retry') && (
           <div className='flex min-w-0 flex-col gap-4'>
             <div className='flex flex-col gap-1'>
               <h4 className='text-sm font-medium'>{t('Request retry')}</h4>
@@ -508,7 +530,10 @@ export function RoutingReliabilitySection({
               />
             </div>
           </div>
+          )}
 
+          {show('health') && (
+          <>
           <Separator />
 
           <div className='flex min-w-0 flex-col gap-4'>
@@ -676,7 +701,11 @@ export function RoutingReliabilitySection({
               />
             </div>
           </div>
+          </>
+          )}
 
+          {show('disable') && (
+          <>
           <Separator />
 
           <div className='flex min-w-0 flex-col gap-4'>
@@ -808,7 +837,11 @@ export function RoutingReliabilitySection({
               />
             </div>
           </div>
+          </>
+          )}
 
+          {show('stealth') && (
+          <>
           {/* [CUSTOM] 需求1 隐蔽化：出站 UA */}
           <Separator />
 
@@ -843,7 +876,11 @@ export function RoutingReliabilitySection({
               />
             </div>
           </div>
+          </>
+          )}
 
+          {show('priority') && (
+          <>
           {/* [CUSTOM] 需求4 自动调优：双向浮动优先级 */}
           <Separator />
 
@@ -995,7 +1032,11 @@ export function RoutingReliabilitySection({
               />
             </div>
           </div>
+          </>
+          )}
 
+          {show('status') && (
+          <>
           <Separator />
 
           <ChannelConcurrencyStatusPanel />
@@ -1003,6 +1044,8 @@ export function RoutingReliabilitySection({
           <Separator />
 
           <SmartDisableStatusPanel />
+          </>
+          )}
         </SettingsForm>
       </Form>
     </SettingsSection>
