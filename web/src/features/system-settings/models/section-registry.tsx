@@ -101,6 +101,7 @@ const MODELS_SECTIONS = [
     titleKey: 'Failure Handling',
     build: (settings: ModelSettings) => (
       <RoutingReliabilitySection
+        title='Failure Handling'
         groups={['retry', 'disable']}
         hideIntro
         defaultValues={routingReliabilityDefaults(settings)}
@@ -112,6 +113,7 @@ const MODELS_SECTIONS = [
     titleKey: 'Health Probes',
     build: (settings: ModelSettings) => (
       <RoutingReliabilitySection
+        title='Health Probes'
         groups={['health']}
         hideIntro
         defaultValues={routingReliabilityDefaults(settings)}
@@ -123,7 +125,8 @@ const MODELS_SECTIONS = [
     titleKey: 'Smart Adjustments',
     build: (settings: ModelSettings) => (
       <RoutingReliabilitySection
-        groups={['priority', 'status']}
+        title='Smart Adjustments'
+        groups={['priority', 'status', 'stealth']}
         hideIntro
         defaultValues={routingReliabilityDefaults(settings)}
       />
