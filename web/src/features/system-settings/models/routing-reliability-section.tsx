@@ -417,6 +417,32 @@ export function RoutingReliabilitySection({
 
   return (
     <SettingsSection title={t('Routing Reliability')}>
+      <div className='grid min-w-0 gap-3 md:grid-cols-3'>
+        <div className='rounded-xl border p-4'>
+          <p className='text-sm font-medium'>{t('Standard routing')}</p>
+          <p className='text-muted-foreground mt-1 text-xs'>
+            {t(
+              'Original retry, failure code and channel health behavior. Change these only when you want to alter baseline routing.'
+            )}
+          </p>
+        </div>
+        <div className='rounded-xl border p-4'>
+          <p className='text-sm font-medium'>{t('Custom health probes')}</p>
+          <p className='text-muted-foreground mt-1 text-xs'>
+            {t(
+              'Scheduled channel checks can probe one configured model at a time and send the detailed result through notifications.'
+            )}
+          </p>
+        </div>
+        <div className='rounded-xl border p-4'>
+          <p className='text-sm font-medium'>{t('Smart adjustments')}</p>
+          <p className='text-muted-foreground mt-1 text-xs'>
+            {t(
+              'Custom controls that lower priority, isolate one model, or disable a channel only after enough evidence is collected.'
+            )}
+          </p>
+        </div>
+      </div>
       <Form {...form}>
         <SettingsForm onSubmit={form.handleSubmit(onSubmit)}>
           <SettingsPageFormActions
@@ -618,7 +644,7 @@ export function RoutingReliabilitySection({
                     </FormControl>
                     <FormDescription>
                       {t(
-                        'Maximum number of channels tested at the same time (1-32)'
+                        'Maximum number of channels tested at the same time (1-32). Ignored in the sequential per-model mode, which always tests one model at a time.'
                       )}
                     </FormDescription>
                     <FormMessage />
