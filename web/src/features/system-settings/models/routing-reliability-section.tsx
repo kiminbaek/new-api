@@ -439,7 +439,7 @@ export function RoutingReliabilitySection({
   }
 
   return (
-    <SettingsSection title={title ?? t('Routing Reliability')}>
+    <SettingsSection title={t(title ?? 'Routing Reliability')}>
       {!hideIntro && !groups && (
       <div className='grid min-w-0 gap-3 md:grid-cols-3'>
         <div className='rounded-xl border p-4'>
