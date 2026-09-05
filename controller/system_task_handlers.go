@@ -73,7 +73,9 @@ func (channelTestHandler) Run(ctx context.Context, task *model.SystemTask, runne
 	}
 	summary, err := runChannelTestTask(ctx, mode, shouldNotify, isScheduled, service.NewSystemTaskProgressReporter(task, runnerID))
 	if err != nil {
-		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
+		// A lost lease/cancelled context is never a successful health run: retain
+		// partial summary for audit but leave the final state failed.
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
 		return
 	}
 	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)

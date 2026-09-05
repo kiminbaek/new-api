@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 // [CUSTOM] 哨兵推送设置卡片：渠道/模型异常事件主动通知（QQ 网关 webhook + 可选邮件）。
 import { zodResolver } from '@hookform/resolvers/zod'
+import { useQueryClient } from '@tanstack/react-query'
 import {
   BellRing,
   CheckCircle2,
@@ -53,7 +54,7 @@ import {
 } from '../components/settings-form-layout'
 import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
-import { useUpdateOption } from '../hooks/use-update-option'
+import { updateSystemOptionsBulk } from '../api'
 import { safeNumberFieldProps } from '../utils/numeric-field'
 
 const sentinelFormSchema = z.object({
@@ -79,7 +80,8 @@ interface SentinelSectionProps {
 
 export function SentinelSection({ defaultValues }: SentinelSectionProps) {
   const { t } = useTranslation()
-  const updateOption = useUpdateOption()
+  const queryClient = useQueryClient()
+  const [isSaving, setIsSaving] = useState(false)
   const baselineRef = useRef<Partial<SentinelFormValues>>({})
   const [isTesting, setIsTesting] = useState(false)
   const [testResults, setTestResults] = useState<Record<
@@ -123,15 +125,17 @@ export function SentinelSection({ defaultValues }: SentinelSectionProps) {
       return
     }
 
-    for (const key of updates) {
-      await updateOption.mutateAsync({
-        key,
-        value: String(values[key]),
+    setIsSaving(true)
+    try {
+      await updateSystemOptionsBulk({
+        values: Object.fromEntries(updates.map((key) => [key, String(values[key])])),
       })
+      baselineRef.current = values
+      await queryClient.invalidateQueries({ queryKey: ['system-options'] })
+      toast.success(t('Settings saved'))
+    } finally {
+      setIsSaving(false)
     }
-
-    baselineRef.current = values
-    toast.success(t('Settings saved'))
   }
 
   const testPush = async () => {
@@ -213,7 +217,7 @@ export function SentinelSection({ defaultValues }: SentinelSectionProps) {
         <SettingsForm onSubmit={form.handleSubmit(onSubmit)}>
           <SettingsPageFormActions
             onSave={form.handleSubmit(onSubmit)}
-            isSaving={updateOption.isPending}
+            isSaving={isSaving}
           />
 
           <SettingsControlGroup>

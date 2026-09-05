@@ -939,17 +939,24 @@ func probeReason(result testResult) (string, string) {
 	if err == nil {
 		return "检测失败，原因未确定", "稍后重试并查看渠道日志"
 	}
-	message := err.Error()
-	lower := strings.ToLower(message)
+	// Upstream error bodies may contain request fragments or provider internals.
+	// Persist/notify only a bounded classification; detailed evidence remains in
+	// the protected channel error log.
+	message := "检测失败，原因未确定"
+	lower := strings.ToLower(err.Error())
 	suggestion := "检查渠道日志、模型名称和上游服务状态"
 	switch {
 	case strings.Contains(lower, "401"), strings.Contains(lower, "403"), strings.Contains(lower, "unauthorized"):
+		message = "认证或权限被上游拒绝"
 		suggestion = "检查上游 API Key、账号权限和额度"
 	case strings.Contains(lower, "404"), strings.Contains(lower, "not found"):
+		message = "上游未找到该模型或接口"
 		suggestion = "检查模型名称及上游模型列表，确认模型仍可用"
 	case strings.Contains(lower, "429"), strings.Contains(lower, "rate limit"):
+		message = "上游限流或容量不足"
 		suggestion = "降低请求频率或增加备用 Key，检查上游限流额度"
 	case strings.Contains(lower, "timeout"), strings.Contains(lower, "deadline"):
+		message = "上游请求超时"
 		suggestion = "检查上游延迟、代理和网络，必要时降低该渠道优先级"
 	}
 	return message, suggestion
@@ -1234,6 +1241,11 @@ func formatModelProbeReport(results []modelProbeResult) string {
 }
 
 func runChannelTestTask(ctx context.Context, mode string, notify bool, isScheduled bool, report func(processed, total int)) (channelTestSummary, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return channelTestSummary{}, err
+		}
+	}
 	testUserID, err := resolveChannelTestUserID(nil)
 	if err != nil {
 		return channelTestSummary{}, err
@@ -1260,6 +1272,9 @@ func runChannelTestTask(ctx context.Context, mode string, notify bool, isSchedul
 		}
 		summary, probes := runSequentialModelProbes(ctx, selected, testUserID, report)
 		summary.Probes = probes
+		if err := ctx.Err(); err != nil {
+			return summary, err
+		}
 		recordChannelTestRun(selected)
 		if notify && (ctx == nil || ctx.Err() == nil) {
 			content := fmt.Sprintf("本轮按渠道×模型顺序巡检完成：共 %d 个模型，成功 %d，异常 %d。%s", summary.Tested, summary.Succeeded, summary.Failed, formatModelProbeReport(probes))
@@ -1277,6 +1292,9 @@ func runChannelTestTask(ctx context.Context, mode string, notify bool, isSchedul
 	concurrency := operation_setting.GetMonitorSetting().ChannelTestConcurrency
 	recordChannelTestRun(selected)
 	summary := performChannelTests(ctx, selected, testUserID, allowDisableFn, concurrency, report)
+	if err := ctx.Err(); err != nil {
+		return summary, err
+	}
 	if notify && (ctx == nil || ctx.Err() == nil) {
 		service.NotifyRootUser(dto.NotifyTypeChannelTest, "通道测试完成", "所有通道测试已完成")
 	}

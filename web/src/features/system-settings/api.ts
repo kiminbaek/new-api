@@ -27,6 +27,7 @@ import type {
   SystemTaskResponse,
   UpdateOptionRequest,
   UpdateOptionResponse,
+  UpdateOptionsBulkRequest,
   UpstreamChannelsResponse,
   UpstreamRatiosResponse,
 } from './types'
@@ -43,6 +44,14 @@ export async function updateSystemOption(request: UpdateOptionRequest) {
   const res = await api.put<UpdateOptionResponse>('/api/option/', request)
   if (!res.data?.success) {
     throw new Error(res.data?.message || 'Failed to update setting')
+  }
+  return res.data
+}
+
+export async function updateSystemOptionsBulk(request: UpdateOptionsBulkRequest) {
+  const res = await api.put<UpdateOptionResponse>('/api/option/bulk', request)
+  if (!res.data?.success) {
+    throw new Error(res.data?.message || 'Failed to update settings')
   }
   return res.data
 }

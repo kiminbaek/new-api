@@ -389,3 +389,15 @@ func taskSubmissionRelayInfo(billing relaycommon.BillingSettler) *relaycommon.Re
 		ChannelMeta: &relaycommon.ChannelMeta{ChannelId: 1, ChannelType: constant.ChannelTypeTaskPlugin},
 	}
 }
+
+func TestTaskRetryExcludesDynamicFailedChannel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(nil)
+	p := &service.RetryParam{}
+	channel := &model.Channel{Id: 17}
+	taskErr := service.TaskErrorWrapper(errors.New("upstream unavailable"), "upstream_error", http.StatusBadGateway)
+
+	require.True(t, shouldRetryTaskRelay(c, channel.Id, taskErr, 1))
+	p.Exclude(channel.Id)
+	assert.True(t, p.Excluded[channel.Id])
+}

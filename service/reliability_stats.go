@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/bytedance/gopkg/util/gopool"
 )
 
@@ -342,10 +343,18 @@ func saveRelayStatsSnapshot() {
 		return
 	}
 	p := statPersistPath()
-	os.MkdirAll(filepath.Dir(p), 0755)
+	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+		common.SysError("[CUSTOM] reliability stats snapshot mkdir failed: " + err.Error())
+		return
+	}
 	tmp := p + ".tmp"
-	os.WriteFile(tmp, data, 0644)
-	os.Rename(tmp, p)
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		common.SysError("[CUSTOM] reliability stats snapshot write failed: " + err.Error())
+		return
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		common.SysError("[CUSTOM] reliability stats snapshot rename failed: " + err.Error())
+	}
 }
 
 func persistLoop() {

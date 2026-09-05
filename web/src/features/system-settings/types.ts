@@ -39,6 +39,10 @@ export type UpdateOptionResponse = {
   message: string
 }
 
+export type UpdateOptionsBulkRequest = {
+  values: Record<string, string>
+}
+
 export type ConfirmPaymentComplianceResponse = {
   success: boolean
   message: string

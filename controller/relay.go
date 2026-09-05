@@ -786,9 +786,46 @@ func executeTaskSubmissionWith(
 		}
 		diagnostics.attempt(retryParam.GetRetry()+1, channel, relayInfo.LockedChannel != nil)
 
+		// Task submissions must obey the same upstream capacity contract as ordinary
+		// relays. A full slot is a local scheduling outcome: do not submit, do not
+		// count it as an upstream failure, and try a different dynamically-selected
+		// channel without consuming the retry budget.
+		channelSetting, _ := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting)
+		upstreamKey := common.GetContextKeyString(c, constant.ContextKeyChannelKey)
+		var permit service.ConcurrencyPermit
+		var fullDimension service.ConcurrencyDimension
+		var admitted bool
+		if channel.ChannelInfo.IsMultiKey && (channelSetting.MaxConcurrency != nil || channelSetting.MaxConcurrencyPerKey != nil || len(channelSetting.ModelConcurrency) > 0) {
+			enabledKeys := channel.GetEnabledKeys()
+			candidates := make([]service.ConcurrencyKeyCandidate, 0, len(enabledKeys))
+			for _, candidate := range enabledKeys {
+				candidates = append(candidates, service.ConcurrencyKeyCandidate{Key: candidate.Key, Index: candidate.Index})
+			}
+			var chosen service.ConcurrencyKeyCandidate
+			permit, chosen, fullDimension, admitted = service.TryAcquireChannelConcurrencyForKeys(channel.Id, relayInfo.OriginModelName, candidates, channelSetting)
+			if admitted {
+				upstreamKey = chosen.Key
+				common.SetContextKey(c, constant.ContextKeyChannelKey, chosen.Key)
+				common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, chosen.Index)
+			}
+		} else {
+			permit, fullDimension, admitted = service.TryAcquireChannelConcurrency(channel.Id, relayInfo.OriginModelName, upstreamKey, channelSetting)
+		}
+		if !admitted {
+			logger.LogInfo(c, fmt.Sprintf("[CUSTOM] task channel #%d capacity full (%s), trying another channel", channel.Id, fullDimension))
+			if relayInfo.LockedChannel != nil {
+				taskErr = service.TaskErrorWrapperLocal(errors.New("task channel capacity is full"), "channel_capacity_full", http.StatusTooManyRequests)
+				break
+			}
+			retryParam.Exclude(channel.Id)
+			retryParam.ResetRetryNextTry()
+			continue
+		}
+
 		addUsedChannel(c, channel.Id)
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
+			permit.Release()
 			stage = "read_body"
 			if common.IsRequestBodyTooLargeError(bodyErr) || errors.Is(bodyErr, common.ErrRequestBodyTooLarge) {
 				taskErr = service.TaskErrorWrapperLocal(bodyErr, "read_request_body_failed", http.StatusRequestEntityTooLarge)
@@ -801,6 +838,9 @@ func executeTaskSubmissionWith(
 
 		stage = "submit"
 		result, taskErr = submit(c, relayInfo)
+		// submit owns the upstream request; release immediately after it returns on
+		// every success, error, and cancellation path.
+		permit.Release()
 		if requestErr := c.Request.Context().Err(); requestErr != nil {
 			diagnostics.cancelled("after_submit", retryParam.GetRetry()+1)
 			taskErr = service.TaskErrorWrapperLocal(requestErr, "request_cancelled", http.StatusRequestTimeout)
@@ -823,6 +863,11 @@ func executeTaskSubmissionWith(
 		diagnostics.attemptFailed(retryParam.GetRetry()+1, channel, taskErr, willRetry)
 		if !willRetry {
 			break
+		}
+		// A retry must not resubmit to the same dynamically-selected channel.
+		// Locked task routes deliberately retain affinity semantics.
+		if relayInfo.LockedChannel == nil {
+			retryParam.Exclude(channel.Id)
 		}
 	}
 

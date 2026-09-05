@@ -422,3 +422,52 @@ func UpdateOption(c *gin.Context) {
 		"message": "",
 	})
 }
+
+// UpdateOptionsBulk applies related reliability/sentinel settings atomically.
+// The route deliberately accepts only the two audited forms' keys so it cannot
+// become a bypass around UpdateOption's specialised validation paths.
+type OptionsBulkUpdateRequest struct {
+	Values map[string]string `json:"values"`
+}
+
+var atomicSettingsOptionKeys = map[string]struct{}{
+	"RetryTimes": {}, "ChannelDisableThreshold": {}, "AutomaticDisableChannelEnabled": {},
+	"SmartAutoDisableEnabled": {}, "AutomaticEnableChannelEnabled": {}, "AutomaticDisableKeywords": {},
+	"AutomaticDisableStatusCodes": {}, "AutomaticRetryStatusCodes": {}, "RelayUserAgent": {},
+	"HealthCheckJitterEnabled": {}, "AutoPriorityEnabled": {}, "AutoPriorityIntervalSec": {},
+	"AutoPriorityMinSamples": {}, "AutoPriorityScale": {}, "AutoPriorityMaxDelta": {},
+	"monitor_setting.auto_test_channel_enabled": {}, "monitor_setting.auto_test_channel_minutes": {},
+	"monitor_setting.channel_test_concurrency": {}, "monitor_setting.channel_test_mode": {},
+	"SentinelEnabled": {}, "SentinelWebhookURL": {}, "SentinelWebhookAuth": {}, "SentinelEmailTo": {}, "SentinelDailyHour": {},
+}
+
+func UpdateOptionsBulk(c *gin.Context) {
+	var request OptionsBulkUpdateRequest
+	if err := common.DecodeJson(c.Request.Body, &request); err != nil || len(request.Values) == 0 {
+		common.ApiErrorMsg(c, "无效的批量设置参数")
+		return
+	}
+	for key, value := range request.Values {
+		if _, allowed := atomicSettingsOptionKeys[key]; !allowed {
+			common.ApiErrorMsg(c, "该设置不支持批量更新: "+key)
+			return
+		}
+		if key == "AutomaticDisableStatusCodes" || key == "AutomaticRetryStatusCodes" {
+			if _, err := operation_setting.ParseHTTPStatusCodeRanges(value); err != nil {
+				common.ApiError(c, err)
+				return
+			}
+		}
+	}
+	if err := model.UpdateOptionsBulk(request.Values); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	keys := make([]string, 0, len(request.Values))
+	for key := range request.Values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	recordManageAudit(c, "option.bulk_update", map[string]interface{}{"keys": keys})
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
+}

@@ -476,3 +476,10 @@ func TestSequentialModelProbeModelFallbacks(t *testing.T) {
 		t.Fatalf("expected test model fallback to remain available")
 	}
 }
+
+func TestRunChannelTestTaskReturnsCancellationInsteadOfSuccess(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := runChannelTestTask(ctx, operation_setting.ChannelTestModeScheduledModels, false, true, nil)
+	require.ErrorIs(t, err, context.Canceled)
+}

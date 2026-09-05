@@ -195,6 +195,7 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			optionRoute.GET("/", controller.GetOptions)
 			optionRoute.PUT("/", controller.UpdateOption)
+			optionRoute.PUT("/bulk", controller.UpdateOptionsBulk)
 			optionRoute.POST("/payment_compliance", controller.ConfirmPaymentCompliance)
 			optionRoute.GET("/channel_affinity_cache", controller.GetChannelAffinityCacheStats)
 			optionRoute.DELETE("/channel_affinity_cache", controller.ClearChannelAffinityCache)
@@ -318,7 +319,7 @@ func SetApiRouter(router *gin.Engine) {
 		publicOverviewRoute := apiRouter.Group("/public")
 		publicOverviewRoute.Use(middleware.CORS())
 		{
-			publicOverviewRoute.GET("/overview", controller.GetPublicOverview)
+			publicOverviewRoute.GET("/overview", middleware.PublicOverviewRateLimit(), controller.GetPublicOverview)
 		}
 		// [CUSTOM] 哨兵测试推送（管理员）
 		sentinelRoute := apiRouter.Group("/sentinel")

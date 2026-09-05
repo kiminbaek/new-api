@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -57,6 +58,7 @@ type RedisConcurrencyPermit struct {
 	stop   chan struct{}
 	done   chan struct{}
 	once   sync.Once
+	lost   atomic.Bool
 }
 
 func redisConcurrencyEnabled(setting dto.ChannelSettings) bool {
@@ -146,7 +148,21 @@ func (p *RedisConcurrencyPermit) keepAlive() {
 		select {
 		case <-ticker.C:
 			now := time.Now().UnixMilli()
-			_, _ = redisConcurrencyRenewScript.Run(context.Background(), common.RDB, p.keys, p.member, now+redisConcurrencyLease.Milliseconds(), now).Result()
+			result, err := redisConcurrencyRenewScript.Run(context.Background(), common.RDB, p.keys, p.member, now+redisConcurrencyLease.Milliseconds(), now).Int()
+			if err != nil || result != 1 {
+				// Do not silently turn a shared capacity limit into a local one. The
+				// request cannot be safely replayed here, so keep retrying until it
+				// finishes while recording the degraded lease exactly once.
+				if p.lost.CompareAndSwap(false, true) {
+					if err != nil {
+						common.SysError("[CUSTOM] redis concurrency lease renewal failed: " + err.Error())
+					} else {
+						common.SysError("[CUSTOM] redis concurrency lease lost before request completed")
+					}
+				}
+			} else {
+				p.lost.Store(false)
+			}
 		case <-p.stop:
 			return
 		}
@@ -160,6 +176,8 @@ func (p *RedisConcurrencyPermit) Release() {
 	p.once.Do(func() {
 		close(p.stop)
 		<-p.done
-		_, _ = redisConcurrencyReleaseScript.Run(context.Background(), common.RDB, p.keys, p.member).Result()
+		if _, err := redisConcurrencyReleaseScript.Run(context.Background(), common.RDB, p.keys, p.member).Result(); err != nil {
+			common.SysError("[CUSTOM] redis concurrency lease release failed; waiting for TTL cleanup: " + err.Error())
+		}
 	})
 }

@@ -14,9 +14,13 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -29,6 +33,9 @@ import (
 const (
 	sentinelDebounceWindow = 24 * time.Hour
 	sentinelHTTPTimeout    = 10 * time.Second
+	// The NAS QQ gateway is the only local default. Other local/private targets
+	// require an explicit SENTINEL_WEBHOOK_ALLOWLIST host[:port] entry.
+	sentinelDefaultLocalWebhook = "127.0.0.1:3019"
 
 	// SentinelEventChannelDown 渠道或模型被自动下线。
 	SentinelEventChannelDown = "channel_down"
@@ -54,9 +61,11 @@ type sentinelDebounceKey struct {
 }
 
 var (
-	sentinelMu        sync.Mutex
-	sentinelLastSent  = map[sentinelDebounceKey]time.Time{}
-	sentinelClient    = &http.Client{Timeout: sentinelHTTPTimeout}
+	sentinelMu       sync.Mutex
+	sentinelLastSent = map[sentinelDebounceKey]time.Time{}
+	// The transport validates the address on every dial, not just while the URL
+	// is parsed. This closes the DNS-rebinding gap between validation and connect.
+	sentinelClient    = &http.Client{Timeout: sentinelHTTPTimeout, Transport: &http.Transport{DialContext: sentinelWebhookDialContext}}
 	sentinelSendEmail = common.SendEmail
 )
 
@@ -199,7 +208,76 @@ func sentinelTestSucceeded(results map[string]SentinelTestResult) bool {
 	return true
 }
 
+func sentinelAllowedHosts() map[string]struct{} {
+	allowed := map[string]struct{}{sentinelDefaultLocalWebhook: {}}
+	for _, item := range strings.Split(os.Getenv("SENTINEL_WEBHOOK_ALLOWLIST"), ",") {
+		if item = strings.TrimSpace(strings.ToLower(item)); item != "" {
+			allowed[item] = struct{}{}
+		}
+	}
+	return allowed
+}
+
+func sentinelAddressAllowed(hostPort string, ips []net.IP) bool {
+	if _, ok := sentinelAllowedHosts()[strings.ToLower(hostPort)]; ok {
+		return true
+	}
+	for _, ip := range ips {
+		if common.IsPrivateIP(ip) || ip.IsUnspecified() {
+			return false
+		}
+	}
+	return len(ips) > 0
+}
+
+func sentinelWebhookAllowed(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
+		return fmt.Errorf("invalid sentinel webhook URL")
+	}
+	hostPort := u.Host
+	if u.Port() == "" {
+		hostPort = net.JoinHostPort(u.Hostname(), map[bool]string{true: "443", false: "80"}[u.Scheme == "https"])
+	}
+	ips, err := net.LookupIP(u.Hostname())
+	if err != nil || len(ips) == 0 {
+		return fmt.Errorf("sentinel webhook host cannot be resolved")
+	}
+	if !sentinelAddressAllowed(hostPort, ips) {
+		return fmt.Errorf("sentinel webhook private address is not allowlisted")
+	}
+	return nil
+}
+
+func sentinelWebhookDialContext(ctx context.Context, network string, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("invalid sentinel webhook dial address")
+	}
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err != nil || len(ips) == 0 {
+		return nil, fmt.Errorf("sentinel webhook host cannot be resolved")
+	}
+	hostPort := net.JoinHostPort(host, port)
+	if !sentinelAddressAllowed(hostPort, ips) {
+		return nil, fmt.Errorf("sentinel webhook private address is not allowlisted")
+	}
+	// Dial the freshly validated address directly so a second resolver lookup
+	// cannot replace it with an internal target after the safety check.
+	dialer := &net.Dialer{}
+	for _, ip := range ips {
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+	}
+	return nil, fmt.Errorf("sentinel webhook connection failed")
+}
+
 func sentinelPostWebhook(cfg SentinelConfig, title string, text string, level string) error {
+	if err := sentinelWebhookAllowed(cfg.WebhookURL); err != nil {
+		return err
+	}
 	body, _ := json.Marshal(map[string]string{"title": title, "text": text, "level": level})
 	req, err := http.NewRequest(http.MethodPost, cfg.WebhookURL, bytes.NewReader(body))
 	if err != nil {

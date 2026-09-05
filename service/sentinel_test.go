@@ -1,14 +1,17 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/QuantumNous/new-api/model"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSummarizeDailyPerfUsesRequestAndSuccessCounters(t *testing.T) {
@@ -57,6 +60,7 @@ func TestSendSentinelTestReportsActualWebhookResult(t *testing.T) {
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 	defer server.Close()
+	t.Setenv("SENTINEL_WEBHOOK_ALLOWLIST", strings.TrimPrefix(server.URL, "http://"))
 	results := SendSentinelTest(SentinelConfig{WebhookURL: server.URL}, "test", "body")
 	assert.False(t, results["webhook"].Success)
 	assert.Contains(t, results["webhook"].Error, "502")
@@ -71,6 +75,7 @@ func TestSendSentinelTestReportsMixedChannelFailure(t *testing.T) {
 	oldSendEmail := sentinelSendEmail
 	sentinelSendEmail = func(string, string, string) error { return errors.New("smtp unavailable") }
 	defer func() { sentinelSendEmail = oldSendEmail }()
+	t.Setenv("SENTINEL_WEBHOOK_ALLOWLIST", strings.TrimPrefix(server.URL, "http://"))
 	results := SendSentinelTest(SentinelConfig{WebhookURL: server.URL, EmailTo: "ops@example.com"}, "test", "body")
 	assert.True(t, results["webhook"].Success)
 	assert.False(t, results["email"].Success)
@@ -84,4 +89,19 @@ func TestFailedSentinelDeliveryReleasesDebounce(t *testing.T) {
 	assert.True(t, claimSentinelDebounce(7, SentinelEventChannelDown, "model-a", now))
 	releaseSentinelDebounce(7, SentinelEventChannelDown, "model-a")
 	assert.True(t, claimSentinelDebounce(7, SentinelEventChannelDown, "model-a", now.Add(time.Second)))
+}
+
+func TestSentinelWebhookBlocksPrivateTargetsUnlessExplicitlyAllowlisted(t *testing.T) {
+	t.Setenv("SENTINEL_WEBHOOK_ALLOWLIST", "")
+	require.Error(t, sentinelWebhookAllowed("http://127.0.0.1:8080/hook"))
+	require.NoError(t, sentinelWebhookAllowed("http://127.0.0.1:3019/api/webui/send"))
+	t.Setenv("SENTINEL_WEBHOOK_ALLOWLIST", "127.0.0.1:8080")
+	require.NoError(t, sentinelWebhookAllowed("http://127.0.0.1:8080/hook"))
+}
+
+func TestSentinelWebhookDialRejectsUnallowlistedPrivateAddress(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := sentinelWebhookDialContext(ctx, "tcp", "127.0.0.1:8080")
+	require.Error(t, err)
 }

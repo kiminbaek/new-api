@@ -171,6 +171,13 @@ func GlobalAPIRateLimit() func(c *gin.Context) {
 	return defNext
 }
 
+// PublicOverviewRateLimit is intentionally independent from the global API
+// toggle: the anonymous aggregate endpoint stays bounded even on instances
+// that disable generic API throttling for relay traffic.
+func PublicOverviewRateLimit() func(c *gin.Context) {
+	return rateLimitFactory(30, 60, "PUBLIC_OVERVIEW")
+}
+
 func CriticalRateLimit() func(c *gin.Context) {
 	if common.CriticalRateLimitEnable {
 		return rateLimitFactory(common.CriticalRateLimitNum, common.CriticalRateLimitDuration, "CT")

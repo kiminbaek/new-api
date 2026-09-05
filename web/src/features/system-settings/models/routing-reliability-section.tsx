@@ -17,7 +17,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useMemo, useRef } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
+import { useMemo, useRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -54,7 +55,7 @@ import {
 import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useResetForm } from '../hooks/use-reset-form'
-import { useUpdateOption } from '../hooks/use-update-option'
+import { updateSystemOptionsBulk } from '../api'
 import { safeNumberFieldProps } from '../utils/numeric-field'
 import { ChannelConcurrencyStatusPanel } from './channel-concurrency-status-panel'
 import { SmartDisableStatusPanel } from './smart-disable-status-panel'
@@ -356,7 +357,8 @@ export function RoutingReliabilitySection({
   const show = (group: RoutingReliabilityGroup) =>
     !groups || groups.includes(group)
   const { t } = useTranslation()
-  const updateOption = useUpdateOption()
+  const queryClient = useQueryClient()
+  const [isSaving, setIsSaving] = useState(false)
   const routingReliabilitySchema = createRoutingReliabilitySchema(t)
   const baselineRef = useRef<NormalizedRoutingReliabilityValues>(
     normalizeDefaults(defaultValues)
@@ -423,15 +425,17 @@ export function RoutingReliabilitySection({
       return
     }
 
-    for (const key of updates) {
-      const value = normalized[key]
-      await updateOption.mutateAsync({
-        key,
-        value,
+    setIsSaving(true)
+    try {
+      await updateSystemOptionsBulk({
+        values: Object.fromEntries(updates.map((key) => [key, String(normalized[key])])),
       })
+      baselineRef.current = normalized
+      await queryClient.invalidateQueries({ queryKey: ['system-options'] })
+      toast.success(t('Settings saved'))
+    } finally {
+      setIsSaving(false)
     }
-
-    baselineRef.current = normalized
   }
 
   return (
@@ -468,7 +472,7 @@ export function RoutingReliabilitySection({
         <SettingsForm onSubmit={form.handleSubmit(onSubmit)}>
           <SettingsPageFormActions
             onSave={form.handleSubmit(onSubmit)}
-            isSaving={updateOption.isPending}
+            isSaving={isSaving}
           />
 
           {show('retry') && (
