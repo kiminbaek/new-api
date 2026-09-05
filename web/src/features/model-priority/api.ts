@@ -14,6 +14,12 @@ export interface ModelPriorityRow {
   confidence: number
   routing_status: 'observe' | 'healthy' | 'canary' | 'quarantined'
   canary_percent: number
+  canary_stage?: number
+  reason?: string
+  disabled_at?: number
+  next_probe_at?: number
+  attempts?: number
+  probing?: boolean
   attribution?: {
     category: string
     confidence: number

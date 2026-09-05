@@ -2318,6 +2318,12 @@ type modelPriorityView struct {
 	RoutingStatus string                   `json:"routing_status"`
 	CanaryPercent int                      `json:"canary_percent"`
 	Attribution   service.FaultAttribution `json:"attribution"`
+	Reason        string                   `json:"reason,omitempty"`
+	DisabledAt    int64                    `json:"disabled_at,omitempty"`
+	NextProbeAt   int64                    `json:"next_probe_at,omitempty"`
+	Attempts      int                      `json:"attempts,omitempty"`
+	Probing       bool                     `json:"probing,omitempty"`
+	CanaryStage   int                      `json:"canary_stage,omitempty"`
 }
 
 // [CUSTOM] GetModelPriorityBoard returns effective priority together with the
@@ -2344,6 +2350,12 @@ func GetModelPriorityBoard(c *gin.Context) {
 		if state, exists := down[fmt.Sprintf("%d|%s", row.ChannelID, row.Model)]; exists {
 			view.Attribution = state.Attribution
 			view.CanaryPercent = state.CanaryPercent
+			view.Reason = state.Attribution.Summary
+			view.DisabledAt = state.DisabledAt
+			view.NextProbeAt = state.NextProbeAt
+			view.Attempts = state.Attempts
+			view.Probing = state.Probing
+			view.CanaryStage = state.CanaryStage
 			if state.CanaryStage > 0 {
 				view.RoutingStatus = "canary"
 			} else {

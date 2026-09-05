@@ -5,7 +5,6 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpDown,
-  CheckCircle2,
   Info,
   Minus,
   RefreshCw,
@@ -41,8 +40,9 @@ import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { getModelPriority, type ModelPriorityRow } from './api'
+import { QuarantineDetailsDialog, RoutingStatusBadge } from './routing-status'
 
-type StatFilter = 'all' | 'neg' | 'pos' | 'adjusted'
+type StatFilter = 'all' | 'neg' | 'pos' | 'adjusted' | 'quarantined' | 'canary'
 
 function deltaTone(delta: number) {
   if (delta < 0) return 'text-destructive'
@@ -85,6 +85,7 @@ export function ModelPriority() {
   const [fChannel, setFChannel] = useState('')
   const [fDelta, setFDelta] = useState('all')
   const [fEnabled, setFEnabled] = useState('all')
+  const [fRouting, setFRouting] = useState('all')
   const [sortBy, setSortBy] = useState<keyof ModelPriorityRow>('model')
   const [sortDir, setSortDir] = useState<1 | -1>(1)
 
@@ -94,6 +95,8 @@ export function ModelPriority() {
       neg: rows.filter((row) => row.delta < 0).length,
       pos: rows.filter((row) => row.delta > 0).length,
       adjusted: rows.filter((row) => row.delta !== 0).length,
+      quarantined: rows.filter((row) => row.routing_status === 'quarantined').length,
+      canary: rows.filter((row) => row.routing_status === 'canary').length,
     }),
     [rows]
   )
@@ -115,6 +118,7 @@ export function ModelPriority() {
       if (fDelta === 'adjusted' && row.delta === 0) return false
       if (fEnabled === 'on' && !row.enabled) return false
       if (fEnabled === 'off' && row.enabled) return false
+      if (fRouting !== 'all' && row.routing_status !== fRouting) return false
       return true
     })
     return [...filteredRows].sort((a, b) => {
@@ -125,7 +129,7 @@ export function ModelPriority() {
       }
       return ((aValue as number) - (bValue as number)) * sortDir
     })
-  }, [rows, fModel, fChannel, fDelta, fEnabled, sortBy, sortDir])
+  }, [rows, fModel, fChannel, fDelta, fEnabled, fRouting, sortBy, sortDir])
 
   const sortColumn = (key: keyof ModelPriorityRow) => {
     if (sortBy === key) {
@@ -137,7 +141,13 @@ export function ModelPriority() {
   }
 
   const applyStatFilter = (filter: StatFilter) => {
+    if (filter === 'quarantined' || filter === 'canary') {
+      setFDelta('all')
+      setFRouting(filter)
+      return
+    }
     setFDelta(filter)
+    setFRouting('all')
   }
 
   const statCards: Array<{
@@ -174,6 +184,14 @@ export function ModelPriority() {
       label: '已调整',
       detail: '算法正在动态干预',
       color: 'text-amber-600',
+    },
+    {
+      key: 'quarantined', value: stats.quarantined, label: '隔离中',
+      detail: '已停止该渠道模型路由', color: 'text-destructive',
+    },
+    {
+      key: 'canary', value: stats.canary, label: 'Canary 恢复',
+      detail: '少量真实流量验证中', color: 'text-violet-600',
     },
   ]
 
@@ -262,18 +280,18 @@ export function ModelPriority() {
             </AlertDescription>
           </Alert>
 
-          <div className='grid grid-cols-2 gap-3 xl:grid-cols-4'>
+          <div className='grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6'>
             {statCards.map((stat) => (
               <button
                 key={stat.key}
                 type='button'
-                aria-pressed={fDelta === stat.key}
+                aria-pressed={stat.key === 'quarantined' || stat.key === 'canary' ? fRouting === stat.key : fRouting === 'all' && fDelta === stat.key}
                 className='focus-visible:ring-ring rounded-xl text-left focus-visible:ring-2 focus-visible:outline-none'
                 onClick={() => applyStatFilter(stat.key)}
               >
                 <Card
                   className={`h-full py-3 transition-colors ${
-                    fDelta === stat.key
+                    (stat.key === 'quarantined' || stat.key === 'canary' ? fRouting === stat.key : fRouting === 'all' && fDelta === stat.key)
                       ? 'border-primary bg-primary/5 ring-primary/20 ring-2'
                       : 'hover:bg-muted/30'
                   }`}
@@ -300,7 +318,7 @@ export function ModelPriority() {
                 <SlidersHorizontal className='size-4' />
                 筛选
               </div>
-              <div className='grid flex-1 grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4'>
+              <div className='grid flex-1 grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-5'>
                 <div className='relative'>
                   <Search className='text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2' />
                   <Input
@@ -330,6 +348,16 @@ export function ModelPriority() {
                     <SelectItem value='pos'>仅升权</SelectItem>
                     <SelectItem value='adjusted'>仅已调整</SelectItem>
                     <SelectItem value='zero'>仅无变化</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Select value={fRouting} onValueChange={(value) => value && setFRouting(value)}>
+                  <SelectTrigger className='w-full'><SelectValue placeholder='路由状态' /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value='all'>全部路由状态</SelectItem>
+                    <SelectItem value='quarantined'>仅看隔离</SelectItem>
+                    <SelectItem value='canary'>仅看 Canary</SelectItem>
+                    <SelectItem value='healthy'>仅看健康</SelectItem>
+                    <SelectItem value='observe'>仅看观察中</SelectItem>
                   </SelectContent>
                 </Select>
                 <Select
@@ -402,11 +430,9 @@ export function ModelPriority() {
                             #{row.channel_id} · {row.channel_name}
                           </div>
                         </div>
-                        <Badge
-                          variant={row.enabled ? 'secondary' : 'destructive'}
-                        >
-                          {row.enabled ? '启用' : '禁用'}
-                        </Badge>
+                        {row.routing_status === 'quarantined' || row.routing_status === 'canary' ? (
+                          <QuarantineDetailsDialog channelName={row.channel_name} rows={[row]} trigger={<button type='button' aria-label={`${row.model} 隔离详情`}><RoutingStatusBadge row={row} /></button>} />
+                        ) : <RoutingStatusBadge row={row} />}
                       </div>
                       <div className='grid grid-cols-4 gap-2 text-center text-xs'>
                         <div>
@@ -492,14 +518,9 @@ export function ModelPriority() {
                         </TableCell>
                         <TableCell>{row.weight}</TableCell>
                         <TableCell>
-                          <Badge
-                            variant={row.enabled ? 'secondary' : 'destructive'}
-                          >
-                            {row.enabled ? (
-                              <CheckCircle2 data-icon='inline-start' />
-                            ) : null}
-                            {row.enabled ? '启用' : '禁用'}
-                          </Badge>
+                          {row.routing_status === 'quarantined' || row.routing_status === 'canary' ? (
+                            <QuarantineDetailsDialog channelName={row.channel_name} rows={[row]} trigger={<button type='button' aria-label={`${row.model} 隔离详情`}><RoutingStatusBadge row={row} /></button>} />
+                          ) : <RoutingStatusBadge row={row} />}
                         </TableCell>
                       </TableRow>
                     ))

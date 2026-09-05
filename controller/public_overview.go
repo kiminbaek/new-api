@@ -14,13 +14,27 @@ import (
 const overviewCacheTTL = 30 * time.Second
 
 var (
-	overviewCacheMu sync.Mutex
-	overviewCache   gin.H
-	overviewCacheAt time.Time
+	overviewCacheMu      sync.Mutex
+	overviewCacheRefresh sync.Mutex
+	overviewCache        gin.H
+	overviewCacheAt      time.Time
 )
 
 // GetPublicOverview [CUSTOM] 公开平台概览（无需鉴权）：核心指标 + 近7日趋势 + 模型实时成功率
 func GetPublicOverview(c *gin.Context) {
+	overviewCacheMu.Lock()
+	if overviewCache != nil && time.Since(overviewCacheAt) < overviewCacheTTL {
+		data := overviewCache
+		overviewCacheMu.Unlock()
+		c.JSON(http.StatusOK, gin.H{"success": true, "data": data})
+		return
+	}
+	overviewCacheMu.Unlock()
+
+	// Only one cold-cache request runs the aggregate queries. Waiters recheck
+	// after acquiring the refresh lock and reuse the freshly populated value.
+	overviewCacheRefresh.Lock()
+	defer overviewCacheRefresh.Unlock()
 	overviewCacheMu.Lock()
 	if overviewCache != nil && time.Since(overviewCacheAt) < overviewCacheTTL {
 		data := overviewCache

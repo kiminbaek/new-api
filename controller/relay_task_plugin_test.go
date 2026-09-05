@@ -390,14 +390,54 @@ func taskSubmissionRelayInfo(billing relaycommon.BillingSettler) *relaycommon.Re
 	}
 }
 
-func TestTaskRetryExcludesDynamicFailedChannel(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	c, _ := gin.CreateTestContext(nil)
-	p := &service.RetryParam{}
-	channel := &model.Channel{Id: 17}
-	taskErr := service.TaskErrorWrapper(errors.New("upstream unavailable"), "upstream_error", http.StatusBadGateway)
+func TestExecuteTaskSubmissionRetriesOnDifferentDynamicChannel(t *testing.T) {
+	events := make([]string, 0, 4)
+	setupTaskSubmissionDatabase(t, true, &events)
+	previousRetries := common.RetryTimes
+	previousSelector := selectChannelForRelay
+	previousRedisEnabled := common.RedisEnabled
+	previousLogConsumeEnabled := common.LogConsumeEnabled
+	common.RetryTimes = 1
+	common.RedisEnabled = false
+	common.LogConsumeEnabled = false
+	t.Cleanup(func() {
+		common.RetryTimes = previousRetries
+		selectChannelForRelay = previousSelector
+		common.RedisEnabled = previousRedisEnabled
+		common.LogConsumeEnabled = previousLogConsumeEnabled
+	})
 
-	require.True(t, shouldRetryTaskRelay(c, channel.Id, taskErr, 1))
-	p.Exclude(channel.Id)
-	assert.True(t, p.Excluded[channel.Id])
+	c := taskSubmissionTestContext()
+	c.Set("channel_id", 17)
+	c.Set("channel_type", constant.ChannelTypeTaskPlugin)
+	c.Set("channel_name", "first")
+	c.Set("channel_key", "first-key")
+	c.Set("auto_ban", false)
+	relayInfo := taskSubmissionRelayInfo(&taskSubmissionTestBilling{events: &events})
+	relayInfo.LockedChannel = nil
+	relayInfo.TaskRelayInfo.LockedChannel = nil
+	relayInfo.ChannelMeta = nil
+
+	selectorCalls := 0
+	selectChannelForRelay = func(param *service.RetryParam) (*model.Channel, string, error) {
+		selectorCalls++
+		require.True(t, param.Excluded[17], "failed channel must be excluded before retry selection")
+		return &model.Channel{Id: 18, Type: constant.ChannelTypeTaskPlugin, Name: "second", Key: "second-key", Models: "plugin-model", Group: "default", Status: common.ChannelStatusEnabled}, "default", nil
+	}
+
+	attempted := make([]int, 0, 2)
+	outcome, taskErr := executeTaskSubmissionWith(c, relayInfo, func(c *gin.Context, info *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
+		channelID := c.GetInt("channel_id")
+		info.ChannelMeta = &relaycommon.ChannelMeta{ChannelId: channelID, ChannelType: c.GetInt("channel_type")}
+		attempted = append(attempted, channelID)
+		if len(attempted) == 1 {
+			return nil, service.TaskErrorWrapper(errors.New("upstream unavailable"), "upstream_error", http.StatusBadGateway)
+		}
+		return &relay.TaskSubmitResult{UpstreamTaskID: "upstream-ok", Platform: constant.TaskPlatform("plugin")}, nil
+	})
+
+	require.Nil(t, taskErr)
+	require.NotNil(t, outcome)
+	assert.Equal(t, []int{17, 18}, attempted)
+	assert.Equal(t, 1, selectorCalls)
 }

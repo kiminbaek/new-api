@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -273,8 +274,14 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			continue
 		}
 
+		parentRequestCtx := c.Request.Context()
+		attemptCtx, cancelAttempt := context.WithCancel(parentRequestCtx)
+		c.Request = c.Request.WithContext(attemptCtx)
+		permit.BindCancel(cancelAttempt)
 		addUsedChannel(c, channel.Id)
 		if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
+			cancelAttempt()
+			c.Request = c.Request.WithContext(parentRequestCtx)
 			permit.Release()
 			newAPIError = billingErr
 			break
@@ -282,6 +289,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
+			cancelAttempt()
+			c.Request = c.Request.WithContext(parentRequestCtx)
 			permit.Release()
 			// Ensure consistent 413 for oversized bodies even when error occurs later (e.g., retry path)
 			if common.IsRequestBodyTooLargeError(bodyErr) || errors.Is(bodyErr, common.ErrRequestBodyTooLarge) {
@@ -305,7 +314,13 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		// Helpers return only after the upstream response body/stream has completed.
 		// Release here keeps streaming requests counted for their full lifetime.
+		cancelAttempt()
+		c.Request = c.Request.WithContext(parentRequestCtx)
 		permit.Release()
+		lostPermit := permit.Lost()
+		if lostPermit {
+			newAPIError = types.NewErrorWithStatusCode(errors.New("shared concurrency lease lost"), types.ErrorCodeBadResponseStatusCode, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
+		}
 
 		if newAPIError == nil {
 			service.RecordRelaySuccess(channel.Id, relayInfo.OriginModelName) // [CUSTOM] 需求4
@@ -429,6 +444,8 @@ func fastTokenCountMetaForPricing(request dto.Request) *types.TokenCountMeta {
 	return meta
 }
 
+var selectChannelForRelay = service.CacheGetRandomSatisfiedChannel
+
 func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError) {
 	if info.ChannelMeta == nil && len(retryParam.Excluded) == 0 {
 		autoBan := c.GetBool("auto_ban")
@@ -443,7 +460,7 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 			AutoBan: &autoBanInt,
 		}, nil
 	}
-	channel, selectGroup, err := service.CacheGetRandomSatisfiedChannel(retryParam)
+	channel, selectGroup, err := selectChannelForRelay(retryParam)
 	if err != nil {
 		return nil, types.NewError(fmt.Errorf("获取分组 %s 下模型 %s 的可用渠道失败（retry）: %s", selectGroup, info.OriginModelName, err.Error()), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
@@ -822,9 +839,15 @@ func executeTaskSubmissionWith(
 			continue
 		}
 
+		parentRequestCtx := c.Request.Context()
+		attemptCtx, cancelAttempt := context.WithCancel(parentRequestCtx)
+		c.Request = c.Request.WithContext(attemptCtx)
+		permit.BindCancel(cancelAttempt)
 		addUsedChannel(c, channel.Id)
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
+			cancelAttempt()
+			c.Request = c.Request.WithContext(parentRequestCtx)
 			permit.Release()
 			stage = "read_body"
 			if common.IsRequestBodyTooLargeError(bodyErr) || errors.Is(bodyErr, common.ErrRequestBodyTooLarge) {
@@ -838,10 +861,16 @@ func executeTaskSubmissionWith(
 
 		stage = "submit"
 		result, taskErr = submit(c, relayInfo)
-		// submit owns the upstream request; release immediately after it returns on
-		// every success, error, and cancellation path.
+		requestErr := attemptCtx.Err()
+		cancelAttempt()
+		c.Request = c.Request.WithContext(parentRequestCtx)
+		// Release waits for the keepalive goroutine, so Lost is stable afterwards.
 		permit.Release()
-		if requestErr := c.Request.Context().Err(); requestErr != nil {
+		lostPermit := permit.Lost()
+		if lostPermit {
+			taskErr = service.TaskErrorWrapperLocal(errors.New("shared concurrency lease lost"), "channel_capacity_lease_lost", http.StatusServiceUnavailable)
+		}
+		if requestErr != nil && !lostPermit {
 			diagnostics.cancelled("after_submit", retryParam.GetRetry()+1)
 			taskErr = service.TaskErrorWrapperLocal(requestErr, "request_cancelled", http.StatusRequestTimeout)
 			break

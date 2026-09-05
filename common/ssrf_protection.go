@@ -94,6 +94,11 @@ var privateIPv6Nets = func() []net.IPNet {
 }()
 
 // isPrivateIP 检查IP是否为私有/保留/特殊用途地址
+// IsNonPublicIP reports addresses that must not be reached by protected outbound clients.
+// It includes loopback, RFC1918, CGNAT, link-local, documentation, multicast,
+// unspecified and IPv6 ULA ranges maintained by the central SSRF policy.
+func IsNonPublicIP(ip net.IP) bool { return isPrivateIP(ip) }
+
 func isPrivateIP(ip net.IP) bool {
 	if ip == nil {
 		return true

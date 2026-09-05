@@ -65,7 +65,11 @@ var (
 	sentinelLastSent = map[sentinelDebounceKey]time.Time{}
 	// The transport validates the address on every dial, not just while the URL
 	// is parsed. This closes the DNS-rebinding gap between validation and connect.
-	sentinelClient    = &http.Client{Timeout: sentinelHTTPTimeout, Transport: &http.Transport{DialContext: sentinelWebhookDialContext}}
+	sentinelClient = &http.Client{
+		Timeout:       sentinelHTTPTimeout,
+		Transport:     &http.Transport{DialContext: sentinelWebhookDialContext},
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	sentinelSendEmail = common.SendEmail
 )
 
@@ -223,7 +227,7 @@ func sentinelAddressAllowed(hostPort string, ips []net.IP) bool {
 		return true
 	}
 	for _, ip := range ips {
-		if common.IsPrivateIP(ip) || ip.IsUnspecified() {
+		if common.IsNonPublicIP(ip) {
 			return false
 		}
 	}

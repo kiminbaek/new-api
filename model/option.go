@@ -1,8 +1,10 @@
 package model
 
 import (
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -16,6 +18,8 @@ import (
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"gorm.io/gorm"
 )
+
+var optionBulkUpdateMu sync.Mutex
 
 type Option struct {
 	Key   string `json:"key" gorm:"primaryKey"`
@@ -248,6 +252,8 @@ func validateOptionValue(key string, value string) error {
 }
 
 func UpdateOption(key string, value string) error {
+	optionBulkUpdateMu.Lock()
+	defer optionBulkUpdateMu.Unlock()
 	if err := validateOptionValue(key, value); err != nil {
 		return err
 	}
@@ -276,6 +282,8 @@ func UpdateOption(key string, value string) error {
 // is touched — safe for callers that must commit a set of related options
 // atomically (e.g. payment gateway binding).
 func UpdateOptionsBulk(values map[string]string) error {
+	optionBulkUpdateMu.Lock()
+	defer optionBulkUpdateMu.Unlock()
 	if len(values) == 0 {
 		return nil
 	}
@@ -300,8 +308,13 @@ func UpdateOptionsBulk(values map[string]string) error {
 	if err != nil {
 		return err
 	}
-	for k, v := range values {
-		if err := updateOptionMap(k, v); err != nil {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if err := updateOptionMap(key, values[key]); err != nil {
 			return err
 		}
 	}

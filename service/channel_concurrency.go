@@ -39,6 +39,8 @@ type concurrencyRequirement struct {
 
 type ConcurrencyPermit interface {
 	Release()
+	BindCancel(func())
+	Lost() bool
 }
 
 // ChannelConcurrencyPermit owns one local in-flight slot across every enabled
@@ -48,6 +50,9 @@ type ChannelConcurrencyPermit struct {
 	keys    []string
 	once    sync.Once
 }
+
+func (p *ChannelConcurrencyPermit) BindCancel(func()) {}
+func (p *ChannelConcurrencyPermit) Lost() bool        { return false }
 
 func (p *ChannelConcurrencyPermit) Release() {
 	if p == nil || p.manager == nil {

@@ -1290,11 +1290,11 @@ func runChannelTestTask(ctx context.Context, mode string, notify bool, isSchedul
 		return mode != operation_setting.ChannelTestModePassiveRecovery
 	}
 	concurrency := operation_setting.GetMonitorSetting().ChannelTestConcurrency
-	recordChannelTestRun(selected)
 	summary := performChannelTests(ctx, selected, testUserID, allowDisableFn, concurrency, report)
 	if err := ctx.Err(); err != nil {
 		return summary, err
 	}
+	recordChannelTestRun(selected)
 	if notify && (ctx == nil || ctx.Err() == nil) {
 		service.NotifyRootUser(dto.NotifyTypeChannelTest, "通道测试完成", "所有通道测试已完成")
 	}

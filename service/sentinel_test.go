@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -104,4 +105,13 @@ func TestSentinelWebhookDialRejectsUnallowlistedPrivateAddress(t *testing.T) {
 	defer cancel()
 	_, err := sentinelWebhookDialContext(ctx, "tcp", "127.0.0.1:8080")
 	require.Error(t, err)
+}
+
+func TestSentinelWebhookRejectsAllNonPublicRanges(t *testing.T) {
+	t.Setenv("SENTINEL_WEBHOOK_ALLOWLIST", "")
+	for _, raw := range []string{"100.64.0.1", "198.18.0.1", "fc00::1", "2001:db8::1"} {
+		ip := net.ParseIP(raw)
+		require.NotNil(t, ip)
+		require.False(t, sentinelAddressAllowed(net.JoinHostPort(raw, "8080"), []net.IP{ip}), raw)
+	}
 }

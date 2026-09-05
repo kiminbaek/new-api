@@ -52,6 +52,7 @@ import {
   getModelPriority,
   type ModelPriorityRow,
 } from '@/features/model-priority/api'
+import { QuarantineDetailsDialog } from '@/features/model-priority/routing-status'
 import { toIntlLocale } from '@/i18n/languages'
 import {
   formatCurrencyFromUSD,
@@ -194,18 +195,65 @@ function SmartRoutingCell({
   const isolated = channelRows.filter(
     (row) => row.routing_status === 'quarantined'
   ).length
-  const canary = channelRows.filter((row) => row.routing_status === 'canary')
+  const canary = channelRows.filter(
+    (row) => row.routing_status === 'canary'
+  ).length
+  const affected = isolated + canary
   const priorities = channelRows.map((row) => row.eff_priority)
   const min = Math.min(...priorities)
   const max = Math.max(...priorities)
   const label = min === max ? String(min) : `${min}–${max}`
   const detail = channelRows
-    .map(
-      (row) =>
-        `${row.model}: ${row.base_priority}→${row.eff_priority}, ${Math.round(row.health_score)}/100${row.routing_status === 'canary' ? `, Canary ${row.canary_percent}%` : ''}`
-    )
+    .map((row) => {
+      const state =
+        row.routing_status === 'quarantined'
+          ? `, 已隔离：${row.reason || row.attribution?.summary || '原因未记录'}`
+          : row.routing_status === 'canary'
+            ? `, Canary ${row.canary_percent}%`
+            : ''
+      return `${row.model}: ${row.base_priority}→${row.eff_priority}, ${Math.round(row.health_score)}/100${state}`
+    })
     .join('\n')
-
+  const content = (
+    <>
+      <span className='flex items-center gap-1 text-sm font-semibold tabular-nums'>
+        <Activity className='size-3.5 text-blue-500' />
+        {label}
+      </span>
+      <span className='flex flex-wrap gap-1 text-[11px]'>
+        {down > 0 ? <Badge variant='destructive'>↓{down}</Badge> : null}
+        {up > 0 ? <Badge variant='secondary'>↑{up}</Badge> : null}
+        {isolated > 0 ? (
+          <Badge variant='destructive'>
+            {t('Quarantined')} {isolated}
+          </Badge>
+        ) : null}
+        {canary > 0 ? <Badge variant='outline'>Canary {canary}</Badge> : null}
+        {down + up + affected === 0 ? (
+          <span className='text-muted-foreground'>
+            {channelRows.length} {t('models')}
+          </span>
+        ) : null}
+      </span>
+    </>
+  )
+  if (affected > 0) {
+    return (
+      <QuarantineDetailsDialog
+        channelName={channel.name}
+        rows={channelRows}
+        trigger={
+          <button
+            type='button'
+            className='hover:bg-muted flex min-w-32 flex-col gap-1 rounded-md px-2 py-1 text-left'
+            aria-label={`${channel.name} 隔离详情，共 ${affected} 个模型`}
+          >
+            {content}
+          </button>
+        }
+      />
+    )
+  }
   return (
     <Tooltip>
       <TooltipTrigger
@@ -216,27 +264,7 @@ function SmartRoutingCell({
           />
         }
       >
-        <span className='flex items-center gap-1 text-sm font-semibold tabular-nums'>
-          <Activity className='size-3.5 text-blue-500' />
-          {label}
-        </span>
-        <span className='flex flex-wrap gap-1 text-[11px]'>
-          {down > 0 ? <Badge variant='destructive'>↓{down}</Badge> : null}
-          {up > 0 ? <Badge variant='secondary'>↑{up}</Badge> : null}
-          {isolated > 0 ? (
-            <Badge variant='destructive'>
-              {t('Quarantined')} {isolated}
-            </Badge>
-          ) : null}
-          {canary.length > 0 ? (
-            <Badge variant='outline'>Canary {canary.length}</Badge>
-          ) : null}
-          {down + up + isolated + canary.length === 0 ? (
-            <span className='text-muted-foreground'>
-              {channelRows.length} {t('models')}
-            </span>
-          ) : null}
-        </span>
+        {content}
       </TooltipTrigger>
       <TooltipContent className='max-w-md font-mono text-xs whitespace-pre-line'>
         {detail}

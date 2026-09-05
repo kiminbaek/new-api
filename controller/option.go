@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -430,6 +431,50 @@ type OptionsBulkUpdateRequest struct {
 	Values map[string]string `json:"values"`
 }
 
+func validateAtomicSetting(key, value string) error {
+	parseInt := func(min, max int) error {
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || n < min || n > max {
+			return fmt.Errorf("%s 必须在 %d 到 %d 之间", key, min, max)
+		}
+		return nil
+	}
+	switch key {
+	case "AutomaticDisableChannelEnabled", "SmartAutoDisableEnabled", "AutomaticEnableChannelEnabled", "HealthCheckJitterEnabled", "AutoPriorityEnabled", "monitor_setting.auto_test_channel_enabled", "SentinelEnabled":
+		if value != "true" && value != "false" {
+			return fmt.Errorf("%s 必须是 true 或 false", key)
+		}
+		return nil
+	case "ChannelDisableThreshold":
+		n, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil || math.IsNaN(n) || math.IsInf(n, 0) || n < 0 {
+			return fmt.Errorf("ChannelDisableThreshold 必须是非负有限数字")
+		}
+		return nil
+	case "RetryTimes":
+		return parseInt(0, 10)
+	case "AutoPriorityIntervalSec":
+		return parseInt(30, 86400)
+	case "AutoPriorityMinSamples", "AutoPriorityScale":
+		return parseInt(1, 10000)
+	case "AutoPriorityMaxDelta":
+		return parseInt(1, 100000)
+	case "monitor_setting.auto_test_channel_minutes":
+		return parseInt(1, 525600)
+	case "monitor_setting.channel_test_concurrency":
+		return parseInt(1, 32)
+	case "SentinelDailyHour":
+		return parseInt(0, 23)
+	case "monitor_setting.channel_test_mode":
+		switch value {
+		case operation_setting.ChannelTestModeScheduledAll, operation_setting.ChannelTestModeScheduledModels, operation_setting.ChannelTestModeAutoBanOnly, operation_setting.ChannelTestModePassiveRecovery:
+			return nil
+		}
+		return fmt.Errorf("无效的渠道检测模式")
+	}
+	return nil
+}
+
 var atomicSettingsOptionKeys = map[string]struct{}{
 	"RetryTimes": {}, "ChannelDisableThreshold": {}, "AutomaticDisableChannelEnabled": {},
 	"SmartAutoDisableEnabled": {}, "AutomaticEnableChannelEnabled": {}, "AutomaticDisableKeywords": {},
@@ -450,6 +495,10 @@ func UpdateOptionsBulk(c *gin.Context) {
 	for key, value := range request.Values {
 		if _, allowed := atomicSettingsOptionKeys[key]; !allowed {
 			common.ApiErrorMsg(c, "该设置不支持批量更新: "+key)
+			return
+		}
+		if err := validateAtomicSetting(key, value); err != nil {
+			common.ApiError(c, err)
 			return
 		}
 		if key == "AutomaticDisableStatusCodes" || key == "AutomaticRetryStatusCodes" {

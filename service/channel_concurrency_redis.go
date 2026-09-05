@@ -42,23 +42,24 @@ return 1
 var redisConcurrencyRenewScript = redis.NewScript(`
 local expiry = tonumber(ARGV[2])
 for i = 1, #KEYS do
-  if redis.call('ZSCORE', KEYS[i], ARGV[1]) then
-    redis.call('ZADD', KEYS[i], expiry, ARGV[1])
-    redis.call('PEXPIRE', KEYS[i], math.max(expiry - tonumber(ARGV[3]) + 5000, 5000))
-  else
-    return 0
-  end
+  if not redis.call('ZSCORE', KEYS[i], ARGV[1]) then return 0 end
+end
+for i = 1, #KEYS do
+  redis.call('ZADD', KEYS[i], expiry, ARGV[1])
+  redis.call('PEXPIRE', KEYS[i], math.max(expiry - tonumber(ARGV[3]) + 5000, 5000))
 end
 return 1
 `)
 
 type RedisConcurrencyPermit struct {
-	keys   []string
-	member string
-	stop   chan struct{}
-	done   chan struct{}
-	once   sync.Once
-	lost   atomic.Bool
+	keys     []string
+	member   string
+	stop     chan struct{}
+	done     chan struct{}
+	once     sync.Once
+	lost     atomic.Bool
+	cancelMu sync.Mutex
+	cancel   func()
 }
 
 func redisConcurrencyEnabled(setting dto.ChannelSettings) bool {
@@ -134,6 +135,30 @@ func tryAcquireRedisConcurrency(channelID int, model, upstreamKey string, settin
 	return permit, "", true, nil
 }
 
+func (p *RedisConcurrencyPermit) BindCancel(cancel func()) {
+	if p == nil || cancel == nil {
+		return
+	}
+	p.cancelMu.Lock()
+	p.cancel = cancel
+	lost := p.lost.Load()
+	p.cancelMu.Unlock()
+	if lost {
+		cancel()
+	}
+}
+
+func (p *RedisConcurrencyPermit) Lost() bool { return p != nil && p.lost.Load() }
+
+func (p *RedisConcurrencyPermit) cancelRequest() {
+	p.cancelMu.Lock()
+	cancel := p.cancel
+	p.cancelMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 func (p *RedisConcurrencyPermit) keepAlive() {
 	if p == nil || len(p.keys) == 0 {
 		if p != nil && p.done != nil {
@@ -154,14 +179,13 @@ func (p *RedisConcurrencyPermit) keepAlive() {
 				// request cannot be safely replayed here, so keep retrying until it
 				// finishes while recording the degraded lease exactly once.
 				if p.lost.CompareAndSwap(false, true) {
+					p.cancelRequest()
 					if err != nil {
 						common.SysError("[CUSTOM] redis concurrency lease renewal failed: " + err.Error())
 					} else {
 						common.SysError("[CUSTOM] redis concurrency lease lost before request completed")
 					}
 				}
-			} else {
-				p.lost.Store(false)
 			}
 		case <-p.stop:
 			return
