@@ -45,6 +45,7 @@ import {
   FormMessage,
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
+import { api } from '@/lib/api'
 
 import {
   SettingsForm,
@@ -142,10 +143,10 @@ export function SentinelSection({ defaultValues }: SentinelSectionProps) {
     setIsTesting(true)
     setTestResults(null)
     try {
-      const res = await fetch('/api/sentinel/test', { method: 'POST' })
-      const data = await res.json()
-      setTestResults(data.channels ?? null)
-      if (data.success) {
+      const res = await api.post('/api/sentinel/test')
+      const data = res.data
+      setTestResults(data?.channels ?? null)
+      if (data?.success) {
         toast.success(t('Test notification sent — check your channel'))
       } else {
         toast.error(data.message || t('Test failed'))
