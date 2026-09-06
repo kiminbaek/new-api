@@ -32,3 +32,17 @@ func TestPrepareRetryDoesNotExcludeWhenRetryForbidden(t *testing.T) {
 	assert.False(t, prepareRetryAfterFailure(c, p, ch, err, 1))
 	assert.Empty(t, p.Excluded)
 }
+
+func TestPrepareRetryKeepsFirstTokenTimeoutRetryable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(nil)
+	p := &service.RetryParam{}
+	ch := &model.Channel{Id: 19}
+	// A first-token timeout is represented as a zero-output 502. It must use
+	// the normal retry path so a virtual group can advance to its next member.
+	err := types.NewOpenAIError(assert.AnError, types.ErrorCodeBadResponse, http.StatusBadGateway)
+
+	assert.True(t, prepareRetryAfterFailure(c, p, ch, err, 1))
+	assert.True(t, p.Excluded[19])
+	assert.False(t, types.IsSkipRetryError(err))
+}

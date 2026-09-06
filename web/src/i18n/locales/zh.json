@@ -3556,6 +3556,8 @@
     "Pick a date": "选择日期",
     "Pick or create both a store and a product before saving.": "保存前请同时选择或创建店铺和产品。",
     "Ping Interval (seconds)": "Ping 间隔（秒）",
+    "First Token Timeout (seconds)": "首字超时（秒）",
+    "Retry another channel or virtual-group member when an upstream stream sends no SSE data before this deadline. Set 0 to disable.": "上游流在此时间内未发送任何 SSE 数据时，自动尝试其他渠道或虚拟分组成员；设为 0 可关闭。",
     "Plan": "套餐",
     "Plan Name": "套餐名称",
     "Plan Price": "套餐价格",

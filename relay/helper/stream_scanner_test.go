@@ -453,6 +453,89 @@ func TestStreamScannerHandler_StreamStatus_HandlerDone(t *testing.T) {
 	assert.False(t, info.StreamStatus.HasErrors())
 }
 
+func TestStreamScannerHandler_FirstTokenTimeout(t *testing.T) {
+	// Not parallel: changes process-wide general settings.
+	setting := operation_setting.GetGeneralSetting()
+	oldFirstTokenTimeout := setting.FirstTokenTimeoutSeconds
+	oldStreamingTimeout := constant.StreamingTimeout
+	setting.FirstTokenTimeoutSeconds = 1
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() {
+		setting.FirstTokenTimeoutSeconds = oldFirstTokenTimeout
+		constant.StreamingTimeout = oldStreamingTimeout
+	})
+
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}}
+
+	StreamScannerHandler(c, &http.Response{Body: pr}, info, func(data string, sr *StreamResult) {})
+
+	require.NotNil(t, info.StreamStatus)
+	assert.Equal(t, relaycommon.StreamEndReasonFirstTokenTimeout, info.StreamStatus.EndReason)
+	assert.Zero(t, info.ReceivedResponseCount)
+	err := StreamOutcomeError(info)
+	require.NotNil(t, err)
+	assert.Equal(t, http.StatusBadGateway, err.StatusCode)
+	assert.False(t, types.IsSkipRetryError(err), "zero-output first-token timeout must remain retryable")
+}
+
+func TestStreamScannerHandler_FirstTokenTimeoutStopsAfterAcceptedData(t *testing.T) {
+	// Not parallel: changes process-wide general settings.
+	setting := operation_setting.GetGeneralSetting()
+	oldFirstTokenTimeout := setting.FirstTokenTimeoutSeconds
+	setting.FirstTokenTimeoutSeconds = 1
+	t.Cleanup(func() { setting.FirstTokenTimeoutSeconds = oldFirstTokenTimeout })
+
+	pr, pw := io.Pipe()
+	go func() {
+		fmt.Fprint(pw, "data: {\"id\":1}\n")
+		time.Sleep(1200 * time.Millisecond)
+		fmt.Fprint(pw, "data: [DONE]\n")
+		_ = pw.Close()
+	}()
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}}
+
+	StreamScannerHandler(c, &http.Response{Body: pr}, info, func(data string, sr *StreamResult) {})
+
+	require.NotNil(t, info.StreamStatus)
+	assert.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason)
+	assert.Equal(t, 1, info.ReceivedResponseCount)
+}
+
+func TestStreamScannerHandler_FirstTokenTimeoutCanBeDisabled(t *testing.T) {
+	// Not parallel: changes process-wide general settings.
+	setting := operation_setting.GetGeneralSetting()
+	oldFirstTokenTimeout := setting.FirstTokenTimeoutSeconds
+	setting.FirstTokenTimeoutSeconds = 0
+	t.Cleanup(func() { setting.FirstTokenTimeoutSeconds = oldFirstTokenTimeout })
+
+	pr, pw := io.Pipe()
+	go func() {
+		time.Sleep(1200 * time.Millisecond)
+		fmt.Fprint(pw, "data: {\"id\":1}\ndata: [DONE]\n")
+		_ = pw.Close()
+	}()
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}}
+
+	StreamScannerHandler(c, &http.Response{Body: pr}, info, func(data string, sr *StreamResult) {})
+
+	require.NotNil(t, info.StreamStatus)
+	assert.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason)
+	assert.Equal(t, 1, info.ReceivedResponseCount)
+}
+
 func TestStreamScannerHandler_StreamStatus_Timeout(t *testing.T) {
 	// Not parallel: modifies global constant.StreamingTimeout
 	oldTimeout := constant.StreamingTimeout

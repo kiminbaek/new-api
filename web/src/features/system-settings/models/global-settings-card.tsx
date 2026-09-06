@@ -96,6 +96,7 @@ const schema = z.object({
   general_setting: z.object({
     ping_interval_enabled: z.boolean(),
     ping_interval_seconds: z.coerce.number().min(1),
+    first_token_timeout_seconds: z.coerce.number().int().min(0).max(600),
   }),
 })
 
@@ -108,6 +109,7 @@ type FlatGlobalModelSettings = {
   'global.chat_completions_to_responses_policy': string
   'general_setting.ping_interval_enabled': boolean
   'general_setting.ping_interval_seconds': number
+  'general_setting.first_token_timeout_seconds': number
 }
 
 const flattenGlobalValues = (
@@ -127,6 +129,8 @@ const flattenGlobalValues = (
     values.general_setting.ping_interval_enabled,
   'general_setting.ping_interval_seconds':
     values.general_setting.ping_interval_seconds,
+  'general_setting.first_token_timeout_seconds':
+    values.general_setting.first_token_timeout_seconds,
 })
 
 function normalizeJsonText(value: string, fallback: string) {
@@ -367,6 +371,39 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
                 <FormDescription>
                   {t(
                     'Recommended to keep this high to avoid upstream throttling.'
+                  )}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='general_setting.first_token_timeout_seconds'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>{t('First Token Timeout (seconds)')}</FormLabel>
+                <FormControl>
+                  <Input
+                    type='number'
+                    min={0}
+                    max={600}
+                    className='w-24'
+                    value={
+                      field.value === undefined || field.value === null
+                        ? ''
+                        : String(field.value)
+                    }
+                    onChange={(event) => field.onChange(event.target.value)}
+                    onBlur={field.onBlur}
+                    name={field.name}
+                    ref={field.ref}
+                  />
+                </FormControl>
+                <FormDescription>
+                  {t(
+                    'Retry another channel or virtual-group member when an upstream stream sends no SSE data before this deadline. Set 0 to disable.'
                   )}
                 </FormDescription>
                 <FormMessage />
