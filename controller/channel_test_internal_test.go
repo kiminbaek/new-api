@@ -483,3 +483,15 @@ func TestRunChannelTestTaskReturnsCancellationInsteadOfSuccess(t *testing.T) {
 	_, err := runChannelTestTask(ctx, operation_setting.ChannelTestModeScheduledModels, false, true, nil)
 	require.ErrorIs(t, err, context.Canceled)
 }
+
+func TestFormatModelProbeReportOnlyIncludesFailures(t *testing.T) {
+	report := formatModelProbeReport([]modelProbeResult{
+		{ChannelID: 1, ChannelName: "healthy", Model: "ok-model", Success: true},
+		{ChannelID: 2, ChannelName: "broken", Model: "bad-model", Success: false, Reason: "模型不存在", Suggestion: "从渠道模型列表移除"},
+	})
+	assert.NotContains(t, report, "ok-model")
+	assert.Contains(t, report, "渠道 broken (#2)")
+	assert.Contains(t, report, "模型：bad-model")
+	assert.Contains(t, report, "问题：模型不存在")
+	assert.Contains(t, report, "建议：从渠道模型列表移除")
+}

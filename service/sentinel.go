@@ -450,9 +450,6 @@ func summarizeDailyPerf(rows []model.PerfMetricSummary, worstLimit int) (total i
 
 func buildAndSendDailyReport() {
 	var b strings.Builder
-	b.WriteString("📊 new-api 每日一报\n")
-	b.WriteString(strings.Repeat("─", 24) + "\n")
-
 	// perf_metrics records both successes and failures regardless of ERROR_LOG_ENABLED.
 	yesterdayEnd := time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.Now().Location())
 	yesterdayStart := yesterdayEnd.AddDate(0, 0, -1)

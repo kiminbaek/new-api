@@ -1225,17 +1225,22 @@ func formatModelProbeReport(results []modelProbeResult) string {
 	if len(results) == 0 {
 		return "本轮没有可检测的渠道模型。"
 	}
+	failed := make([]modelProbeResult, 0)
+	for _, item := range results {
+		if !item.Success {
+			failed = append(failed, item)
+		}
+	}
+	if len(failed) == 0 {
+		return "所有检测项均通过。"
+	}
 	var b strings.Builder
-	for index, item := range results {
-		if b.Len() > 7000 {
-			fmt.Fprintf(&b, "\n其余 %d 个模型结果已省略，请在系统任务详情查看完整结果。\n", len(results)-index)
+	for index, item := range failed {
+		if b.Len() > 6000 {
+			fmt.Fprintf(&b, "\n其余 %d 项异常已省略，请在系统任务详情查看完整结果。", len(failed)-index)
 			break
 		}
-		status := "通过"
-		if !item.Success {
-			status = "异常"
-		}
-		fmt.Fprintf(&b, "\n- 渠道：%s (#%d)\n  模型：%s\n  状态：%s，耗时 %dms\n  原因：%s\n  建议：%s\n", item.ChannelName, item.ChannelID, item.Model, status, item.ElapsedMS, item.Reason, item.Suggestion)
+		fmt.Fprintf(&b, "\n- 渠道 %s (#%d)\n  模型：%s\n  问题：%s\n  建议：%s\n", item.ChannelName, item.ChannelID, item.Model, item.Reason, item.Suggestion)
 	}
 	return b.String()
 }
@@ -1277,8 +1282,10 @@ func runChannelTestTask(ctx context.Context, mode string, notify bool, isSchedul
 		}
 		recordChannelTestRun(selected)
 		if notify && (ctx == nil || ctx.Err() == nil) {
-			content := fmt.Sprintf("本轮按渠道×模型顺序巡检完成：共 %d 个模型，成功 %d，异常 %d。%s", summary.Tested, summary.Succeeded, summary.Failed, formatModelProbeReport(probes))
-			service.NotifyRootUser(dto.NotifyTypeChannelTest, "模型巡检完成", content)
+			content := fmt.Sprintf("本轮按渠道×模型顺序巡检完成：共 %d 项，成功 %d，异常 %d。%s", summary.Tested, summary.Succeeded, summary.Failed, formatModelProbeReport(probes))
+			// Sentinel is the production QQ delivery path. NotifyRootUser uses a
+			// different user-webhook payload and must not be used for this report.
+			service.EmitSentinel("channel_test", -1, "scheduled_models", "模型巡检结果", content)
 		}
 		return summary, nil
 	}
