@@ -58,6 +58,23 @@ func UpsertPerfMetric(metric *PerfMetric) error {
 	}).Create(metric).Error
 }
 
+// ReplacePerfMetric stores a complete cross-instance bucket snapshot. Unlike
+// UpsertPerfMetric it is idempotent, so a Redis-backed bucket can be retried
+// after a crash without double-counting the same samples.
+func ReplacePerfMetric(metric *PerfMetric) error {
+	if metric == nil || metric.RequestCount == 0 {
+		return nil
+	}
+	return DB.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "model_name"}, {Name: "group"}, {Name: "bucket_ts"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"request_count", "success_count", "total_latency_ms", "ttft_sum_ms", "ttft_count",
+			"output_tokens", "generation_ms", "rate_limit_count", "channel_failure_count",
+			"client_cancel_count", "other_failure_count", "retry_count",
+		}),
+	}).Create(metric).Error
+}
+
 func GetPerfMetrics(modelName string, group string, startTs int64, endTs int64) ([]PerfMetric, error) {
 	var metrics []PerfMetric
 	query := DB.Model(&PerfMetric{}).

@@ -16,32 +16,36 @@ import (
 )
 
 type modelQualityRow struct {
-	ModelName                     string  `json:"model_name"`
-	RequestCount                  int64   `json:"request_count"`
-	SuccessCount                  int64   `json:"success_count"`
-	SuccessRate                   float64 `json:"success_rate"`
-	SuccessRateExcludingRateLimit float64 `json:"success_rate_excluding_rate_limit"`
-	AvgLatencyMs                  int64   `json:"avg_latency_ms"`
-	P50LatencyMs                  int64   `json:"p50_latency_ms"`
-	P95LatencyMs                  int64   `json:"p95_latency_ms"`
-	P50TtftMs                     int64   `json:"p50_ttft_ms"`
-	P95TtftMs                     int64   `json:"p95_ttft_ms"`
-	RateLimited                   int64   `json:"rate_limited"`
-	ChannelFailures               int64   `json:"channel_failures"`
-	ClientCancelled               int64   `json:"client_cancelled"`
-	OtherFailures                 int64   `json:"other_failures"`
-	UnclassifiedFailures          int64   `json:"unclassified_failures"`
-	FailureBreakdownCoverage      bool    `json:"failure_breakdown_coverage"`
-	QualityLevel                  string  `json:"quality_level"`
-	ProbeStatus                   string  `json:"probe_status"`
-	HealthScore                   float64 `json:"health_score"`
-	Confidence                    float64 `json:"confidence"`
-	RouteCount                    int     `json:"route_count"`
-	QuarantinedRoutes             int     `json:"quarantined_routes"`
-	RetryCount                    int64   `json:"retry_count"`
+	ModelName                     string   `json:"model_name"`
+	RequestCount                  int64    `json:"request_count"`
+	SuccessCount                  int64    `json:"success_count"`
+	SuccessRate                   float64  `json:"success_rate"`
+	SuccessRateExcludingRateLimit float64  `json:"success_rate_excluding_rate_limit"`
+	AvgLatencyMs                  int64    `json:"avg_latency_ms"`
+	P50LatencyMs                  int64    `json:"p50_latency_ms"`
+	P95LatencyMs                  int64    `json:"p95_latency_ms"`
+	P50TtftMs                     int64    `json:"p50_ttft_ms"`
+	P95TtftMs                     int64    `json:"p95_ttft_ms"`
+	RateLimited                   int64    `json:"rate_limited"`
+	ChannelFailures               int64    `json:"channel_failures"`
+	ClientCancelled               int64    `json:"client_cancelled"`
+	OtherFailures                 int64    `json:"other_failures"`
+	UnclassifiedFailures          int64    `json:"unclassified_failures"`
+	FailureBreakdownCoverage      bool     `json:"failure_breakdown_coverage"`
+	QualityLevel                  string   `json:"quality_level"`
+	ProbeStatus                   string   `json:"probe_status"`
+	HealthScore                   *float64 `json:"health_score"`
+	Confidence                    float64  `json:"confidence"`
+	LatencySampleCount            int      `json:"latency_sample_count"`
+	RouteCount                    int      `json:"route_count"`
+	QuarantinedRoutes             int      `json:"quarantined_routes"`
+	RetryCount                    int64    `json:"retry_count"`
 }
 
 func qualityLevel(rate float64, samples int64) string {
+	if samples == 0 {
+		return "untested"
+	}
 	if samples < 20 {
 		return "insufficient"
 	}
@@ -67,8 +71,13 @@ func GetModelQualityBoard(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
 		return
 	}
+	liveModels, err := model.GetLiveModelNames()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
+		return
+	}
 	now := time.Now().Unix()
-	logStats, err := model.GetModelQualityLogStats(now-int64(hours)*3600, now)
+	logStats, err := model.GetModelQualityLogStats(now-int64(hours)*3600, now, liveModels)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
 		return
@@ -101,9 +110,15 @@ func GetModelQualityBoard(c *gin.Context) {
 			a.q++
 		}
 	}
-	rows := make([]modelQualityRow, 0, len(summary.Models))
+	summaryByModel := make(map[string]perfmetrics.ModelSummary, len(summary.Models))
+	for _, item := range summary.Models {
+		summaryByModel[item.ModelName] = item
+	}
+	rows := make([]modelQualityRow, 0, len(liveModels))
 	var total, success int64
-	for _, m := range summary.Models {
+	for _, modelName := range liveModels {
+		m := summaryByModel[modelName]
+		m.ModelName = modelName
 		failures := m.RequestCount - m.SuccessCount
 		ls := logStats[m.ModelName]
 		if ls == nil {
@@ -111,6 +126,7 @@ func GetModelQualityBoard(c *gin.Context) {
 		}
 		p50, p95 := model.Percentiles(ls.LatencyMs)
 		t50, t95 := model.Percentiles(ls.TtftMs)
+		avgLatency := model.Average(ls.LatencyMs)
 		classified := m.RateLimitCount + m.ChannelFailureCount + m.ClientCancelCount + m.OtherFailureCount
 		if classified > failures {
 			classified = failures
@@ -123,9 +139,10 @@ func GetModelQualityBoard(c *gin.Context) {
 			adjusted = float64(succ) / float64(denom) * 100
 		}
 		a := routes[m.ModelName]
-		row := modelQualityRow{ModelName: m.ModelName, RequestCount: m.RequestCount, SuccessCount: succ, SuccessRate: m.SuccessRate, SuccessRateExcludingRateLimit: adjusted, AvgLatencyMs: m.AvgLatencyMs, P50LatencyMs: p50, P95LatencyMs: p95, P50TtftMs: t50, P95TtftMs: t95, RateLimited: m.RateLimitCount, ChannelFailures: m.ChannelFailureCount, ClientCancelled: m.ClientCancelCount, OtherFailures: m.OtherFailureCount, RetryCount: m.RetryCount, UnclassifiedFailures: unclassified, FailureBreakdownCoverage: failures == 0 || unclassified == 0, QualityLevel: qualityLevel(m.SuccessRate, m.RequestCount), ProbeStatus: "untested"}
-		if a != nil && a.n > 0 {
-			row.HealthScore = a.health / float64(a.n)
+		row := modelQualityRow{ModelName: m.ModelName, RequestCount: m.RequestCount, SuccessCount: succ, SuccessRate: m.SuccessRate, SuccessRateExcludingRateLimit: adjusted, AvgLatencyMs: avgLatency, P50LatencyMs: p50, P95LatencyMs: p95, P50TtftMs: t50, P95TtftMs: t95, RateLimited: m.RateLimitCount, ChannelFailures: m.ChannelFailureCount, ClientCancelled: m.ClientCancelCount, OtherFailures: m.OtherFailureCount, RetryCount: m.RetryCount, UnclassifiedFailures: unclassified, FailureBreakdownCoverage: failures == 0 || unclassified == 0, QualityLevel: qualityLevel(m.SuccessRate, m.RequestCount), ProbeStatus: "untested", LatencySampleCount: len(ls.LatencyMs)}
+		if m.RequestCount > 0 && a != nil && a.n > 0 {
+			healthScore := a.health / float64(a.n)
+			row.HealthScore = &healthScore
 			row.Confidence = a.confidence / float64(a.n)
 			row.RouteCount = a.n
 			row.QuarantinedRoutes = a.q

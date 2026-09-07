@@ -1,8 +1,6 @@
 package perfmetrics
 
 import (
-	"context"
-	"fmt"
 	"math"
 	"sort"
 	"strings"
@@ -16,6 +14,13 @@ import (
 )
 
 var hotBuckets sync.Map
+
+const requestDedupTTL = 2 * time.Hour
+
+var requestDedup = struct {
+	sync.Mutex
+	seen map[string]time.Time
+}{seen: map[string]time.Time{}}
 
 // seriesSchema is a stable client cache/schema marker. Do not change it when
 // hiding fields or making response-only privacy hardening changes.
@@ -65,6 +70,7 @@ func RecordRelaySample(info *relaycommon.RelayInfo, success bool, outputTokens i
 		generationMs = latencyMs
 	}
 	Record(Sample{
+		RequestID:    info.RequestId,
 		Model:        info.OriginModelName,
 		Group:        info.UsingGroup,
 		LatencyMs:    latencyMs,
@@ -95,9 +101,21 @@ func Record(sample Sample) {
 		group:    sample.Group,
 		bucketTs: bucketStart(time.Now().Unix()),
 	}
+	if !acceptLocalRequest(sample.RequestID, time.Now()) {
+		return
+	}
+	if common.RedisEnabled && common.RDB != nil {
+		accepted, err := recordRedis(key, sample)
+		if err == nil {
+			if !accepted {
+				return
+			}
+			return
+		}
+		common.SysError("failed to record perf metric in redis, falling back to local bucket: " + err.Error())
+	}
 	actual, _ := hotBuckets.LoadOrStore(key, &atomicBucket{})
 	actual.(*atomicBucket).add(sample)
-	recordRedis(key, sample)
 }
 
 func Query(params QueryParams) (QueryResult, error) {
@@ -136,17 +154,8 @@ func Query(params QueryParams) (QueryResult, error) {
 		})
 	}
 
-	hotBuckets.Range(func(key, value any) bool {
-		k := key.(bucketKey)
-		if k.model != params.Model || k.bucketTs < startTs || k.bucketTs > endTs {
-			return true
-		}
-		if params.Group != "" && k.group != params.Group {
-			return true
-		}
-		mergeCounters(merged, k, value.(*atomicBucket).snapshot())
-		return true
-	})
+	mergeRedisBuckets(merged, params.Model, params.Group, startTs, endTs)
+	mergeLocalBuckets(merged, params.Model, params.Group, startTs, endTs)
 
 	return buildQueryResult(params.Model, merged), nil
 }
@@ -186,24 +195,13 @@ func QuerySummaryAll(hours int, groups []string) (SummaryAllResult, error) {
 		mergeModelBucket(modelBuckets, row.ModelName, row.BucketTs, value)
 	}
 
-	hotBuckets.Range(func(key, value any) bool {
-		k := key.(bucketKey)
-		if k.bucketTs < startTs || k.bucketTs > endTs {
-			return true
-		}
-		if allowedGroups != nil {
-			if _, ok := allowedGroups[k.group]; !ok {
-				return true
-			}
-		}
-		snap := value.(*atomicBucket).snapshot()
-		if snap.requestCount == 0 {
-			return true
-		}
-		mergeModelTotals(totals, k.model, snap)
-		mergeModelBucket(modelBuckets, k.model, k.bucketTs, snap)
-		return true
-	})
+	liveBuckets := map[bucketKey]counters{}
+	mergeRedisBucketsByGroups(liveBuckets, allowedGroups, startTs, endTs)
+	mergeLocalBucketsByGroups(liveBuckets, allowedGroups, startTs, endTs)
+	for key, value := range liveBuckets {
+		mergeModelTotals(totals, key.model, value)
+		mergeModelBucket(modelBuckets, key.model, key.bucketTs, value)
+	}
 
 	models := make([]ModelSummary, 0, len(totals))
 	for name, total := range totals {
@@ -321,6 +319,91 @@ func bucketStart(ts int64) int64 {
 	return ts - (ts % bucketSeconds)
 }
 
+func replaceCounters(merged map[bucketKey]counters, key bucketKey, value counters) {
+	if value.requestCount > 0 {
+		merged[key] = value
+	}
+}
+
+func mergeLocalBuckets(merged map[bucketKey]counters, modelName, group string, startTs, endTs int64) {
+	hotBuckets.Range(func(key, value any) bool {
+		k := key.(bucketKey)
+		if k.model == modelName && k.bucketTs >= startTs && k.bucketTs <= endTs && (group == "" || k.group == group) {
+			mergeCounters(merged, k, value.(*atomicBucket).snapshot())
+		}
+		return true
+	})
+}
+
+func mergeLocalBucketsByGroups(merged map[bucketKey]counters, allowedGroups map[string]struct{}, startTs, endTs int64) {
+	hotBuckets.Range(func(key, value any) bool {
+		k := key.(bucketKey)
+		if k.bucketTs < startTs || k.bucketTs > endTs {
+			return true
+		}
+		if allowedGroups != nil {
+			if _, ok := allowedGroups[k.group]; !ok {
+				return true
+			}
+		}
+		mergeCounters(merged, k, value.(*atomicBucket).snapshot())
+		return true
+	})
+}
+
+func mergeRedisBuckets(merged map[bucketKey]counters, modelName, group string, startTs, endTs int64) {
+	buckets, err := redisBuckets(startTs, endTs)
+	if err != nil {
+		return
+	}
+	for key, value := range buckets {
+		if key.model == modelName && (group == "" || key.group == group) {
+			replaceCounters(merged, key, value)
+		}
+	}
+}
+
+func mergeRedisBucketsByGroups(merged map[bucketKey]counters, allowedGroups map[string]struct{}, startTs, endTs int64) {
+	buckets, err := redisBuckets(startTs, endTs)
+	if err != nil {
+		return
+	}
+	for key, value := range buckets {
+		if allowedGroups != nil {
+			if _, ok := allowedGroups[key.group]; !ok {
+				continue
+			}
+		}
+		replaceCounters(merged, key, value)
+	}
+}
+
+func acceptLocalRequest(requestID string, now time.Time) bool {
+	if requestID == "" {
+		return true
+	}
+	requestDedup.Lock()
+	defer requestDedup.Unlock()
+	if expires, ok := requestDedup.seen[requestID]; ok && expires.After(now) {
+		return false
+	}
+	if len(requestDedup.seen) >= 10000 {
+		for id, expires := range requestDedup.seen {
+			if !expires.After(now) {
+				delete(requestDedup.seen, id)
+			}
+		}
+		if len(requestDedup.seen) >= 10000 {
+			for id := range requestDedup.seen {
+				delete(requestDedup.seen, id)
+				break
+			}
+		}
+	}
+	requestDedup.seen[requestID] = now.Add(requestDedupTTL)
+	return true
+}
+
 func mergeCounters(merged map[bucketKey]counters, key bucketKey, value counters) {
 	if value.requestCount == 0 {
 		return
@@ -435,68 +518,4 @@ func avgTps(value counters) float64 {
 		return 0
 	}
 	return float64(value.outputTokens) / (float64(value.generationMs) / 1000)
-}
-
-func recordRedis(key bucketKey, sample Sample) {
-	if !common.RedisEnabled || common.RDB == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	redisKey := redisBucketKey(key)
-	pipe := common.RDB.TxPipeline()
-	pipe.HIncrBy(ctx, redisKey, "req", 1)
-	if sample.Success {
-		pipe.HIncrBy(ctx, redisKey, "ok", 1)
-	} else {
-		switch sample.FailureKind {
-		case "rate_limit":
-			pipe.HIncrBy(ctx, redisKey, "fail_rate", 1)
-		case "channel_failure":
-			pipe.HIncrBy(ctx, redisKey, "fail_channel", 1)
-		case "client_cancelled":
-			pipe.HIncrBy(ctx, redisKey, "fail_client", 1)
-		default:
-			pipe.HIncrBy(ctx, redisKey, "fail_other", 1)
-		}
-	}
-	if sample.RetryCount > 0 {
-		pipe.HIncrBy(ctx, redisKey, "retry", sample.RetryCount)
-	}
-	if sample.LatencyMs > 0 {
-		pipe.HIncrBy(ctx, redisKey, "lat", sample.LatencyMs)
-	}
-	if sample.HasTtft && sample.TtftMs >= 0 {
-		pipe.HIncrBy(ctx, redisKey, "ttft", sample.TtftMs)
-		pipe.HIncrBy(ctx, redisKey, "ttft_n", 1)
-	}
-	if sample.OutputTokens > 0 && sample.GenerationMs > 0 {
-		pipe.HIncrBy(ctx, redisKey, "out", sample.OutputTokens)
-		pipe.HIncrBy(ctx, redisKey, "gen_ms", sample.GenerationMs)
-	}
-	pipe.Expire(ctx, redisKey, time.Hour)
-	_, _ = pipe.Exec(ctx)
-}
-
-func mergeRedisActiveBuckets(merged map[bucketKey]counters, params QueryParams, startTs int64, endTs int64) {
-	if !common.RedisEnabled || common.RDB == nil || params.Model == "" || params.Group == "" {
-		return
-	}
-	active := bucketStart(time.Now().Unix())
-	if active < startTs || active > endTs {
-		return
-	}
-	key := bucketKey{model: params.Model, group: params.Group, bucketTs: active}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	values, err := common.RDB.HGetAll(ctx, redisBucketKey(key)).Result()
-	if err != nil || len(values) == 0 {
-		return
-	}
-	mergeCounters(merged, key, redisCounters(values))
-}
-
-func redisBucketKey(key bucketKey) string {
-	return fmt.Sprintf("perf:%s:%s:%d", key.model, key.group, key.bucketTs)
 }

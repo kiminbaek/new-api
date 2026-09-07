@@ -49,6 +49,10 @@ const LEVEL: Record<QualityLevel, { label: string; className: string }> = {
     label: '样本不足',
     className: 'bg-muted text-muted-foreground',
   },
+  untested: {
+    label: '未测',
+    className: 'bg-muted text-muted-foreground',
+  },
 }
 const duration = (value: number) =>
   value > 0
@@ -181,7 +185,7 @@ export function ModelQuality() {
                   icon={CheckCircle2}
                   label='真实成功率'
                   value={pct(query.data.success_rate)}
-                  detail='每个 request_id 只计一次，分位数取最近 10 万条日志样本'
+                  detail='每个 request_id 只计一次；各模型独立取同一批有界样本计算平均值与分位数'
                 />
                 <StatCard
                   icon={ShieldCheck}

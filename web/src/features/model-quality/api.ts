@@ -1,7 +1,12 @@
 import { api } from '@/lib/api'
 import { requireSuccessfulResponse } from '@/lib/api-response'
 
-export type QualityLevel = 'stable' | 'fluctuating' | 'risk' | 'insufficient'
+export type QualityLevel =
+  | 'stable'
+  | 'fluctuating'
+  | 'risk'
+  | 'insufficient'
+  | 'untested'
 export interface ModelQualityRow {
   model_name: string
   request_count: number
@@ -21,8 +26,9 @@ export interface ModelQualityRow {
   failure_breakdown_coverage: boolean
   quality_level: QualityLevel
   probe_status: 'untested'
-  health_score: number
+  health_score: number | null
   confidence: number
+  latency_sample_count: number
   route_count: number
   quarantined_routes: number
   retry_count: number

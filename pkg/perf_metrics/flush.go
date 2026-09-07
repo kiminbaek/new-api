@@ -1,6 +1,7 @@
 package perfmetrics
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"time"
@@ -8,6 +9,11 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting/perf_metrics_setting"
+)
+
+var (
+	upsertPerfMetric  = model.UpsertPerfMetric
+	replacePerfMetric = model.ReplacePerfMetric
 )
 
 func flushLoop() {
@@ -18,6 +24,7 @@ func flushLoop() {
 		if !setting.Enabled {
 			continue
 		}
+		flushRedisCompletedBuckets()
 		flushCompletedBuckets()
 		cleanupExpiredMetrics(setting.RetentionDays)
 	}
@@ -38,18 +45,7 @@ func flushCompletedBuckets() {
 			return true
 		}
 
-		err := model.UpsertPerfMetric(&model.PerfMetric{
-			ModelName:      k.model,
-			Group:          k.group,
-			BucketTs:       k.bucketTs,
-			RequestCount:   drained.requestCount,
-			SuccessCount:   drained.successCount,
-			TotalLatencyMs: drained.totalLatencyMs,
-			TtftSumMs:      drained.ttftSumMs,
-			TtftCount:      drained.ttftCount,
-			OutputTokens:   drained.outputTokens,
-			GenerationMs:   drained.generationMs,
-		})
+		err := upsertPerfMetric(perfMetricFromCounters(k, drained))
 		if err != nil {
 			bucket.addCounters(drained)
 			common.SysError(fmt.Sprintf("failed to flush perf metric bucket model=%s group=%s bucket=%d: %s", k.model, k.group, k.bucketTs, err.Error()))
@@ -59,6 +55,48 @@ func flushCompletedBuckets() {
 		deleteOldEmptyBucket(k, key)
 		return true
 	})
+}
+
+func perfMetricFromCounters(key bucketKey, value counters) *model.PerfMetric {
+	return &model.PerfMetric{
+		ModelName: key.model, Group: key.group, BucketTs: key.bucketTs,
+		RequestCount: value.requestCount, SuccessCount: value.successCount,
+		TotalLatencyMs: value.totalLatencyMs, TtftSumMs: value.ttftSumMs, TtftCount: value.ttftCount,
+		OutputTokens: value.outputTokens, GenerationMs: value.generationMs,
+		RateLimitCount: value.rateLimitCount, ChannelFailureCount: value.channelFailureCount,
+		ClientCancelCount: value.clientCancelCount, OtherFailureCount: value.otherFailureCount,
+		RetryCount: value.retryCount,
+	}
+}
+
+func flushRedisCompletedBuckets() {
+	if !common.RedisEnabled || common.RDB == nil {
+		return
+	}
+	currentBucket := bucketStart(time.Now().Unix())
+	buckets, err := redisBuckets(0, currentBucket-1)
+	if err != nil {
+		common.SysError("failed to list redis perf metric buckets: " + err.Error())
+		return
+	}
+	for key, value := range buckets {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		lockKey, lockToken, locked := acquireRedisFlushLock(ctx, key)
+		if !locked {
+			cancel()
+			continue
+		}
+		// Keep the cumulative Redis snapshot until its TTL expires. A late sample
+		// for this completed bucket then increments the same snapshot, and the next
+		// idempotent ReplacePerfMetric absorbs it instead of replacing the durable
+		// total with a newly-created partial bucket.
+		err = replacePerfMetric(perfMetricFromCounters(key, value))
+		releaseRedisFlushLock(ctx, lockKey, lockToken)
+		cancel()
+		if err != nil {
+			common.SysError(fmt.Sprintf("failed to flush redis perf metric bucket model=%s group=%s bucket=%d: %s", key.model, key.group, key.bucketTs, err.Error()))
+		}
+	}
 }
 
 func deleteOldEmptyBucket(k bucketKey, rawKey any) {

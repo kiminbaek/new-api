@@ -8,6 +8,7 @@ type Store interface {
 }
 
 type Sample struct {
+	RequestID    string
 	Model        string
 	Group        string
 	LatencyMs    int64
@@ -52,6 +53,10 @@ type QueryResult struct {
 type ModelSummary struct {
 	ModelName           string    `json:"model_name"`
 	AvgLatencyMs        int64     `json:"avg_latency_ms"`
+	P50LatencyMs        int64     `json:"p50_latency_ms"`
+	P95LatencyMs        int64     `json:"p95_latency_ms"`
+	P50TtftMs           int64     `json:"p50_ttft_ms"`
+	P95TtftMs           int64     `json:"p95_ttft_ms"`
 	SuccessRate         float64   `json:"success_rate"`
 	AvgTps              float64   `json:"avg_tps"`
 	RecentSuccessRates  []float64 `json:"recent_success_rates,omitempty"`
@@ -137,7 +142,7 @@ func (b *atomicBucket) add(sample Sample) {
 }
 
 func (b *atomicBucket) snapshot() counters {
-	return counters{
+	result := counters{
 		requestCount:   b.requestCount.Load(),
 		successCount:   b.successCount.Load(),
 		totalLatencyMs: b.totalLatencyMs.Load(),
@@ -148,10 +153,11 @@ func (b *atomicBucket) snapshot() counters {
 		rateLimitCount: b.rateLimitCount.Load(), channelFailureCount: b.channelFailureCount.Load(),
 		clientCancelCount: b.clientCancelCount.Load(), otherFailureCount: b.otherFailureCount.Load(), retryCount: b.retryCount.Load(),
 	}
+	return result
 }
 
 func (b *atomicBucket) drain() counters {
-	return counters{
+	result := counters{
 		requestCount:   b.requestCount.Swap(0),
 		successCount:   b.successCount.Swap(0),
 		totalLatencyMs: b.totalLatencyMs.Swap(0),
@@ -162,6 +168,7 @@ func (b *atomicBucket) drain() counters {
 		rateLimitCount: b.rateLimitCount.Swap(0), channelFailureCount: b.channelFailureCount.Swap(0),
 		clientCancelCount: b.clientCancelCount.Swap(0), otherFailureCount: b.otherFailureCount.Swap(0), retryCount: b.retryCount.Swap(0),
 	}
+	return result
 }
 
 func (b *atomicBucket) addCounters(c counters) {
