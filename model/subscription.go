@@ -238,7 +238,7 @@ type SubscriptionPaymentConfirmation struct {
 	Product  string
 }
 
-const SubscriptionPaymentAmountTolerance = "0.01"
+const subscriptionPaymentAmountScale int32 = 2
 
 func (o *SubscriptionOrder) FreezePlan(plan *SubscriptionPlan, expectedProduct string) error {
 	if plan == nil || plan.Id <= 0 || plan.Id != o.PlanId {
@@ -596,9 +596,10 @@ func validateSubscriptionPayment(order *SubscriptionOrder, plan *SubscriptionPla
 		return fmt.Errorf("%w: invalid amount", ErrSubscriptionPaymentMismatch)
 	}
 	expectedAmount := decimal.NewFromFloat(order.Money)
-	tolerance := decimal.RequireFromString(SubscriptionPaymentAmountTolerance)
-	if actualAmount.Sub(expectedAmount).Abs().GreaterThan(tolerance) {
-		return fmt.Errorf("%w: amount expected=%s actual=%s tolerance=%s", ErrSubscriptionPaymentMismatch, expectedAmount.String(), actualAmount.String(), tolerance.String())
+	expectedMinorUnits := expectedAmount.Round(subscriptionPaymentAmountScale)
+	actualMinorUnits := actualAmount.Round(subscriptionPaymentAmountScale)
+	if !actualMinorUnits.Equal(expectedMinorUnits) {
+		return fmt.Errorf("%w: amount expected=%s actual=%s", ErrSubscriptionPaymentMismatch, expectedMinorUnits.StringFixed(subscriptionPaymentAmountScale), actualMinorUnits.StringFixed(subscriptionPaymentAmountScale))
 	}
 	expectedCurrency := strings.ToUpper(strings.TrimSpace(order.ExpectedCurrency))
 	if expectedCurrency == "" && order.PaymentProvider == PaymentProviderEpay {

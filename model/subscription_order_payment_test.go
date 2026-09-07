@@ -29,7 +29,8 @@ func TestCompleteSubscriptionOrderRejectsPaymentMismatch(t *testing.T) {
 		provider     string
 		confirmation SubscriptionPaymentConfirmation
 	}{
-		{name: "amount outside one cent tolerance", provider: PaymentProviderStripe, confirmation: paymentConfirmation("10.011")},
+		{name: "one cent underpayment", provider: PaymentProviderStripe, confirmation: paymentConfirmation("9.98")},
+		{name: "one cent overpayment", provider: PaymentProviderStripe, confirmation: paymentConfirmation("10.00")},
 		{name: "currency mismatch", provider: PaymentProviderStripe, confirmation: SubscriptionPaymentConfirmation{Amount: "9.99", Currency: "CNY", Product: "product-1"}},
 		{name: "product mismatch", provider: PaymentProviderStripe, confirmation: SubscriptionPaymentConfirmation{Amount: "9.99", Currency: "USD", Product: "other-product"}},
 	}
@@ -47,14 +48,14 @@ func TestCompleteSubscriptionOrderRejectsPaymentMismatch(t *testing.T) {
 	}
 }
 
-func TestCompleteSubscriptionOrderAmountToleranceAndDuplicateCallback(t *testing.T) {
+func TestCompleteSubscriptionOrderExactAmountAndDuplicateCallback(t *testing.T) {
 	truncateTables(t)
 	user := insertUserForPaymentGuardTest(t, 620, 0)
 	plan := insertSubscriptionPlanForPaymentGuardTest(t, 720)
 	order := createSubscriptionPaymentOrder(t, "payment-tolerance", user.Id, plan, PaymentProviderStripe, true)
 
-	require.NoError(t, CompleteSubscriptionOrder(order.TradeNo, `{}`, PaymentProviderStripe, "", paymentConfirmation("10.00")))
-	require.NoError(t, CompleteSubscriptionOrder(order.TradeNo, `{}`, PaymentProviderStripe, "", paymentConfirmation("10.00")))
+	require.NoError(t, CompleteSubscriptionOrder(order.TradeNo, `{}`, PaymentProviderStripe, "", paymentConfirmation("9.99")))
+	require.NoError(t, CompleteSubscriptionOrder(order.TradeNo, `{}`, PaymentProviderStripe, "", paymentConfirmation("9.99")))
 	assert.Equal(t, int64(1), countUserSubscriptionsForPaymentGuardTest(t, user.Id))
 }
 
