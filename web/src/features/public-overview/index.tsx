@@ -76,25 +76,40 @@ export function PublicOverview() {
   const [data, setData] = useState<OverviewData | null>(null)
   const [error, setError] = useState<string>('')
 
-  const load = useCallback(async () => {
-    try {
-      const res = await fetch('/api/public/overview')
-      const json = await res.json()
-      if (json.success) {
-        setData(json.data)
-        setError('')
-      } else {
-        setError(json.message || t('加载失败'))
+  const load = useCallback(
+    async (signal?: AbortSignal) => {
+      try {
+        const res = await fetch('/api/public/overview', { signal })
+        const json = await res.json()
+        if (signal?.aborted) return
+        if (json.success) {
+          setData(json.data)
+          setError('')
+        } else {
+          setError(json.message || t('加载失败'))
+        }
+      } catch {
+        if (!signal?.aborted) setError(t('网络错误，正在重试…'))
       }
-    } catch (e) {
-      setError(t('网络错误，正在重试…'))
-    }
-  }, [t])
+    },
+    [t]
+  )
 
   useEffect(() => {
-    load()
-    const timer = setInterval(load, 30000) // 30s 自动刷新
-    return () => clearInterval(timer)
+    const controller = new AbortController()
+    let timer: number | undefined
+    const poll = async () => {
+      await load(controller.signal)
+      if (!controller.signal.aborted) {
+        timer = window.setTimeout(() => void poll(), 30000)
+      }
+    }
+
+    void poll()
+    return () => {
+      controller.abort()
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
   }, [load])
 
   const cards = [
@@ -224,6 +239,7 @@ export function PublicOverview() {
                 {t('按滚动窗口统计，每次请求实时更新')}
               </span>
             </div>
+            {!data ? <Skeleton className='h-32 w-full' /> : null}
             {data && data.model_rates.length > 0 ? (
               <div className='overflow-x-auto'>
                 <table className='w-full text-sm'>
@@ -268,13 +284,12 @@ export function PublicOverview() {
                   </tbody>
                 </table>
               </div>
-            ) : data ? (
+            ) : null}
+            {data && data.model_rates.length === 0 ? (
               <div className='py-8 text-center text-sm text-muted-foreground'>
                 {t('暂无调用数据，发起请求后此处将展示各模型实时成功率')}
               </div>
-            ) : (
-              <Skeleton className='h-32 w-full' />
-            )}
+            ) : null}
           </CardContent>
         </Card>
       </div>

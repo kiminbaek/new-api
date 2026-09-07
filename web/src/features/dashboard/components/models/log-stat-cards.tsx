@@ -59,7 +59,7 @@ function formatStatNumber(value: number, locale: Intl.LocalesArgument) {
 }
 
 export function LogStatCards(props: LogStatCardsProps) {
-  const { i18n } = useTranslation()
+  const { i18n, t } = useTranslation()
   const statCardsConfig = useModelStatCardsConfig()
   const user = useAuthStore((state) => state.auth.user)
   const isAdmin = !!(user?.role && user.role >= 10)
@@ -149,7 +149,7 @@ export function LogStatCards(props: LogStatCardsProps) {
           role='alert'
           className='text-destructive border-b px-3 py-2 text-xs'
         >
-          Failed to load usage data
+          {t('Failed to load usage data')}
         </div>
       )}
       <div className='divide-border/60 grid min-w-0 grid-cols-2 divide-x sm:grid-cols-3 lg:grid-cols-5'>

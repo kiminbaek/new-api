@@ -181,38 +181,55 @@ export function SummaryCards() {
       : currencyEnabledFromStore
   const currencyLabel = currencyEnabled ? getCurrencyLabel() : 'Tokens'
 
+  const usageTrendPending = usageTrendQuery.isPending
+  const usageTrendUnavailable = usageTrendPending || usageTrendQuery.isError
   const sparklineData = useMemo(
     () =>
-      buildSummarySparklines(
-        usageTrendQuery.data?.data ?? [],
-        remainQuota,
-        summaryTimeRange.start_timestamp,
-        summaryTimeRange.end_timestamp
-      ),
+      usageTrendUnavailable
+        ? null
+        : buildSummarySparklines(
+            usageTrendQuery.data?.data ?? [],
+            remainQuota,
+            summaryTimeRange.start_timestamp,
+            summaryTimeRange.end_timestamp
+          ),
     [
       remainQuota,
       summaryTimeRange.end_timestamp,
       summaryTimeRange.start_timestamp,
       usageTrendQuery.data?.data,
+      usageTrendUnavailable,
     ]
   )
 
   const recentUsage = useMemo(
     () =>
-      (usageTrendQuery.data?.data ?? []).reduce(
-        (total, item) => total + (Number(item.quota) || 0),
-        0
-      ),
-    [usageTrendQuery.data?.data]
+      usageTrendUnavailable
+        ? null
+        : (usageTrendQuery.data?.data ?? []).reduce(
+            (total, item) => total + (Number(item.quota) || 0),
+            0
+          ),
+    [usageTrendQuery.data?.data, usageTrendUnavailable]
   )
 
-  const healthLevel = getHealthLevel(remainQuota, recentUsage)
-  const healthCfg = HEALTH_CONFIG[healthLevel]
-  const runwayDays = getRunwayDays(remainQuota, recentUsage)
+  const healthLevel =
+    recentUsage === null ? null : getHealthLevel(remainQuota, recentUsage)
+  const healthCfg = healthLevel === null ? null : HEALTH_CONFIG[healthLevel]
+  let healthLabel = t('Status unavailable')
+  if (usageTrendPending) healthLabel = t('Loading...')
+  else if (healthCfg) healthLabel = t(healthCfg.labelKey)
+  const runwayDays =
+    recentUsage === null ? null : getRunwayDays(remainQuota, recentUsage)
 
-  const todayUsageDisplay = formatQuota(recentUsage)
+  const todayUsageDisplay =
+    recentUsage === null ? '--' : formatQuota(recentUsage)
   let runwayDisplay: string
-  if (runwayDays !== null) {
+  if (usageTrendPending) {
+    runwayDisplay = t('Loading...')
+  } else if (recentUsage === null) {
+    runwayDisplay = t('Failed to load')
+  } else if (runwayDays !== null) {
     if (runwayDays < 1) {
       runwayDisplay = t('Less than 1 day left')
     } else if (runwayDays > 999) {
@@ -224,6 +241,12 @@ export function SummaryCards() {
     runwayDisplay = t('Balance depleted')
   } else {
     runwayDisplay = t('No recent usage')
+  }
+
+  const getCardSparkline = (key: string) => {
+    if (sparklineData === null) return undefined
+    if (key === 'todayUsage') return sparklineData.usage
+    return getSummarySparkline(key, sparklineData)
   }
 
   const items = useSummaryCardsConfig({
@@ -241,10 +264,7 @@ export function SummaryCards() {
       desc: config.description,
       icon: config.icon,
       tone: tones[index] ?? 'accent-3',
-      sparkline:
-        config.key === 'todayUsage'
-          ? sparklineData.usage
-          : getSummarySparkline(config.key, sparklineData),
+      sparkline: getCardSparkline(config.key),
       sparklineVariant: 'line' as const,
     }
   })
@@ -264,8 +284,18 @@ export function SummaryCards() {
             </div>
           </div>
           {usageTrendQuery.isError && (
-            <div role='alert' className='text-destructive text-xs'>
-              {usageTrendQuery.error.message}
+            <div
+              role='alert'
+              className='text-destructive flex flex-wrap items-center gap-2 text-xs'
+            >
+              <span>{usageTrendQuery.error.message}</span>
+              <Button
+                variant='outline'
+                size='sm'
+                onClick={() => void usageTrendQuery.refetch()}
+              >
+                {t('Retry')}
+              </Button>
             </div>
           )}
           <StaggerContainer className='grid grid-cols-3 gap-1.5 sm:gap-3'>
@@ -282,7 +312,7 @@ export function SummaryCards() {
                   tone={it.tone}
                   sparkline={it.sparkline}
                   sparklineVariant={it.sparklineVariant}
-                  loading={loading}
+                  loading={loading || usageTrendPending}
                   compactMobile
                 />
               </StaggerItem>
@@ -298,11 +328,14 @@ export function SummaryCards() {
               </span>
               <span className='flex items-center gap-1.5'>
                 <span
-                  className={cn('size-1.5 rounded-full', healthCfg.dotClass)}
+                  className={cn(
+                    'size-1.5 rounded-full',
+                    healthCfg?.dotClass ?? 'bg-muted-foreground/40'
+                  )}
                   aria-hidden='true'
                 />
                 <span className='text-muted-foreground text-[11px] font-medium'>
-                  {t(healthCfg.labelKey)}
+                  {healthLabel}
                 </span>
               </span>
             </div>
@@ -318,7 +351,7 @@ export function SummaryCards() {
                   <span className='truncate'>{t('Last 24h usage')}</span>
                 </div>
                 <div className='text-foreground mt-1.5 truncate text-xs font-semibold tabular-nums'>
-                  {formatQuota(recentUsage)}
+                  {recentUsage === null ? '--' : formatQuota(recentUsage)}
                 </div>
               </div>
               <div className='bg-background/60 rounded-lg px-2.5 py-2'>

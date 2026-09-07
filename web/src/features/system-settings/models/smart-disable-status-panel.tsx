@@ -104,28 +104,42 @@ export function SmartDisableStatusPanel() {
   const [status, setStatus] = useState<SmartDisableStatus | null>(null)
   const [loading, setLoading] = useState(false)
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000))
+  const [pollGeneration, setPollGeneration] = useState(0)
 
-  const load = useCallback(async () => {
-    setLoading(true)
+  const load = useCallback(async (signal?: AbortSignal) => {
+    if (!signal?.aborted) setLoading(true)
     try {
-      const res = await api.get('/api/channel/smart_disable/status')
+      const res = await api.get('/api/channel/smart_disable/status', {
+        signal,
+        disableDuplicate: true,
+      })
+      if (signal?.aborted) return
       const payload = res?.data
       if (payload?.success) setStatus(payload.data as SmartDisableStatus)
     } catch {
       // 看板失败不打扰用户：静默保留上一次快照
     } finally {
-      setLoading(false)
+      if (!signal?.aborted) setLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    void load()
-    const timer = setInterval(() => {
+    const controller = new AbortController()
+    let timer: number | undefined
+    const poll = async () => {
       setNow(Math.floor(Date.now() / 1000))
-      void load()
-    }, REFRESH_INTERVAL_MS)
-    return () => clearInterval(timer)
-  }, [load])
+      await load(controller.signal)
+      if (!controller.signal.aborted) {
+        timer = window.setTimeout(() => void poll(), REFRESH_INTERVAL_MS)
+      }
+    }
+
+    void poll()
+    return () => {
+      controller.abort()
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [load, pollGeneration])
 
   const clearOne = async (item: SmartDownItem) => {
     try {
@@ -135,7 +149,7 @@ export function SmartDisableStatusPanel() {
       })
       if (res?.data?.success) {
         toast.success(t('Restored'))
-        void load()
+        setPollGeneration((generation) => generation + 1)
       } else {
         toast.error(res?.data?.message || t('Operation failed'))
       }

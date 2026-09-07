@@ -154,29 +154,42 @@ export function ModelQuality() {
   useEffect(() => {
     if (!probeTaskId) return
     let cancelled = false
+    let failureCount = 0
+    let timer: number | undefined
+
+    const schedule = () => {
+      timer = window.setTimeout(() => void poll(), 1000)
+    }
     const poll = async () => {
       try {
         const task = await getModelQualityProbeTask(probeTaskId)
-        if (
-          cancelled ||
-          task.status === 'pending' ||
-          task.status === 'running'
-        ) {
+        if (cancelled) return
+        failureCount = 0
+        if (task.status === 'pending' || task.status === 'running') {
+          schedule()
           return
         }
         setProbeTaskId(null)
         await refetch()
+        if (cancelled) return
         if (task.status === 'succeeded') toast.success('主动探针运行完成')
         else toast.error(task.error || '主动探针运行失败')
       } catch {
-        // Keep the last persisted board visible and retry while the task is active.
+        if (cancelled) return
+        failureCount += 1
+        if (failureCount >= 3) {
+          setProbeTaskId(null)
+          toast.error('主动探针状态查询失败，请稍后重试')
+          return
+        }
+        schedule()
       }
     }
+
     void poll()
-    const interval = window.setInterval(() => void poll(), 1000)
     return () => {
       cancelled = true
-      window.clearInterval(interval)
+      if (timer !== undefined) window.clearTimeout(timer)
     }
   }, [probeTaskId, refetch])
 
@@ -195,36 +208,40 @@ export function ModelQuality() {
     <SectionPageLayout>
       <SectionPageLayout.Title>模型质量</SectionPageLayout.Title>
       <SectionPageLayout.Actions>
-        <Select
-          value={String(hours)}
-          onValueChange={(v) => v && setHours(Number(v))}
-        >
-          <SelectTrigger className='w-32'>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value='24'>近 24 小时</SelectItem>
-            <SelectItem value='168'>近 7 天</SelectItem>
-            <SelectItem value='720'>近 30 天</SelectItem>
-          </SelectContent>
-        </Select>
-        <Button
-          size='sm'
-          disabled={probe.isPending || probeTaskId !== null}
-          onClick={() => probe.mutate()}
-        >
-          <ShieldCheck />
-          {probe.isPending || probeTaskId ? '运行中' : '运行主动探针'}
-        </Button>
-        <Button
-          variant='outline'
-          size='sm'
-          disabled={query.isFetching}
-          onClick={() => void query.refetch()}
-        >
-          <RefreshCw className={query.isFetching ? 'animate-spin' : ''} />
-          {query.isFetching ? '刷新中' : '刷新'}
-        </Button>
+        <div className='grid w-full grid-cols-[minmax(0,1fr)_auto_auto] gap-2 sm:flex sm:w-auto sm:items-center'>
+          <Select
+            value={String(hours)}
+            onValueChange={(v) => v && setHours(Number(v))}
+          >
+            <SelectTrigger className='h-10 w-full sm:h-7 sm:w-32'>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value='24'>近 24 小时</SelectItem>
+              <SelectItem value='168'>近 7 天</SelectItem>
+              <SelectItem value='720'>近 30 天</SelectItem>
+            </SelectContent>
+          </Select>
+          <Button
+            size='sm'
+            className='h-10 px-3 sm:h-7 sm:px-2.5'
+            disabled={probe.isPending || probeTaskId !== null}
+            onClick={() => probe.mutate()}
+          >
+            <ShieldCheck />
+            {probe.isPending || probeTaskId ? '运行中' : '运行主动探针'}
+          </Button>
+          <Button
+            variant='outline'
+            size='sm'
+            className='h-10 px-3 sm:h-7 sm:px-2.5'
+            disabled={query.isFetching}
+            onClick={() => void query.refetch()}
+          >
+            <RefreshCw className={query.isFetching ? 'animate-spin' : ''} />
+            {query.isFetching ? '刷新中' : '刷新'}
+          </Button>
+        </div>
       </SectionPageLayout.Actions>
       <SectionPageLayout.Content>
         <div className='space-y-4'>
@@ -463,16 +480,40 @@ export function ModelQuality() {
                         <div className='mt-3 border-t pt-3 text-xs'>
                           <FailureText row={r} />
                         </div>
-                        <div className='mt-3 flex items-center gap-2 border-t pt-3 text-xs'>
-                          <span>主动探针</span>
-                          <ProbeBadge status={r.probe_status} />
-                          <span className='text-muted-foreground'>
-                            {r.last_probe_at
-                              ? new Date(
-                                  r.last_probe_at * 1000
-                                ).toLocaleString()
-                              : '尚无真实结果'}
-                          </span>
+                        <div className='mt-3 space-y-2 border-t pt-3 text-xs'>
+                          <div className='flex flex-wrap items-center gap-2'>
+                            <span>主动探针</span>
+                            <ProbeBadge status={r.probe_status} />
+                            <span className='text-muted-foreground'>
+                              {r.last_probe_at
+                                ? new Date(
+                                    r.last_probe_at * 1000
+                                  ).toLocaleString()
+                                : '尚无真实结果'}
+                            </span>
+                          </div>
+                          {r.probe_results.length ? (
+                            <div className='space-y-1.5'>
+                              {r.probe_results.map((result) => (
+                                <div
+                                  key={result.dimension}
+                                  className='bg-muted/35 rounded-md border px-2.5 py-2'
+                                >
+                                  <div className='flex items-center justify-between gap-2'>
+                                    <span className='font-medium'>
+                                      {result.dimension}
+                                    </span>
+                                    <ProbeBadge status={result.status} />
+                                  </div>
+                                  {result.evidence ? (
+                                    <p className='text-muted-foreground mt-1 break-words'>
+                                      {result.evidence}
+                                    </p>
+                                  ) : null}
+                                </div>
+                              ))}
+                            </div>
+                          ) : null}
                         </div>
                       </div>
                     ))}

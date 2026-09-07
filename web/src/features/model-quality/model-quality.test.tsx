@@ -6,12 +6,20 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import type { ModelQualityData } from './api'
 import { ModelQuality } from './index'
 
-const { getModelQuality, getModelQualityProbeTask, startModelQualityProbe } =
-  vi.hoisted(() => ({
-    getModelQuality: vi.fn(),
-    getModelQualityProbeTask: vi.fn(),
-    startModelQualityProbe: vi.fn(),
-  }))
+const {
+  getModelQuality,
+  getModelQualityProbeTask,
+  startModelQualityProbe,
+  toastError,
+} = vi.hoisted(() => ({
+  getModelQuality: vi.fn(),
+  getModelQualityProbeTask: vi.fn(),
+  startModelQualityProbe: vi.fn(),
+  toastError: vi.fn(),
+}))
+vi.mock('sonner', () => ({
+  toast: { success: vi.fn(), error: toastError },
+}))
 vi.mock('./api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api')>()
   return {
@@ -142,6 +150,7 @@ afterEach(() => {
   getModelQuality.mockReset()
   startModelQualityProbe.mockReset()
   getModelQualityProbeTask.mockReset()
+  toastError.mockReset()
 })
 
 describe('ModelQuality', () => {
@@ -157,6 +166,7 @@ describe('ModelQuality', () => {
     expect(screen.getByText('流量派生')).toBeInTheDocument()
     expect(screen.getAllByText('独立探针')).toHaveLength(2)
     expect(screen.getAllByText('失败').length).toBeGreaterThan(0)
+    expect(screen.getByText('answer mismatch')).toBeInTheDocument()
     expect(screen.getAllByText('尚无真实结果').length).toBeGreaterThan(0)
   })
 
@@ -181,6 +191,36 @@ describe('ModelQuality', () => {
       expect(getModelQualityProbeTask).toHaveBeenCalledWith('task-1')
     )
     await waitFor(() => expect(getModelQuality).toHaveBeenCalledTimes(2))
+  })
+
+  test('unlocks the probe action after three status lookup failures', async () => {
+    getModelQuality.mockResolvedValue(fixture)
+    startModelQualityProbe.mockResolvedValue({
+      success: true,
+      created: true,
+      data: { task_id: 'task-failed', status: 'pending' },
+    })
+    getModelQualityProbeTask.mockRejectedValue(new Error('offline'))
+    const user = userEvent.setup()
+    renderPage()
+
+    await user.click(
+      await screen.findByRole('button', { name: '运行主动探针' })
+    )
+    expect(screen.getByRole('button', { name: '运行中' })).toBeDisabled()
+
+    await waitFor(
+      () =>
+        expect(
+          screen.getByRole('button', { name: '运行主动探针' })
+        ).toBeEnabled(),
+      { timeout: 4000 }
+    )
+    expect(getModelQualityProbeTask).toHaveBeenCalledTimes(3)
+    expect(toastError).toHaveBeenCalledTimes(1)
+    expect(toastError).toHaveBeenCalledWith(
+      '主动探针状态查询失败，请稍后重试'
+    )
   })
 
   test('filters the model table and mobile cards from one search input', async () => {

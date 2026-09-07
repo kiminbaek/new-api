@@ -43,9 +43,12 @@ export function ChannelConcurrencyStatusPanel() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (signal?: AbortSignal) => {
     try {
-      const response = await api.get('/api/channel/concurrency/status')
+      const response = await api.get('/api/channel/concurrency/status', {
+        signal,
+      })
+      if (signal?.aborted) return
       if (response.data?.success) {
         setStatus(response.data.data as ConcurrencyStatus)
         setError(false)
@@ -53,16 +56,27 @@ export function ChannelConcurrencyStatusPanel() {
         setError(true)
       }
     } catch {
-      setError(true)
+      if (!signal?.aborted) setError(true)
     } finally {
-      setLoading(false)
+      if (!signal?.aborted) setLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    void load()
-    const timer = setInterval(() => void load(), REFRESH_INTERVAL_MS)
-    return () => clearInterval(timer)
+    const controller = new AbortController()
+    let timer: number | undefined
+    const poll = async () => {
+      await load(controller.signal)
+      if (!controller.signal.aborted) {
+        timer = window.setTimeout(() => void poll(), REFRESH_INTERVAL_MS)
+      }
+    }
+
+    void poll()
+    return () => {
+      controller.abort()
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
   }, [load])
 
   const items = status?.items ?? []

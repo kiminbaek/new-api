@@ -99,6 +99,9 @@ export async function startModelQualityProbe(
 export async function getModelQualityProbeTask(
   taskId: string
 ): Promise<ProbeTask> {
-  const res = await api.get<ProbeTaskResponse>(`/api/system-task/${taskId}`)
+  const res = await api.get<ProbeTaskResponse>(`/api/system-task/${taskId}`, {
+    skipBusinessError: true,
+    skipErrorHandler: true,
+  })
   return requireSuccessfulResponse(res.data, '主动探针状态加载失败').data
 }
