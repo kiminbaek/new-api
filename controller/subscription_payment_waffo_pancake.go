@@ -89,6 +89,11 @@ func SubscriptionRequestWaffoPancakePay(c *gin.Context) {
 		CreateTime:      time.Now().Unix(),
 		Status:          common.TopUpStatusPending,
 	}
+	if err := order.FreezePlan(plan, plan.Title); err != nil {
+		common.ApiErrorMsg(c, "创建订单失败")
+		return
+	}
+	order.ExpectedCurrency = "USD"
 	if err := order.Insert(); err != nil {
 		logger.LogError(c.Request.Context(), fmt.Sprintf("Waffo Pancake 订阅订单创建失败 user_id=%d plan_id=%d trade_no=%s error=%q", userId, plan.Id, tradeNo, err.Error()))
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "创建订单失败"})

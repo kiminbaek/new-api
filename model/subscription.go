@@ -36,6 +36,7 @@ const (
 var (
 	ErrSubscriptionOrderNotFound      = errors.New("subscription order not found")
 	ErrSubscriptionOrderStatusInvalid = errors.New("subscription order status invalid")
+	ErrSubscriptionPaymentMismatch    = errors.New("subscription payment confirmation mismatch")
 )
 
 const (
@@ -225,6 +226,32 @@ type SubscriptionOrder struct {
 	CompleteTime    int64  `json:"complete_time"`
 
 	ProviderPayload string `json:"provider_payload" gorm:"type:text"`
+
+	ExpectedCurrency string `json:"expected_currency" gorm:"type:varchar(8);default:''"`
+	ExpectedProduct  string `json:"expected_product" gorm:"type:varchar(255);default:''"`
+	PlanSnapshot     string `json:"plan_snapshot" gorm:"type:text"`
+}
+
+type SubscriptionPaymentConfirmation struct {
+	Amount   string
+	Currency string
+	Product  string
+}
+
+const SubscriptionPaymentAmountTolerance = "0.01"
+
+func (o *SubscriptionOrder) FreezePlan(plan *SubscriptionPlan, expectedProduct string) error {
+	if plan == nil || plan.Id <= 0 || plan.Id != o.PlanId {
+		return errors.New("invalid subscription plan snapshot")
+	}
+	snapshot, err := common.Marshal(plan)
+	if err != nil {
+		return err
+	}
+	o.ExpectedCurrency = strings.ToUpper(strings.TrimSpace(plan.Currency))
+	o.ExpectedProduct = strings.TrimSpace(expectedProduct)
+	o.PlanSnapshot = string(snapshot)
+	return nil
 }
 
 func (o *SubscriptionOrder) Insert() error {
@@ -502,7 +529,7 @@ func CreateUserSubscriptionFromPlanTx(tx *gorm.DB, userId int, plan *Subscriptio
 			return nil, errors.New("已达到该套餐购买上限")
 		}
 	}
-	nowUnix := GetDBTimestamp()
+	nowUnix := getDBTimestampTx(tx)
 	now := time.Unix(nowUnix, 0)
 	endUnix, err := calcPlanEndTime(now, plan)
 	if err != nil {
@@ -563,10 +590,59 @@ func refreshSubscriptionUserGroupCache(userId int, operation string) {
 	}
 }
 
-// Complete a subscription order (idempotent). Creates a UserSubscription snapshot from the plan.
+func validateSubscriptionPayment(order *SubscriptionOrder, plan *SubscriptionPlan, confirmation SubscriptionPaymentConfirmation) error {
+	actualAmount, err := decimal.NewFromString(strings.TrimSpace(confirmation.Amount))
+	if err != nil {
+		return fmt.Errorf("%w: invalid amount", ErrSubscriptionPaymentMismatch)
+	}
+	expectedAmount := decimal.NewFromFloat(order.Money)
+	tolerance := decimal.RequireFromString(SubscriptionPaymentAmountTolerance)
+	if actualAmount.Sub(expectedAmount).Abs().GreaterThan(tolerance) {
+		return fmt.Errorf("%w: amount expected=%s actual=%s tolerance=%s", ErrSubscriptionPaymentMismatch, expectedAmount.String(), actualAmount.String(), tolerance.String())
+	}
+	expectedCurrency := strings.ToUpper(strings.TrimSpace(order.ExpectedCurrency))
+	if expectedCurrency == "" && order.PaymentProvider == PaymentProviderEpay {
+		// Legacy Epay orders predate currency snapshots; Epay checkout is CNY-only.
+		expectedCurrency = "CNY"
+	} else if expectedCurrency == "" && plan != nil {
+		expectedCurrency = strings.ToUpper(strings.TrimSpace(plan.Currency))
+	}
+	actualCurrency := strings.ToUpper(strings.TrimSpace(confirmation.Currency))
+	// Epay's signed callback schema has no currency field. All other gateways must echo it.
+	if expectedCurrency != "" && actualCurrency == "" && order.PaymentProvider != PaymentProviderEpay {
+		return fmt.Errorf("%w: currency missing", ErrSubscriptionPaymentMismatch)
+	}
+	if expectedCurrency != "" && actualCurrency != "" && expectedCurrency != actualCurrency {
+		return fmt.Errorf("%w: currency expected=%s actual=%s", ErrSubscriptionPaymentMismatch, expectedCurrency, actualCurrency)
+	}
+	expectedProduct := strings.TrimSpace(order.ExpectedProduct)
+	actualProduct := strings.TrimSpace(confirmation.Product)
+	if expectedProduct != "" && actualProduct != expectedProduct {
+		return fmt.Errorf("%w: product expected=%q actual=%q", ErrSubscriptionPaymentMismatch, expectedProduct, actualProduct)
+	}
+	return nil
+}
+
+func subscriptionOrderPlan(order *SubscriptionOrder, currentPlan *SubscriptionPlan) (*SubscriptionPlan, error) {
+	if strings.TrimSpace(order.PlanSnapshot) == "" {
+		// Compatibility for pending orders created before snapshots existed.
+		return currentPlan, nil
+	}
+	var snapshot SubscriptionPlan
+	if err := common.Unmarshal([]byte(order.PlanSnapshot), &snapshot); err != nil {
+		return nil, fmt.Errorf("invalid subscription plan snapshot: %w", err)
+	}
+	if snapshot.Id != order.PlanId {
+		return nil, errors.New("subscription plan snapshot id mismatch")
+	}
+	snapshot.NormalizeDefaults()
+	return &snapshot, nil
+}
+
+// Complete a subscription order (idempotent). Creates a UserSubscription from the frozen plan snapshot.
 // expectedPaymentProvider guards against cross-gateway callback attacks (empty skips the check).
 // actualPaymentMethod updates the order's PaymentMethod to reflect the real payment type used (empty skips update).
-func CompleteSubscriptionOrder(tradeNo string, providerPayload string, expectedPaymentProvider string, actualPaymentMethod string) error {
+func CompleteSubscriptionOrder(tradeNo string, providerPayload string, expectedPaymentProvider string, actualPaymentMethod string, confirmation SubscriptionPaymentConfirmation) error {
 	if tradeNo == "" {
 		return errors.New("tradeNo is empty")
 	}
@@ -593,7 +669,14 @@ func CompleteSubscriptionOrder(tradeNo string, providerPayload string, expectedP
 		if order.Status != common.TopUpStatusPending {
 			return ErrSubscriptionOrderStatusInvalid
 		}
-		plan, err := GetSubscriptionPlanById(order.PlanId)
+		currentPlan, err := getSubscriptionPlanByIdTx(tx, order.PlanId)
+		if err != nil {
+			return err
+		}
+		if err := validateSubscriptionPayment(&order, currentPlan, confirmation); err != nil {
+			return err
+		}
+		plan, err := subscriptionOrderPlan(&order, currentPlan)
 		if err != nil {
 			return err
 		}

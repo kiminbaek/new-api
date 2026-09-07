@@ -281,13 +281,18 @@ func fulfillOrder(ctx context.Context, event stripe.Event, referenceId string, c
 
 	LockOrder(referenceId)
 	defer UnlockOrder(referenceId)
+	totalMinor, parseErr := strconv.ParseInt(event.GetObjectValue("amount_total"), 10, 64)
+	if parseErr != nil {
+		logger.LogError(ctx, fmt.Sprintf("Stripe 订阅金额解析失败 trade_no=%s client_ip=%s error=%q", referenceId, callerIp, parseErr.Error()))
+		return
+	}
 	payload := map[string]any{
 		"customer":     customerId,
 		"amount_total": event.GetObjectValue("amount_total"),
 		"currency":     strings.ToUpper(event.GetObjectValue("currency")),
 		"event_type":   string(event.Type),
 	}
-	if err := model.CompleteSubscriptionOrder(referenceId, common.GetJsonString(payload), model.PaymentProviderStripe, ""); err == nil {
+	if err := model.CompleteSubscriptionOrder(referenceId, common.GetJsonString(payload), model.PaymentProviderStripe, "", model.SubscriptionPaymentConfirmation{Amount: decimal.NewFromInt(totalMinor).Shift(-2).String(), Currency: payload["currency"].(string), Product: event.GetObjectValue("metadata", "subscription_product_id")}); err == nil {
 		logger.LogInfo(ctx, fmt.Sprintf("Stripe 订阅订单处理成功 trade_no=%s event_type=%s client_ip=%s", referenceId, string(event.Type), callerIp))
 		return
 	} else if err != nil && !errors.Is(err, model.ErrSubscriptionOrderNotFound) {
