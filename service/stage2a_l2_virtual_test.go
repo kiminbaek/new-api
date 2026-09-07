@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -66,4 +67,39 @@ func TestPrioritizeVirtualMembersUsesRequestGroupsWithoutDeletingMembers(t *test
 		return group == "paid" && member == "request-live"
 	})
 	assert.Equal(t, []string{"request-live", "global-only", "dead"}, got)
+}
+
+func TestApplyScheduledProbeObservationKeepsStateAndStatsAligned(t *testing.T) {
+	resetSmartState()
+	RegisterSmartDown(23, "ch23", "alpha", SmartDownModel, "isolated")
+	before, _, _ := RelayStatSample(23, "alpha")
+
+	reconciled, err := ApplyScheduledProbeObservation(23, "alpha", true, false, "timeout")
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	assert.True(t, IsSmartDown(23, "alpha"))
+	afterFailure, successFailure, _ := RelayStatSample(23, "alpha")
+	assert.Equal(t, before+1, afterFailure)
+	assert.Equal(t, 0, successFailure)
+
+	reconciled, err = ApplyScheduledProbeObservation(23, "alpha", true, true, "")
+	require.NoError(t, err)
+	assert.True(t, reconciled)
+	assert.False(t, IsSmartDown(23, "alpha"))
+	afterSuccess, successes, _ := RelayStatSample(23, "alpha")
+	assert.Equal(t, afterFailure+1, afterSuccess)
+	assert.Equal(t, 1, successes)
+}
+
+func TestApplyScheduledProbeObservationDoesNotRaceClaimedRecovery(t *testing.T) {
+	resetSmartState()
+	RegisterSmartDown(24, "ch24", "alpha", SmartDownModel, "isolated")
+	smartDownMu.Lock()
+	smartDown[smartDownKey(24, "alpha")].Probing = true
+	smartDown[smartDownKey(24, "alpha")].ProbeStartedAt = time.Now().Unix()
+	smartDownMu.Unlock()
+	reconciled, err := ApplyScheduledProbeObservation(24, "alpha", true, true, "")
+	require.NoError(t, err)
+	assert.False(t, reconciled)
+	assert.True(t, IsSmartDown(24, "alpha"))
 }

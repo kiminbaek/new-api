@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -480,7 +481,7 @@ func TestSequentialModelProbeModelFallbacks(t *testing.T) {
 func TestRunChannelTestTaskReturnsCancellationInsteadOfSuccess(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := runChannelTestTask(ctx, operation_setting.ChannelTestModeScheduledModels, false, true, nil)
+	_, err := runChannelTestTask(ctx, operation_setting.ChannelTestModeScheduledModels, false, true, "test-run", nil)
 	require.ErrorIs(t, err, context.Canceled)
 }
 
@@ -494,4 +495,73 @@ func TestFormatModelProbeReportOnlyIncludesFailures(t *testing.T) {
 	assert.Contains(t, report, "模型：bad-model")
 	assert.Contains(t, report, "问题：模型不存在")
 	assert.Contains(t, report, "建议：从渠道模型列表移除")
+	assert.NotContains(t, report, "系统任务")
+}
+
+func TestSequentialModelProbesUseExactPlanAndInterruptibleInterval(t *testing.T) {
+	oldProbe := scheduledModelProbe
+	oldInterval := common.RequestInterval
+	common.RequestInterval = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := make(chan string, 2)
+	scheduledModelProbe = func(_ context.Context, channel *model.Channel, _ int, modelName string, _ string, _ bool) testResult {
+		calls <- fmt.Sprintf("%d:%s", channel.Id, modelName)
+		return testResult{}
+	}
+	t.Cleanup(func() {
+		scheduledModelProbe = oldProbe
+		common.RequestInterval = oldInterval
+	})
+
+	channel := &model.Channel{Id: 7, Name: "probe", Models: " alpha,alpha, ,beta "}
+	progress := make([][2]int, 0, 2)
+	done := make(chan channelTestSummary, 1)
+	go func() {
+		summary, _ := runSequentialModelProbes(ctx, []*model.Channel{channel}, 1, func(processed, total int) {
+			progress = append(progress, [2]int{processed, total})
+		})
+		done <- summary
+	}()
+
+	require.Equal(t, "7:alpha", <-calls)
+	cancel()
+	select {
+	case summary := <-done:
+		assert.Equal(t, channelTestSummary{Tested: 1, Succeeded: 1}, summary)
+	case <-time.After(time.Second):
+		t.Fatal("RequestInterval wait did not stop on cancellation")
+	}
+	assert.Equal(t, [][2]int{{0, 2}, {1, 2}}, progress)
+	select {
+	case extra := <-calls:
+		t.Fatalf("unexpected probe after cancellation: %s", extra)
+	default:
+	}
+}
+
+func TestSequentialModelProbesDoNotCountCanceledProbe(t *testing.T) {
+	oldProbe := scheduledModelProbe
+	oldInterval := common.RequestInterval
+	common.RequestInterval = 0
+	ctx, cancel := context.WithCancel(context.Background())
+	scheduledModelProbe = func(_ context.Context, _ *model.Channel, _ int, _ string, _ string, _ bool) testResult {
+		cancel()
+		return testResult{}
+	}
+	t.Cleanup(func() {
+		scheduledModelProbe = oldProbe
+		common.RequestInterval = oldInterval
+	})
+
+	summary, probes := runSequentialModelProbes(ctx, []*model.Channel{{Id: 8, Models: "alpha"}}, 1, nil)
+	assert.Zero(t, summary.Tested)
+	assert.Zero(t, summary.Succeeded)
+	assert.Empty(t, probes)
+}
+
+func TestModelProbeNotificationIdentitySeparatesRunChannelAndModel(t *testing.T) {
+	base := modelProbeNotificationIdentity("run-a", []modelProbeResult{{ChannelID: 1, Model: "alpha"}})
+	assert.NotEqual(t, base, modelProbeNotificationIdentity("run-b", []modelProbeResult{{ChannelID: 1, Model: "alpha"}}))
+	assert.NotEqual(t, base, modelProbeNotificationIdentity("run-a", []modelProbeResult{{ChannelID: 2, Model: "alpha"}}))
+	assert.NotEqual(t, base, modelProbeNotificationIdentity("run-a", []modelProbeResult{{ChannelID: 1, Model: "beta"}}))
 }

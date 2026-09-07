@@ -3,6 +3,8 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -1167,23 +1169,17 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 // configured monitor ChannelTestMode (scheduled behavior), while a manual
 // trigger passes ChannelTestModeScheduledAll to test every channel. When notify
 // is set the root user is notified on completion. Cross-instance execution is
-// guarded by the system task per-type lock, so no process-local guard is needed.
-func runSequentialModelProbes(ctx context.Context, channels []*model.Channel, testUserID int, report func(processed, total int)) (channelTestSummary, []modelProbeResult) {
-	summary := channelTestSummary{}
-	total := 0
+// guarded by the SystemTask DB lease and, when configured, a Redis single-writer lease.
+var scheduledModelProbe = testChannel
+
+type scheduledModelProbeItem struct {
+	channel *model.Channel
+	model   string
+}
+
+func buildScheduledModelProbePlan(channels []*model.Channel) []scheduledModelProbeItem {
+	plan := make([]scheduledModelProbeItem, 0)
 	for _, channel := range channels {
-		if len(channel.GetModels()) > 0 {
-			total += len(channel.GetModels())
-		} else {
-			total++
-		}
-	}
-	processed := 0
-	results := make([]modelProbeResult, 0)
-	for _, channel := range channels {
-		if ctx.Err() != nil {
-			break
-		}
 		seen := make(map[string]struct{})
 		modelNames := channel.GetModels()
 		if len(modelNames) == 0 && channel.TestModel != nil && strings.TrimSpace(*channel.TestModel) != "" {
@@ -1201,24 +1197,89 @@ func runSequentialModelProbes(ctx context.Context, channels []*model.Channel, te
 				continue
 			}
 			seen[modelName] = struct{}{}
-			started := time.Now()
-			result := testChannel(ctx, channel, testUserID, modelName, "", shouldUseStreamForAutomaticChannelTest(channel))
-			reason, suggestion := probeReason(result)
-			item := modelProbeResult{ChannelID: channel.Id, ChannelName: channel.Name, Model: modelName, Success: result.newAPIError == nil && result.localErr == nil, ElapsedMS: time.Since(started).Milliseconds(), Reason: reason, Suggestion: suggestion}
-			results = append(results, item)
-			summary.Tested++
+			plan = append(plan, scheduledModelProbeItem{channel: channel, model: modelName})
+		}
+	}
+	return plan
+}
+
+func runSequentialModelProbes(ctx context.Context, channels []*model.Channel, testUserID int, report func(processed, total int)) (channelTestSummary, []modelProbeResult) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	summary := channelTestSummary{}
+	plan := buildScheduledModelProbePlan(channels)
+	total := len(plan)
+	processed := 0
+	if report != nil {
+		report(0, total)
+	}
+	results := make([]modelProbeResult, 0, total)
+	for index, probe := range plan {
+		if ctx.Err() != nil {
+			break
+		}
+		if index > 0 && common.RequestInterval > 0 {
+			timer := time.NewTimer(common.RequestInterval)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return summary, results
+			case <-timer.C:
+			}
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		started := time.Now()
+		result := scheduledModelProbe(ctx, probe.channel, testUserID, probe.model, "", shouldUseStreamForAutomaticChannelTest(probe.channel))
+		if ctx.Err() != nil {
+			break
+		}
+		reason, suggestion := probeReason(result)
+		item := modelProbeResult{ChannelID: probe.channel.Id, ChannelName: probe.channel.Name, Model: probe.model, Success: result.newAPIError == nil && result.localErr == nil, ElapsedMS: time.Since(started).Milliseconds(), Reason: reason, Suggestion: suggestion}
+		reconciled := false
+		if service.IsSmartDown(probe.channel.Id, probe.model) {
+			var recoveryErr error
+			reconciled, recoveryErr = service.ApplyScheduledProbeObservation(probe.channel.Id, probe.model, probe.channel.Status == common.ChannelStatusEnabled, item.Success, reason)
+			if reconciled && recoveryErr != nil {
+				item.Success = false
+				item.Reason = "模型响应正常，但恢复状态保存失败"
+				item.Suggestion = "检查数据库和渠道状态后重试恢复"
+			}
+		}
+		if !reconciled {
 			if item.Success {
-				summary.Succeeded++
+				service.RecordRelaySuccess(probe.channel.Id, probe.model)
 			} else {
-				summary.Failed++
+				service.RecordRelayFailure(probe.channel.Id, probe.model)
 			}
-			processed++
-			if report != nil {
-				report(processed, total)
-			}
+		}
+		results = append(results, item)
+		summary.Tested++
+		if item.Success {
+			summary.Succeeded++
+		} else {
+			summary.Failed++
+		}
+		processed++
+		if report != nil {
+			report(processed, total)
 		}
 	}
 	return summary, results
+}
+
+func modelProbeNotificationIdentity(runIdentity string, results []modelProbeResult) string {
+	var b strings.Builder
+	b.WriteString(runIdentity)
+	for _, item := range results {
+		fmt.Fprintf(&b, "|%d:%s", item.ChannelID, item.Model)
+	}
+	sum := sha256.Sum256([]byte(b.String()))
+	return "probe-run:" + hex.EncodeToString(sum[:12])
 }
 
 func formatModelProbeReport(results []modelProbeResult) string {
@@ -1237,7 +1298,7 @@ func formatModelProbeReport(results []modelProbeResult) string {
 	var b strings.Builder
 	for index, item := range failed {
 		if b.Len() > 6000 {
-			fmt.Fprintf(&b, "\n其余 %d 项异常已省略，请在系统任务详情查看完整结果。", len(failed)-index)
+			fmt.Fprintf(&b, "\n其余 %d 项异常已省略，请在管理后台巡检记录查看完整结果。", len(failed)-index)
 			break
 		}
 		fmt.Fprintf(&b, "\n- 渠道 %s (#%d)\n  模型：%s\n  问题：%s\n  建议：%s\n", item.ChannelName, item.ChannelID, item.Model, item.Reason, item.Suggestion)
@@ -1245,7 +1306,7 @@ func formatModelProbeReport(results []modelProbeResult) string {
 	return b.String()
 }
 
-func runChannelTestTask(ctx context.Context, mode string, notify bool, isScheduled bool, report func(processed, total int)) (channelTestSummary, error) {
+func runChannelTestTask(ctx context.Context, mode string, notify bool, isScheduled bool, runIdentity string, report func(processed, total int)) (channelTestSummary, error) {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
 			return channelTestSummary{}, err
@@ -1285,7 +1346,7 @@ func runChannelTestTask(ctx context.Context, mode string, notify bool, isSchedul
 			content := fmt.Sprintf("本轮按渠道×模型顺序巡检完成：共 %d 项，成功 %d，异常 %d。%s", summary.Tested, summary.Succeeded, summary.Failed, formatModelProbeReport(probes))
 			// Sentinel is the production QQ delivery path. NotifyRootUser uses a
 			// different user-webhook payload and must not be used for this report.
-			service.EmitSentinel("channel_test", -1, "scheduled_models", "模型巡检结果", content)
+			service.EmitSentinel("channel_test", -1, modelProbeNotificationIdentity(runIdentity, probes), "模型巡检结果", content)
 		}
 		return summary, nil
 	}

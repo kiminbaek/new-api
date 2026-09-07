@@ -632,6 +632,42 @@ func failProbeLocked(st *SmartDownState, errMsg string) {
 	st.NextProbeAt = time.Now().Add(backoff).Unix()
 }
 
+// ApplyScheduledProbeObservation reconciles a completed scheduled probe with
+// the smart-recovery state. It atomically claims only an idle quarantined item,
+// so it cannot race the dedicated recovery worker. Statistics are recorded only
+// after the state transition succeeds; a DB recovery failure is counted as an
+// operational failure and remains quarantined.
+func ApplyScheduledProbeObservation(chId int, mdl string, channelEnabled bool, ok bool, errMsg string) (bool, error) {
+	key := smartDownKey(chId, mdl)
+	smartDownMu.Lock()
+	st, exists := smartDown[key]
+	if !exists || st.Probing || st.CanaryStage > 0 {
+		smartDownMu.Unlock()
+		return false, nil
+	}
+	st.Probing = true
+	st.ProbeStartedAt = time.Now().Unix()
+	smartDownMu.Unlock()
+
+	if !ok {
+		FinishSmartProbe(chId, mdl, false, errMsg)
+		RecordRelayFailure(chId, mdl)
+		return true, nil
+	}
+	if channelEnabled {
+		FinishSmartProbe(chId, mdl, true, "")
+		RecordRelaySuccess(chId, mdl)
+		return true, nil
+	}
+	_, err := FinishSmartProbeWithChannelRecovery(chId, mdl)
+	if err != nil {
+		RecordRelayFailure(chId, mdl)
+		return true, err
+	}
+	RecordRelaySuccess(chId, mdl)
+	return true, nil
+}
+
 // FinishSmartProbe 记录探测结果。ok=true 时进入 1% Canary；ok=false 时退避。
 func FinishSmartProbe(chId int, mdl string, ok bool, errMsg string) (channelFullyRecovered bool) {
 	key := smartDownKey(chId, mdl)

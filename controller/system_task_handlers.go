@@ -71,7 +71,21 @@ func (channelTestHandler) Run(ctx context.Context, task *model.SystemTask, runne
 	if isScheduled && operation_setting.GetMonitorSetting().ChannelTestMode == operation_setting.ChannelTestModeScheduledModels {
 		shouldNotify = true
 	}
-	summary, err := runChannelTestTask(ctx, mode, shouldNotify, isScheduled, service.NewSystemTaskProgressReporter(task, runnerID))
+	runIdentity := task.TaskID + "@" + runnerID
+	if (isScheduled && operation_setting.GetMonitorSetting().ChannelTestMode == operation_setting.ChannelTestModeScheduledModels) || mode == operation_setting.ChannelTestModeScheduledModels {
+		lease, acquired, leaseErr := service.AcquireScheduledModelProbeLease(ctx, runIdentity)
+		if leaseErr != nil {
+			finishSystemTaskHandler(ctx, task, runnerID, model.SystemTaskStatusFailed, nil, leaseErr)
+			return
+		}
+		if !acquired {
+			finishSystemTaskHandler(ctx, task, runnerID, model.SystemTaskStatusFailed, nil, service.ErrScheduledModelProbeLeaseBusy)
+			return
+		}
+		defer lease.Release()
+		ctx = lease.Context()
+	}
+	summary, err := runChannelTestTask(ctx, mode, shouldNotify, isScheduled, runIdentity, service.NewSystemTaskProgressReporter(task, runnerID))
 	if err != nil {
 		// A lost lease/cancelled context is never a successful health run: retain
 		// partial summary for audit but leave the final state failed.
