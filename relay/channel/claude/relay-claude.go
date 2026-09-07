@@ -228,6 +228,13 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		err = HandleStreamResponseData(c, info, claudeInfo, data)
 		if err != nil {
+			var event dto.ClaudeResponse
+			if common.UnmarshalJsonStr(data, &event) == nil {
+				if claudeError := event.GetClaudeError(); claudeError != nil && claudeError.Type != "" {
+					sr.RejectAndStop(err)
+					return
+				}
+			}
 			sr.Stop(err)
 		}
 	})

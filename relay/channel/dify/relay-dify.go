@@ -240,7 +240,9 @@ func difyStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 			sr.Done()
 			return
 		} else if difyResponse.Event == "error" {
-			sr.Stop(fmt.Errorf("dify error event"))
+			// The current frame is an upstream protocol error, not downstream-visible
+			// content. Reject it so a zero-output attempt remains safely retryable.
+			sr.RejectAndStop(fmt.Errorf("dify error event"))
 			return
 		}
 		openaiResponse := *streamResponseDify2OpenAI(difyResponse)
