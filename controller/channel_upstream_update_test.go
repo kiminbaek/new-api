@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -603,4 +604,58 @@ func TestDetectAllChannelUpstreamModelUpdatesRejectsExistingActiveTask(t *testin
 	require.Equal(t, http.StatusConflict, recorder.Code)
 	require.Contains(t, recorder.Body.String(), existing.TaskID)
 	require.Contains(t, recorder.Body.String(), "已有模型更新任务正在运行或等待中")
+}
+
+func TestApplyChannelUpstreamModelUpdatesRollsBackChannelWhenAbilitiesFail(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	channel := &model.Channel{Name: "atomic-channel", Key: "sk-test", Group: "default", Models: "old-model", Status: common.ChannelStatusEnabled}
+	settings := channel.GetOtherSettings()
+	settings.UpstreamModelUpdateLastDetectedModels = []string{"new-model"}
+	channel.SetOtherSettings(settings)
+	require.NoError(t, db.Create(channel).Error)
+	require.NoError(t, channel.UpdateAbilities(nil))
+	require.NoError(t, db.Exec(`CREATE TRIGGER fail_atomic_ability BEFORE INSERT ON abilities BEGIN SELECT RAISE(ABORT, 'forced ability failure'); END;`).Error)
+
+	_, _, _, _, _, err := applyChannelUpstreamModelUpdates(channel, []string{"new-model"}, nil, nil)
+	require.ErrorContains(t, err, "forced ability failure")
+
+	var persisted model.Channel
+	require.NoError(t, db.First(&persisted, channel.Id).Error)
+	require.Equal(t, "old-model", persisted.Models)
+	persistedSettings := persisted.GetOtherSettings()
+	require.Equal(t, []string{"new-model"}, persistedSettings.UpstreamModelUpdateLastDetectedModels)
+	var abilities []model.Ability
+	require.NoError(t, db.Where("channel_id = ?", channel.Id).Find(&abilities).Error)
+	require.Len(t, abilities, 1)
+	require.Equal(t, "old-model", abilities[0].Model)
+}
+
+func TestApplyAllChannelUpstreamModelUpdatesRollsBackEntireBatch(t *testing.T) {
+	db := setupModelListControllerTestDB(t)
+	for _, id := range []int{801, 802} {
+		channel := &model.Channel{Id: id, Name: fmt.Sprintf("batch-%d", id), Key: "sk-test", Group: "default", Models: "old-model", Status: common.ChannelStatusEnabled}
+		settings := channel.GetOtherSettings()
+		settings.UpstreamModelUpdateCheckEnabled = true
+		settings.UpstreamModelUpdateLastDetectedModels = []string{"new-model"}
+		channel.SetOtherSettings(settings)
+		require.NoError(t, db.Create(channel).Error)
+		require.NoError(t, channel.UpdateAbilities(nil))
+	}
+	require.NoError(t, db.Exec(`CREATE TRIGGER fail_second_channel_ability BEFORE INSERT ON abilities WHEN NEW.channel_id = 802 BEGIN SELECT RAISE(ABORT, 'forced second channel failure'); END;`).Error)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/channel/upstream_updates/apply_all", nil)
+	ApplyAllChannelUpstreamModelUpdates(ctx)
+
+	require.Contains(t, recorder.Body.String(), `"success":false`)
+	for _, id := range []int{801, 802} {
+		var channel model.Channel
+		require.NoError(t, db.First(&channel, id).Error)
+		require.Equal(t, "old-model", channel.Models)
+		var abilities []model.Ability
+		require.NoError(t, db.Where("channel_id = ?", id).Find(&abilities).Error)
+		require.Len(t, abilities, 1)
+		require.Equal(t, "old-model", abilities[0].Model)
+	}
 }

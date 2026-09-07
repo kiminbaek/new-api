@@ -28,6 +28,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
+	"gorm.io/gorm"
 )
 
 const (
@@ -496,7 +497,7 @@ func fetchAdvancedCustomUpstreamModelIDs(channel *model.Channel, baseURL string)
 	return parseOpenAIModelIDs(body)
 }
 
-func updateChannelUpstreamModelSettings(channel *model.Channel, settings dto.ChannelOtherSettings, updateModels bool) error {
+func updateChannelUpstreamModelSettings(tx *gorm.DB, channel *model.Channel, settings dto.ChannelOtherSettings, updateModels bool) error {
 	channel.SetOtherSettings(settings)
 	updates := map[string]interface{}{
 		"settings": channel.OtherSettings,
@@ -504,7 +505,7 @@ func updateChannelUpstreamModelSettings(channel *model.Channel, settings dto.Cha
 	if updateModels {
 		updates["models"] = channel.Models
 	}
-	return model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Updates(updates).Error
+	return tx.Model(&model.Channel{}).Where("id = ?", channel.Id).Updates(updates).Error
 }
 
 func checkAndPersistChannelUpstreamModelUpdates(
@@ -525,7 +526,7 @@ func checkAndPersistChannelUpstreamModelUpdates(
 	pendingAddModels, pendingRemoveModels, fetchErr := collectPendingUpstreamModelChanges(channel, *settings)
 	settings.UpstreamModelUpdateLastCheckTime = now
 	if fetchErr != nil {
-		if err = updateChannelUpstreamModelSettings(channel, *settings, false); err != nil {
+		if err = updateChannelUpstreamModelSettings(model.DB, channel, *settings, false); err != nil {
 			return false, 0, err
 		}
 		return false, 0, fetchErr
@@ -545,13 +546,17 @@ func checkAndPersistChannelUpstreamModelUpdates(
 	}
 	settings.UpstreamModelUpdateLastRemovedModels = pendingRemoveModels
 
-	if err = updateChannelUpstreamModelSettings(channel, *settings, modelsChanged); err != nil {
-		return false, autoAdded, err
-	}
-	if modelsChanged {
-		if err = channel.UpdateAbilities(nil); err != nil {
-			return true, autoAdded, err
+	err = model.DB.Transaction(func(tx *gorm.DB) error {
+		if err := updateChannelUpstreamModelSettings(tx, channel, *settings, modelsChanged); err != nil {
+			return err
 		}
+		if modelsChanged {
+			return channel.UpdateAbilities(tx)
+		}
+		return nil
+	})
+	if err != nil {
+		return false, autoAdded, err
 	}
 	return modelsChanged, autoAdded, nil
 }
@@ -952,7 +957,8 @@ func DetectChannelUpstreamModelUpdates(c *gin.Context) {
 	})
 }
 
-func applyChannelUpstreamModelUpdates(
+func applyChannelUpstreamModelUpdatesTx(
+	tx *gorm.DB,
 	channel *model.Channel,
 	addModelsInput []string,
 	ignoreModelsInput []string,
@@ -990,16 +996,37 @@ func applyChannelUpstreamModelUpdates(
 	settings.UpstreamModelUpdateLastRemovedModels = remainingRemoveModels
 	settings.UpstreamModelUpdateLastCheckTime = common.GetTimestamp()
 
-	if err := updateChannelUpstreamModelSettings(channel, settings, modelsChanged); err != nil {
+	if err := updateChannelUpstreamModelSettings(tx, channel, settings, modelsChanged); err != nil {
 		return nil, nil, nil, nil, false, err
 	}
 
 	if modelsChanged {
-		if err := channel.UpdateAbilities(nil); err != nil {
+		if err := channel.UpdateAbilities(tx); err != nil {
 			return addModels, removeModels, remainingModels, remainingRemoveModels, true, err
 		}
 	}
 	return addModels, removeModels, remainingModels, remainingRemoveModels, modelsChanged, nil
+}
+
+func applyChannelUpstreamModelUpdates(
+	channel *model.Channel,
+	addModelsInput []string,
+	ignoreModelsInput []string,
+	removeModelsInput []string,
+) (
+	addedModels []string,
+	removedModels []string,
+	remainingModels []string,
+	remainingRemoveModels []string,
+	modelsChanged bool,
+	err error,
+) {
+	err = model.DB.Transaction(func(tx *gorm.DB) error {
+		addedModels, removedModels, remainingModels, remainingRemoveModels, modelsChanged, err =
+			applyChannelUpstreamModelUpdatesTx(tx, channel, addModelsInput, ignoreModelsInput, removeModelsInput)
+		return err
+	})
+	return
 }
 
 func collectPendingApplyUpstreamModelChanges(settings dto.ChannelOtherSettings) (pendingAddModels []string, pendingRemoveModels []string) {
@@ -1021,84 +1048,75 @@ func findEnabledChannelsAfterID(lastID int, batchSize int) ([]*model.Channel, er
 
 func ApplyAllChannelUpstreamModelUpdates(c *gin.Context) {
 	results := make([]applyAllChannelUpstreamModelUpdatesResult, 0)
-	failed := make([]int, 0)
 	refreshNeeded := false
 	addedModelCount := 0
 	removedModelCount := 0
 
-	lastID := 0
-	for {
-		channels, err := findEnabledChannelsAfterID(lastID, channelUpstreamModelUpdateTaskBatchSize)
-		if err != nil {
-			common.ApiError(c, err)
-			return
+	err := model.DB.Transaction(func(tx *gorm.DB) error {
+		lastID := 0
+		for {
+			var channels []*model.Channel
+			query := tx.Select(channelUpstreamModelUpdateSelectFields).
+				Where("status = ?", common.ChannelStatusEnabled).
+				Order("id asc").Limit(channelUpstreamModelUpdateTaskBatchSize)
+			if lastID > 0 {
+				query = query.Where("id > ?", lastID)
+			}
+			if err := query.Find(&channels).Error; err != nil {
+				return err
+			}
+			if len(channels) == 0 {
+				break
+			}
+			lastID = channels[len(channels)-1].Id
+
+			for _, channel := range channels {
+				if channel == nil {
+					continue
+				}
+				settings := channel.GetOtherSettings()
+				if !settings.UpstreamModelUpdateCheckEnabled {
+					continue
+				}
+				pendingAddModels, pendingRemoveModels := collectPendingApplyUpstreamModelChanges(settings)
+				if len(pendingAddModels) == 0 && len(pendingRemoveModels) == 0 {
+					continue
+				}
+
+				addedModels, removedModels, remainingModels, remainingRemoveModels, modelsChanged, applyErr :=
+					applyChannelUpstreamModelUpdatesTx(tx, channel, pendingAddModels, nil, pendingRemoveModels)
+				if applyErr != nil {
+					return fmt.Errorf("apply channel %d upstream model updates: %w", channel.Id, applyErr)
+				}
+				refreshNeeded = refreshNeeded || modelsChanged
+				addedModelCount += len(addedModels)
+				removedModelCount += len(removedModels)
+				results = append(results, applyAllChannelUpstreamModelUpdatesResult{
+					ChannelID: channel.Id, ChannelName: channel.Name,
+					AddedModels: addedModels, RemovedModels: removedModels,
+					RemainingModels: remainingModels, RemainingRemoveModels: remainingRemoveModels,
+				})
+			}
+			if len(channels) < channelUpstreamModelUpdateTaskBatchSize {
+				break
+			}
 		}
-		if len(channels) == 0 {
-			break
-		}
-		lastID = channels[len(channels)-1].Id
-
-		for _, channel := range channels {
-			if channel == nil {
-				continue
-			}
-
-			settings := channel.GetOtherSettings()
-			if !settings.UpstreamModelUpdateCheckEnabled {
-				continue
-			}
-
-			pendingAddModels, pendingRemoveModels := collectPendingApplyUpstreamModelChanges(settings)
-			if len(pendingAddModels) == 0 && len(pendingRemoveModels) == 0 {
-				continue
-			}
-
-			addedModels, removedModels, remainingModels, remainingRemoveModels, modelsChanged, err := applyChannelUpstreamModelUpdates(
-				channel,
-				pendingAddModels,
-				nil,
-				pendingRemoveModels,
-			)
-			if err != nil {
-				failed = append(failed, channel.Id)
-				continue
-			}
-			if modelsChanged {
-				refreshNeeded = true
-			}
-			addedModelCount += len(addedModels)
-			removedModelCount += len(removedModels)
-			results = append(results, applyAllChannelUpstreamModelUpdatesResult{
-				ChannelID:             channel.Id,
-				ChannelName:           channel.Name,
-				AddedModels:           addedModels,
-				RemovedModels:         removedModels,
-				RemainingModels:       remainingModels,
-				RemainingRemoveModels: remainingRemoveModels,
-			})
-		}
-
-		if len(channels) < channelUpstreamModelUpdateTaskBatchSize {
-			break
-		}
+		return nil
+	})
+	if err != nil {
+		common.ApiError(c, err)
+		return
 	}
-
 	if refreshNeeded {
 		refreshChannelRuntimeCache()
 	}
 
-	recordManageAudit(c, "channel.upstream_apply_all", map[string]interface{}{
-		"count": len(results),
-	})
+	recordManageAudit(c, "channel.upstream_apply_all", map[string]interface{}{"count": len(results)})
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
+		"success": true, "message": "",
 		"data": gin.H{
-			"processed_channels": len(results),
-			"added_models":       addedModelCount,
-			"removed_models":     removedModelCount,
-			"failed_channel_ids": failed,
-			"results":            results,
+			"processed_channels": len(results), "added_models": addedModelCount,
+			"removed_models": removedModelCount, "failed_channel_ids": []int{}, "results": results,
 		},
 	})
 }

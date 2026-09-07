@@ -2,6 +2,7 @@ package model
 
 import (
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -258,4 +259,63 @@ func TestTokenCacheInitPreservesLiveQuotaAndFenceBlocksStaleSnapshot(t *testing.
 	cached, err = cacheGetTokenByKey(token.Key)
 	require.NoError(t, err)
 	assert.Equal(t, 100, cached.RemainQuota)
+}
+
+func TestRemoveFlushedRecordPreservesConcurrentDelta(t *testing.T) {
+	resetBatchUpdateTestState(t)
+	const id = 991
+	addNewRecord(BatchUpdateTypeUsedQuota, id, 40)
+
+	// The flush snapshot contains 40 while a concurrent request adds 7.
+	addNewRecord(BatchUpdateTypeUsedQuota, id, 7)
+	removeFlushedRecord(BatchUpdateTypeUsedQuota, id, 40)
+
+	batchUpdateLocks[BatchUpdateTypeUsedQuota].Lock()
+	defer batchUpdateLocks[BatchUpdateTypeUsedQuota].Unlock()
+	assert.Equal(t, 7, batchUpdateStores[BatchUpdateTypeUsedQuota][id])
+}
+
+func TestRemoveFlushedRecordKeepsConcurrentAdds(t *testing.T) {
+	resetBatchUpdateTestState(t)
+	const id = 993
+	const additions = 100
+	addNewRecord(BatchUpdateTypeRequestCount, id, 40)
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(additions + 1)
+	for range additions {
+		go func() {
+			defer wg.Done()
+			<-start
+			addNewRecord(BatchUpdateTypeRequestCount, id, 1)
+		}()
+	}
+	go func() {
+		defer wg.Done()
+		<-start
+		removeFlushedRecord(BatchUpdateTypeRequestCount, id, 40)
+	}()
+	close(start)
+	wg.Wait()
+
+	batchUpdateLocks[BatchUpdateTypeRequestCount].Lock()
+	defer batchUpdateLocks[BatchUpdateTypeRequestCount].Unlock()
+	assert.Equal(t, additions, batchUpdateStores[BatchUpdateTypeRequestCount][id])
+}
+
+func TestFailedBatchUpdateRetainsOriginalSnapshot(t *testing.T) {
+	setupUserUpdateTestState(t)
+	resetBatchUpdateTestState(t)
+	common.BatchUpdateEnabled = true
+
+	user := User{Id: 992, Username: "batch-retain-user", Password: "password", Status: common.UserStatusEnabled, Quota: 1000}
+	require.NoError(t, DB.Create(&user).Error)
+	addNewRecord(BatchUpdateTypeUserQuota, user.Id, -25)
+	require.NoError(t, DB.Exec(`CREATE TRIGGER fail_batch_retain BEFORE UPDATE ON users WHEN OLD.id = 992 BEGIN SELECT RAISE(ABORT, 'forced retain failure'); END;`).Error)
+
+	assert.False(t, batchUpdate())
+	batchUpdateLocks[BatchUpdateTypeUserQuota].Lock()
+	assert.Equal(t, -25, batchUpdateStores[BatchUpdateTypeUserQuota][user.Id])
+	batchUpdateLocks[BatchUpdateTypeUserQuota].Unlock()
 }

@@ -63,6 +63,18 @@ func addNewRecord(type_ int, id int, value int) {
 	batchUpdateStores[type_][id] = sum
 }
 
+func removeFlushedRecord(type_ int, id int, flushed int) {
+	batchUpdateLocks[type_].Lock()
+	defer batchUpdateLocks[type_].Unlock()
+	current := batchUpdateStores[type_][id]
+	remaining := current - flushed
+	if remaining == 0 {
+		delete(batchUpdateStores[type_], id)
+		return
+	}
+	batchUpdateStores[type_][id] = remaining
+}
+
 func batchUpdate() bool {
 	batchUpdateFlushMu.Lock()
 	defer batchUpdateFlushMu.Unlock()
@@ -85,11 +97,15 @@ func batchUpdate() bool {
 
 	allSucceeded := true
 	common.SysLog("batch update started")
+	// Copy a stable snapshot without removing live deltas first. A process crash
+	// or persistence failure must never make accounting disappear from memory.
 	stores := make([]map[int]int, BatchUpdateTypeCount)
 	for i := 0; i < BatchUpdateTypeCount; i++ {
 		batchUpdateLocks[i].Lock()
-		stores[i] = batchUpdateStores[i]
-		batchUpdateStores[i] = make(map[int]int)
+		stores[i] = make(map[int]int, len(batchUpdateStores[i]))
+		for key, value := range batchUpdateStores[i] {
+			stores[i][key] = value
+		}
 		batchUpdateLocks[i].Unlock()
 	}
 
@@ -101,15 +117,17 @@ func batchUpdate() bool {
 			switch i {
 			case BatchUpdateTypeTokenQuota:
 				if err := increaseTokenQuota(key, value); err != nil {
-					common.SysLog("failed to batch update token quota, queued for retry: " + err.Error())
-					addNewRecord(i, key, value)
+					common.SysLog("failed to batch update token quota, retained for retry: " + err.Error())
 					allSucceeded = false
+				} else {
+					removeFlushedRecord(i, key, value)
 				}
 			case BatchUpdateTypeChannelUsedQuota:
 				if err := updateChannelUsedQuota(key, value); err != nil {
-					common.SysLog("failed to batch update channel quota, queued for retry: " + err.Error())
-					addNewRecord(i, key, value)
+					common.SysLog("failed to batch update channel quota, retained for retry: " + err.Error())
 					allSucceeded = false
+				} else {
+					removeFlushedRecord(i, key, value)
 				}
 			}
 		}
@@ -131,11 +149,12 @@ func batchUpdate() bool {
 	}
 	for key := range userIDs {
 		if err := updateUserQuotaUsedQuotaAndRequestCount(key, userQuotaStore[key], usedQuotaStore[key], requestCountStore[key]); err != nil {
-			common.SysLog("failed to batch update user accounting, queued for retry: " + err.Error())
-			addNewRecord(BatchUpdateTypeUserQuota, key, userQuotaStore[key])
-			addNewRecord(BatchUpdateTypeUsedQuota, key, usedQuotaStore[key])
-			addNewRecord(BatchUpdateTypeRequestCount, key, requestCountStore[key])
+			common.SysLog("failed to batch update user accounting, retained for retry: " + err.Error())
 			allSucceeded = false
+		} else {
+			removeFlushedRecord(BatchUpdateTypeUserQuota, key, userQuotaStore[key])
+			removeFlushedRecord(BatchUpdateTypeUsedQuota, key, usedQuotaStore[key])
+			removeFlushedRecord(BatchUpdateTypeRequestCount, key, requestCountStore[key])
 		}
 	}
 	common.SysLog("batch update finished")

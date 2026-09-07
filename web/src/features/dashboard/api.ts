@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { api } from '@/lib/api'
+import { requireSuccessfulResponse } from '@/lib/api-response'
 
 import type {
   FlowQuotaDataItem,
@@ -48,7 +49,7 @@ export async function getUserQuotaDates(
     endpoint,
     { params }
   )
-  return res.data
+  return requireSuccessfulResponse(res.data, 'Failed to load usage data')
 }
 
 // ----------------------------------------------------------------------------
@@ -63,7 +64,10 @@ export async function getUserQuotaDataByUsers(params: {
     '/api/data/users',
     { params }
   )
-  return res.data
+  return requireSuccessfulResponse(
+    res.data,
+    'Failed to load user consumption data'
+  )
 }
 
 export async function getFlowQuotaDates(
@@ -89,5 +93,5 @@ export async function getUptimeStatus() {
   const res = await api.get<{ success: boolean; data: UptimeGroupResult[] }>(
     '/api/uptime/status'
   )
-  return res.data
+  return requireSuccessfulResponse(res.data, 'Failed to load uptime status')
 }

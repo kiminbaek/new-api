@@ -263,6 +263,11 @@ export function SummaryCards() {
               </p>
             </div>
           </div>
+          {usageTrendQuery.isError && (
+            <div role='alert' className='text-destructive text-xs'>
+              {usageTrendQuery.error.message}
+            </div>
+          )}
           <StaggerContainer className='grid grid-cols-3 gap-1.5 sm:gap-3'>
             {items.map((it) => (
               <StaggerItem

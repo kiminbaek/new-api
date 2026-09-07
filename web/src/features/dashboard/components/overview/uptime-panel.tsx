@@ -20,6 +20,7 @@ import { Activity, RotateCw } from 'lucide-react'
 import { memo, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { ErrorState } from '@/components/error-state'
 import { Button } from '@/components/ui/button'
 import { IconBadge } from '@/components/ui/icon-badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -50,18 +51,25 @@ export function UptimePanel() {
   const [groups, setGroups] = useState<UptimeGroupResult[]>([])
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     const abortController = new AbortController()
 
+    setError(null)
     void getUptimeStatus()
       .then((res) => {
         if (abortController.signal.aborted) return
         setGroups(res?.data || [])
       })
-      .catch(() => {
+      .catch((reason: unknown) => {
         if (abortController.signal.aborted) return
         setGroups([])
+        setError(
+          reason instanceof Error
+            ? reason.message
+            : t('Failed to load uptime status')
+        )
       })
       .finally(() => {
         if (!abortController.signal.aborted) {
@@ -72,20 +80,26 @@ export function UptimePanel() {
     return () => {
       abortController.abort()
     }
-  }, [])
+  }, [t])
 
   const handleRefresh = () => {
     const abortController = new AbortController()
     setRefreshing(true)
+    setError(null)
 
     void getUptimeStatus()
       .then((res) => {
         if (abortController.signal.aborted) return
         setGroups(res?.data || [])
       })
-      .catch(() => {
+      .catch((reason: unknown) => {
         if (abortController.signal.aborted) return
         setGroups([])
+        setError(
+          reason instanceof Error
+            ? reason.message
+            : t('Failed to load uptime status')
+        )
       })
       .finally(() => {
         if (!abortController.signal.aborted) {
@@ -106,7 +120,7 @@ export function UptimePanel() {
       }
       description={t('Grouped monitor status from Uptime Kuma')}
       loading={loading}
-      empty={!groups.length}
+      empty={!error && !groups.length}
       emptyMessage={t('No uptime monitoring configured')}
       height='h-80'
       contentClassName='p-0'
@@ -125,53 +139,62 @@ export function UptimePanel() {
         </Button>
       }
     >
-      <ScrollArea className='h-80'>
-        <div>
-          {groups.map((group, groupIdx) => (
-            <div key={group.categoryName}>
-              <div className='bg-muted/30 border-border/60 border-b px-3 py-2 sm:px-5'>
-                <div className='flex items-center gap-2'>
-                  <h4 className='text-muted-foreground text-xs font-semibold tracking-wider uppercase'>
-                    {group.categoryName}
-                  </h4>
-                  <span className='text-muted-foreground/40 font-mono text-xs tabular-nums'>
-                    {group.monitors?.length || 0}
-                  </span>
-                </div>
-              </div>
-
-              {group.monitors?.map(
-                (monitor: UptimeMonitor, monitorIdx: number) => (
-                  <div
-                    key={monitor.name}
-                    className={cn(
-                      'hover:bg-muted/40 flex items-center justify-between gap-2 px-3 py-2 transition-colors sm:px-5 sm:py-2.5',
-                      monitorIdx < (group.monitors?.length || 0) - 1 &&
-                        'border-border/40 border-b',
-                      groupIdx < groups.length - 1 &&
-                        monitorIdx === (group.monitors?.length || 0) - 1 &&
-                        'border-border/60 border-b'
-                    )}
-                  >
-                    <div className='flex min-w-0 items-center gap-2.5'>
-                      <StatusDot status={monitor.status} />
-                      <span className='truncate text-sm'>{monitor.name}</span>
-                      {monitor.group && (
-                        <span className='text-muted-foreground/40 shrink-0 text-xs'>
-                          ({monitor.group})
-                        </span>
-                      )}
-                    </div>
-                    <span className='text-foreground shrink-0 font-mono text-sm font-semibold tabular-nums'>
-                      {((monitor.uptime ?? 0) * 100).toFixed(2)}%
+      {error ? (
+        <ErrorState
+          title={t('Unable to load uptime status')}
+          description={error}
+          onRetry={handleRefresh}
+          className='h-80'
+        />
+      ) : (
+        <ScrollArea className='h-80'>
+          <div>
+            {groups.map((group, groupIdx) => (
+              <div key={group.categoryName}>
+                <div className='bg-muted/30 border-border/60 border-b px-3 py-2 sm:px-5'>
+                  <div className='flex items-center gap-2'>
+                    <h4 className='text-muted-foreground text-xs font-semibold tracking-wider uppercase'>
+                      {group.categoryName}
+                    </h4>
+                    <span className='text-muted-foreground/40 font-mono text-xs tabular-nums'>
+                      {group.monitors?.length || 0}
                     </span>
                   </div>
-                )
-              )}
-            </div>
-          ))}
-        </div>
-      </ScrollArea>
+                </div>
+
+                {group.monitors?.map(
+                  (monitor: UptimeMonitor, monitorIdx: number) => (
+                    <div
+                      key={monitor.name}
+                      className={cn(
+                        'hover:bg-muted/40 flex items-center justify-between gap-2 px-3 py-2 transition-colors sm:px-5 sm:py-2.5',
+                        monitorIdx < (group.monitors?.length || 0) - 1 &&
+                          'border-border/40 border-b',
+                        groupIdx < groups.length - 1 &&
+                          monitorIdx === (group.monitors?.length || 0) - 1 &&
+                          'border-border/60 border-b'
+                      )}
+                    >
+                      <div className='flex min-w-0 items-center gap-2.5'>
+                        <StatusDot status={monitor.status} />
+                        <span className='truncate text-sm'>{monitor.name}</span>
+                        {monitor.group && (
+                          <span className='text-muted-foreground/40 shrink-0 text-xs'>
+                            ({monitor.group})
+                          </span>
+                        )}
+                      </div>
+                      <span className='text-foreground shrink-0 font-mono text-sm font-semibold tabular-nums'>
+                        {((monitor.uptime ?? 0) * 100).toFixed(2)}%
+                      </span>
+                    </div>
+                  )
+                )}
+              </div>
+            ))}
+          </div>
+        </ScrollArea>
+      )}
     </PanelWrapper>
   )
 }

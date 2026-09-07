@@ -144,6 +144,14 @@ export function LogStatCards(props: LogStatCardsProps) {
 
   return (
     <div className='overflow-hidden rounded-lg border'>
+      {error && (
+        <div
+          role='alert'
+          className='text-destructive border-b px-3 py-2 text-xs'
+        >
+          Failed to load usage data
+        </div>
+      )}
       <div className='divide-border/60 grid min-w-0 grid-cols-2 divide-x sm:grid-cols-3 lg:grid-cols-5'>
         {items.map((it, idx) => {
           const Icon = it.icon

@@ -54,12 +54,11 @@ const LEVEL: Record<QualityLevel, { label: string; className: string }> = {
     className: 'bg-muted text-muted-foreground',
   },
 }
-const duration = (value: number) =>
-  value > 0
-    ? value >= 1000
-      ? `${(value / 1000).toFixed(1)}s`
-      : `${Math.round(value)}ms`
-    : '暂无'
+const duration = (value: number | null) => {
+  if (value === null || value <= 0) return '暂无'
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}s`
+  return `${Math.round(value)}ms`
+}
 const pct = (value: number) =>
   `${Number.isFinite(value) ? value.toFixed(1) : '0.0'}%`
 
@@ -92,12 +91,13 @@ function StatCard({
   )
 }
 function FailureText({ row }: { row: ModelQualityRow }) {
-  if (!row.failure_breakdown_coverage)
+  if (!row.failure_breakdown_coverage) {
     return (
       <span className='text-muted-foreground'>
         未分类历史 {row.unclassified_failures}
       </span>
     )
+  }
   return (
     <span className='text-muted-foreground'>
       限流 {row.rate_limited} · 渠道 {row.channel_failures} · 取消{' '}
@@ -285,7 +285,9 @@ export function ModelQuality() {
                             </TableCell>
                             <TableCell>
                               <div className='font-medium'>
-                                {Math.round(r.health_score)} / 100
+                                {r.health_score === null
+                                  ? '--'
+                                  : `${Math.round(r.health_score)} / 100`}
                               </div>
                               <div className='text-muted-foreground text-xs'>
                                 可信 {Math.round(r.confidence * 100)}% ·{' '}
@@ -337,7 +339,9 @@ export function ModelQuality() {
                               调度健康
                             </div>
                             <div className='font-semibold'>
-                              {Math.round(r.health_score)} / 100
+                              {r.health_score === null
+                                ? '--'
+                                : `${Math.round(r.health_score)} / 100`}
                             </div>
                           </div>
                           <div>

@@ -45,6 +45,7 @@ export interface Model {
   sync_official: number
   created_time: number
   updated_time: number
+  revision: number
   name_rule: number
   // Runtime fields
   bound_channels?: BoundChannel[]
