@@ -340,6 +340,8 @@ func migrateDB() error {
 		&SystemInstance{},
 		&SystemTask{},
 		&SystemTaskLock{},
+		&ModelQualityProbeRun{},
+		&ModelQualityProbeResult{},
 		&CasbinRule{},
 		&AuthzRole{},
 	)

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/service"
@@ -16,30 +17,32 @@ import (
 )
 
 type modelQualityRow struct {
-	ModelName                     string   `json:"model_name"`
-	RequestCount                  int64    `json:"request_count"`
-	SuccessCount                  int64    `json:"success_count"`
-	SuccessRate                   float64  `json:"success_rate"`
-	SuccessRateExcludingRateLimit float64  `json:"success_rate_excluding_rate_limit"`
-	AvgLatencyMs                  int64    `json:"avg_latency_ms"`
-	P50LatencyMs                  int64    `json:"p50_latency_ms"`
-	P95LatencyMs                  int64    `json:"p95_latency_ms"`
-	P50TtftMs                     int64    `json:"p50_ttft_ms"`
-	P95TtftMs                     int64    `json:"p95_ttft_ms"`
-	RateLimited                   int64    `json:"rate_limited"`
-	ChannelFailures               int64    `json:"channel_failures"`
-	ClientCancelled               int64    `json:"client_cancelled"`
-	OtherFailures                 int64    `json:"other_failures"`
-	UnclassifiedFailures          int64    `json:"unclassified_failures"`
-	FailureBreakdownCoverage      bool     `json:"failure_breakdown_coverage"`
-	QualityLevel                  string   `json:"quality_level"`
-	ProbeStatus                   string   `json:"probe_status"`
-	HealthScore                   *float64 `json:"health_score"`
-	Confidence                    float64  `json:"confidence"`
-	LatencySampleCount            int      `json:"latency_sample_count"`
-	RouteCount                    int      `json:"route_count"`
-	QuarantinedRoutes             int      `json:"quarantined_routes"`
-	RetryCount                    int64    `json:"retry_count"`
+	ModelName                     string                          `json:"model_name"`
+	RequestCount                  int64                           `json:"request_count"`
+	SuccessCount                  int64                           `json:"success_count"`
+	SuccessRate                   float64                         `json:"success_rate"`
+	SuccessRateExcludingRateLimit float64                         `json:"success_rate_excluding_rate_limit"`
+	AvgLatencyMs                  int64                           `json:"avg_latency_ms"`
+	P50LatencyMs                  int64                           `json:"p50_latency_ms"`
+	P95LatencyMs                  int64                           `json:"p95_latency_ms"`
+	P50TtftMs                     int64                           `json:"p50_ttft_ms"`
+	P95TtftMs                     int64                           `json:"p95_ttft_ms"`
+	RateLimited                   int64                           `json:"rate_limited"`
+	ChannelFailures               int64                           `json:"channel_failures"`
+	ClientCancelled               int64                           `json:"client_cancelled"`
+	OtherFailures                 int64                           `json:"other_failures"`
+	UnclassifiedFailures          int64                           `json:"unclassified_failures"`
+	FailureBreakdownCoverage      bool                            `json:"failure_breakdown_coverage"`
+	QualityLevel                  string                          `json:"quality_level"`
+	ProbeStatus                   string                          `json:"probe_status"`
+	HealthScore                   *float64                        `json:"health_score"`
+	Confidence                    float64                         `json:"confidence"`
+	LatencySampleCount            int                             `json:"latency_sample_count"`
+	RouteCount                    int                             `json:"route_count"`
+	QuarantinedRoutes             int                             `json:"quarantined_routes"`
+	RetryCount                    int64                           `json:"retry_count"`
+	ProbeResults                  []model.ModelQualityProbeResult `json:"probe_results"`
+	LastProbeAt                   int64                           `json:"last_probe_at"`
 }
 
 func qualityLevel(rate float64, samples int64) string {
@@ -83,6 +86,11 @@ func GetModelQualityBoard(c *gin.Context) {
 		return
 	}
 	priorities, err := model.GetModelPriorityBoard()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	latestProbes, err := model.GetLatestModelQualityProbeResults(liveModels)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
 		return
@@ -139,7 +147,21 @@ func GetModelQualityBoard(c *gin.Context) {
 			adjusted = float64(succ) / float64(denom) * 100
 		}
 		a := routes[m.ModelName]
-		row := modelQualityRow{ModelName: m.ModelName, RequestCount: m.RequestCount, SuccessCount: succ, SuccessRate: m.SuccessRate, SuccessRateExcludingRateLimit: adjusted, AvgLatencyMs: avgLatency, P50LatencyMs: p50, P95LatencyMs: p95, P50TtftMs: t50, P95TtftMs: t95, RateLimited: m.RateLimitCount, ChannelFailures: m.ChannelFailureCount, ClientCancelled: m.ClientCancelCount, OtherFailures: m.OtherFailureCount, RetryCount: m.RetryCount, UnclassifiedFailures: unclassified, FailureBreakdownCoverage: failures == 0 || unclassified == 0, QualityLevel: qualityLevel(m.SuccessRate, m.RequestCount), ProbeStatus: "untested", LatencySampleCount: len(ls.LatencyMs)}
+		probeByDimension := latestProbes[m.ModelName]
+		probeResults := make([]model.ModelQualityProbeResult, 0, len(probeByDimension))
+		lastProbeAt := int64(0)
+		for _, dimension := range service.ModelQualityProbeDimensions {
+			if dimension.Source != "active" {
+				continue
+			}
+			if result, ok := probeByDimension[dimension.Key]; ok {
+				probeResults = append(probeResults, result)
+				if result.CreatedAt > lastProbeAt {
+					lastProbeAt = result.CreatedAt
+				}
+			}
+		}
+		row := modelQualityRow{ModelName: m.ModelName, RequestCount: m.RequestCount, SuccessCount: succ, SuccessRate: m.SuccessRate, SuccessRateExcludingRateLimit: adjusted, AvgLatencyMs: avgLatency, P50LatencyMs: p50, P95LatencyMs: p95, P50TtftMs: t50, P95TtftMs: t95, RateLimited: m.RateLimitCount, ChannelFailures: m.ChannelFailureCount, ClientCancelled: m.ClientCancelCount, OtherFailures: m.OtherFailureCount, RetryCount: m.RetryCount, UnclassifiedFailures: unclassified, FailureBreakdownCoverage: failures == 0 || unclassified == 0, QualityLevel: qualityLevel(m.SuccessRate, m.RequestCount), ProbeStatus: service.AggregateProbeStatus(probeByDimension), ProbeResults: probeResults, LastProbeAt: lastProbeAt, LatencySampleCount: len(ls.LatencyMs)}
 		if m.RequestCount > 0 && a != nil && a.n > 0 {
 			healthScore := a.health / float64(a.n)
 			row.HealthScore = &healthScore
@@ -156,5 +178,5 @@ func GetModelQualityBoard(c *gin.Context) {
 	if total > 0 {
 		rate = float64(success) / float64(total) * 100
 	}
-	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"hours": hours, "request_count": total, "success_count": success, "success_rate": rate, "models": rows, "probe_dimensions": []gin.H{{"key": "connectivity", "label": "连通性", "status": "derived"}, {"key": "reasoning", "label": "回答合理性", "status": "untested"}, {"key": "fingerprint", "label": "模型指纹", "status": "untested"}, {"key": "no_injection", "label": "无加塞", "status": "untested"}, {"key": "sources", "label": "来源可信", "status": "untested"}, {"key": "output_limit", "label": "输出上限", "status": "untested"}, {"key": "ad_injection", "label": "广告注入", "status": "untested"}}}})
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"hours": hours, "request_count": total, "success_count": success, "success_rate": rate, "models": rows, "probe_dimensions": service.ModelQualityProbeDimensions, "probe_auto_enabled": common.GetEnvOrDefaultBool("MODEL_QUALITY_PROBE_AUTO_ENABLED", false), "probe_routing_impact": false}})
 }

@@ -17,7 +17,7 @@ func withSystemTaskHandlerDB(t *testing.T) {
 	previousDB := model.DB
 	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.SystemTask{}, &model.SystemTaskLock{}, &model.Channel{}, &model.Midjourney{}, &model.Task{}))
+	require.NoError(t, db.AutoMigrate(&model.SystemTask{}, &model.SystemTaskLock{}, &model.Channel{}, &model.Midjourney{}, &model.Task{}, &model.ModelQualityProbeRun{}, &model.ModelQualityProbeResult{}))
 	model.DB = db
 	t.Cleanup(func() {
 		model.DB = previousDB
@@ -36,6 +36,7 @@ func TestCanceledScheduledHandlersCannotSucceed(t *testing.T) {
 		{name: "model update", handler: modelUpdateHandler{}},
 		{name: "midjourney", handler: midjourneyPollHandler{}},
 		{name: "async task", handler: asyncTaskPollHandler{}},
+		{name: "model quality probe", handler: modelQualityProbeHandler{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

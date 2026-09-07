@@ -1,15 +1,25 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import type { ModelQualityData } from './api'
 import { ModelQuality } from './index'
 
-const { getModelQuality } = vi.hoisted(() => ({ getModelQuality: vi.fn() }))
+const { getModelQuality, getModelQualityProbeTask, startModelQualityProbe } =
+  vi.hoisted(() => ({
+    getModelQuality: vi.fn(),
+    getModelQualityProbeTask: vi.fn(),
+    startModelQualityProbe: vi.fn(),
+  }))
 vi.mock('./api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api')>()
-  return { ...actual, getModelQuality }
+  return {
+    ...actual,
+    getModelQuality,
+    getModelQualityProbeTask,
+    startModelQualityProbe,
+  }
 })
 
 const fixture: ModelQualityData = {
@@ -37,8 +47,24 @@ const fixture: ModelQualityData = {
       unclassified_failures: 1,
       failure_breakdown_coverage: false,
       quality_level: 'risk',
-      probe_status: 'untested',
+      probe_status: 'fail',
+      probe_results: [
+        {
+          id: 1,
+          run_id: 'run-1',
+          task_id: 'task-1',
+          model: 'quality-model-a',
+          dimension: 'reasoning',
+          status: 'fail',
+          score: 0,
+          evidence: 'answer mismatch',
+          latency_ms: 33,
+          created_at: 1700000000,
+        },
+      ],
+      last_probe_at: 1700000000,
       health_score: 82,
+      latency_sample_count: 30,
       confidence: 0.75,
       route_count: 3,
       quarantined_routes: 1,
@@ -64,7 +90,10 @@ const fixture: ModelQualityData = {
       failure_breakdown_coverage: true,
       quality_level: 'insufficient',
       probe_status: 'untested',
+      probe_results: [],
+      last_probe_at: 0,
       health_score: 100,
+      latency_sample_count: 1,
       confidence: 0.1,
       route_count: 1,
       quarantined_routes: 0,
@@ -72,10 +101,27 @@ const fixture: ModelQualityData = {
     },
   ],
   probe_dimensions: [
-    { key: 'connectivity', label: '连通性', status: 'derived' },
-    { key: 'reasoning', label: '回答合理性', status: 'untested' },
-    { key: 'fingerprint', label: '模型指纹', status: 'untested' },
+    {
+      key: 'connectivity',
+      label: '连通性',
+      description: '运行指标',
+      source: 'derived',
+    },
+    {
+      key: 'reasoning',
+      label: '回答合理性',
+      description: '主动检查',
+      source: 'active',
+    },
+    {
+      key: 'fingerprint',
+      label: '模型指纹',
+      description: '无法可靠证明时未测',
+      source: 'active',
+    },
   ],
+  probe_auto_enabled: false,
+  probe_routing_impact: false,
 }
 
 const clients: QueryClient[] = []
@@ -96,6 +142,8 @@ afterEach(() => {
   for (const client of clients) client.clear()
   clients.length = 0
   getModelQuality.mockReset()
+  startModelQualityProbe.mockReset()
+  getModelQualityProbeTask.mockReset()
 })
 
 describe('ModelQuality', () => {
@@ -109,7 +157,32 @@ describe('ModelQuality', () => {
     expect(screen.getByText('额外重试 2')).toBeInTheDocument()
     expect(screen.getByText(/2 次额外重试/)).toBeInTheDocument()
     expect(screen.getByText('流量派生')).toBeInTheDocument()
-    expect(screen.getAllByText('未测')).toHaveLength(2)
+    expect(screen.getAllByText('独立探针')).toHaveLength(2)
+    expect(screen.getAllByText('失败').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('尚无真实结果').length).toBeGreaterThan(0)
+  })
+
+  test('starts the independent probe from the board', async () => {
+    getModelQuality.mockResolvedValue(fixture)
+    startModelQualityProbe.mockResolvedValue({
+      success: true,
+      created: true,
+      data: { task_id: 'task-1', status: 'pending' },
+    })
+    getModelQualityProbeTask.mockResolvedValue({
+      task_id: 'task-1',
+      status: 'succeeded',
+    })
+    const user = userEvent.setup()
+    renderPage()
+    await user.click(
+      await screen.findByRole('button', { name: '运行主动探针' })
+    )
+    expect(startModelQualityProbe).toHaveBeenCalledTimes(1)
+    await waitFor(() =>
+      expect(getModelQualityProbeTask).toHaveBeenCalledWith('task-1')
+    )
+    await waitFor(() => expect(getModelQuality).toHaveBeenCalledTimes(2))
   })
 
   test('filters the model table and mobile cards from one search input', async () => {

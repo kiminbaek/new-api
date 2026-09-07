@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   Activity,
   AlertCircle,
@@ -7,7 +7,8 @@ import {
   Search,
   ShieldCheck,
 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { toast } from 'sonner'
 
 import { ErrorState } from '@/components/error-state'
 import { SectionPageLayout } from '@/components/layout'
@@ -33,7 +34,14 @@ import {
   TableRow,
 } from '@/components/ui/table'
 
-import { getModelQuality, type ModelQualityRow, type QualityLevel } from './api'
+import {
+  getModelQuality,
+  getModelQualityProbeTask,
+  startModelQualityProbe,
+  type ModelQualityRow,
+  type ProbeResultStatus,
+  type QualityLevel,
+} from './api'
 
 const LEVEL: Record<QualityLevel, { label: string; className: string }> = {
   stable: {
@@ -54,6 +62,26 @@ const LEVEL: Record<QualityLevel, { label: string; className: string }> = {
     className: 'bg-muted text-muted-foreground',
   },
 }
+const PROBE_STATUS: Record<
+  ProbeResultStatus,
+  { label: string; className: string }
+> = {
+  pass: {
+    label: '通过',
+    className: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400',
+  },
+  fail: { label: '失败', className: 'bg-destructive/10 text-destructive' },
+  error: {
+    label: '错误',
+    className: 'bg-amber-500/10 text-amber-700 dark:text-amber-400',
+  },
+  untested: { label: '未测', className: 'bg-muted text-muted-foreground' },
+}
+function ProbeBadge({ status }: { status: ProbeResultStatus }) {
+  const item = PROBE_STATUS[status]
+  return <Badge className={item.className}>{item.label}</Badge>
+}
+
 const duration = (value: number | null) => {
   if (value === null || value <= 0) return '暂无'
   if (value >= 1000) return `${(value / 1000).toFixed(1)}s`
@@ -109,10 +137,43 @@ function FailureText({ row }: { row: ModelQualityRow }) {
 export function ModelQuality() {
   const [hours, setHours] = useState(168)
   const [search, setSearch] = useState('')
+  const [probeTaskId, setProbeTaskId] = useState<string | null>(null)
   const query = useQuery({
     queryKey: ['model-quality', hours],
     queryFn: () => getModelQuality(hours),
   })
+  const probe = useMutation({
+    mutationFn: () => startModelQualityProbe(),
+    onSuccess: (response) => {
+      setProbeTaskId(response.data.task_id)
+      toast.success(response.created ? '主动探针已入队' : '主动探针正在运行')
+    },
+    onError: (error: Error) => toast.error(error.message || '主动探针启动失败'),
+  })
+  useEffect(() => {
+    if (!probeTaskId) return
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const task = await getModelQualityProbeTask(probeTaskId)
+        if (cancelled || task.status === 'pending' || task.status === 'running')
+          return
+        setProbeTaskId(null)
+        await query.refetch()
+        if (task.status === 'succeeded') toast.success('主动探针运行完成')
+        else toast.error(task.error || '主动探针运行失败')
+      } catch {
+        // Keep the last persisted board visible and retry while the task is active.
+      }
+    }
+    void poll()
+    const interval = window.setInterval(() => void poll(), 1000)
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [probeTaskId, query.refetch])
+
   const rows = useMemo(
     () =>
       query.data?.models.filter((r) =>
@@ -142,6 +203,14 @@ export function ModelQuality() {
           </SelectContent>
         </Select>
         <Button
+          size='sm'
+          disabled={probe.isPending || probeTaskId !== null}
+          onClick={() => probe.mutate()}
+        >
+          <ShieldCheck />
+          {probe.isPending || probeTaskId ? '运行中' : '运行主动探针'}
+        </Button>
+        <Button
           variant='outline'
           size='sm'
           disabled={query.isFetching}
@@ -157,7 +226,8 @@ export function ModelQuality() {
             <ShieldCheck />
             <AlertTitle>真实流量与主动探测分开计分</AlertTitle>
             <AlertDescription>
-              调用成功率、延迟和调度健康来自真实请求；回答合理性、模型指纹、无加塞、来源、输出上限和广告注入在主动探测运行前统一显示“未测”，不会用默认满分伪装。
+              调用成功率、延迟和调度健康来自真实请求；六维探针独立持久化，默认不自动运行，也绝不参与路由、优先级、禁用或
+              RelayStat。没有可验证结果时显示“未测”。
             </AlertDescription>
           </Alert>
           {query.isLoading ? (
@@ -211,13 +281,13 @@ export function ModelQuality() {
                         key={d.key}
                         className='bg-muted/35 flex items-center justify-between rounded-lg border px-3 py-2 text-sm'
                       >
-                        <span>{d.label}</span>
+                        <span title={d.description}>{d.label}</span>
                         <Badge
                           variant={
-                            d.status === 'derived' ? 'secondary' : 'outline'
+                            d.source === 'derived' ? 'secondary' : 'outline'
                           }
                         >
-                          {d.status === 'derived' ? '流量派生' : '未测'}
+                          {d.source === 'derived' ? '流量派生' : '独立探针'}
                         </Badge>
                       </div>
                     ))}
@@ -248,6 +318,7 @@ export function ModelQuality() {
                           <TableHead>首字 P95</TableHead>
                           <TableHead>失败归因</TableHead>
                           <TableHead>调度健康</TableHead>
+                          <TableHead>主动探针</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
@@ -285,8 +356,8 @@ export function ModelQuality() {
                             </TableCell>
                             <TableCell>
                               <div className='font-medium'>
-                                {r.health_score === null
-                                  ? '--'
+                                {r.health_score == null
+                                  ? '暂无'
                                   : `${Math.round(r.health_score)} / 100`}
                               </div>
                               <div className='text-muted-foreground text-xs'>
@@ -295,6 +366,28 @@ export function ModelQuality() {
                                 {r.quarantined_routes
                                   ? ` · 隔离 ${r.quarantined_routes}`
                                   : ''}
+                              </div>
+                            </TableCell>
+                            <TableCell>
+                              <ProbeBadge status={r.probe_status} />
+                              <div className='text-muted-foreground mt-1 text-xs'>
+                                {r.last_probe_at
+                                  ? new Date(
+                                      r.last_probe_at * 1000
+                                    ).toLocaleString()
+                                  : '尚无真实结果'}
+                              </div>
+                              <div className='mt-2 flex max-w-64 flex-wrap gap-1'>
+                                {r.probe_results.map((result) => (
+                                  <span
+                                    key={result.dimension}
+                                    title={result.evidence}
+                                    className='rounded border px-1.5 py-0.5 text-xs'
+                                  >
+                                    {result.dimension}:{' '}
+                                    {PROBE_STATUS[result.status].label}
+                                  </span>
+                                ))}
                               </div>
                             </TableCell>
                           </TableRow>
@@ -339,8 +432,8 @@ export function ModelQuality() {
                               调度健康
                             </div>
                             <div className='font-semibold'>
-                              {r.health_score === null
-                                ? '--'
+                              {r.health_score == null
+                                ? '暂无'
                                 : `${Math.round(r.health_score)} / 100`}
                             </div>
                           </div>
@@ -355,6 +448,17 @@ export function ModelQuality() {
                         </div>
                         <div className='mt-3 border-t pt-3 text-xs'>
                           <FailureText row={r} />
+                        </div>
+                        <div className='mt-3 flex items-center gap-2 border-t pt-3 text-xs'>
+                          <span>主动探针</span>
+                          <ProbeBadge status={r.probe_status} />
+                          <span className='text-muted-foreground'>
+                            {r.last_probe_at
+                              ? new Date(
+                                  r.last_probe_at * 1000
+                                ).toLocaleString()
+                              : '尚无真实结果'}
+                          </span>
                         </div>
                       </div>
                     ))}
