@@ -142,6 +142,7 @@ export function ModelQuality() {
     queryKey: ['model-quality', hours],
     queryFn: () => getModelQuality(hours),
   })
+  const { refetch } = query
   const probe = useMutation({
     mutationFn: () => startModelQualityProbe(),
     onSuccess: (response) => {
@@ -156,10 +157,15 @@ export function ModelQuality() {
     const poll = async () => {
       try {
         const task = await getModelQualityProbeTask(probeTaskId)
-        if (cancelled || task.status === 'pending' || task.status === 'running')
+        if (
+          cancelled ||
+          task.status === 'pending' ||
+          task.status === 'running'
+        ) {
           return
+        }
         setProbeTaskId(null)
-        await query.refetch()
+        await refetch()
         if (task.status === 'succeeded') toast.success('主动探针运行完成')
         else toast.error(task.error || '主动探针运行失败')
       } catch {
@@ -172,7 +178,7 @@ export function ModelQuality() {
       cancelled = true
       window.clearInterval(interval)
     }
-  }, [probeTaskId, query.refetch])
+  }, [probeTaskId, refetch])
 
   const rows = useMemo(
     () =>
@@ -230,20 +236,28 @@ export function ModelQuality() {
               RelayStat。没有可验证结果时显示“未测”。
             </AlertDescription>
           </Alert>
-          {query.isLoading ? (
-            <LoadingState className='min-h-64' />
-          ) : query.isError ? (
-            <ErrorState
-              title='模型质量数据加载失败'
-              description={
-                query.error instanceof Error
-                  ? query.error.message
-                  : '请稍后重试'
-              }
-              onRetry={() => void query.refetch()}
-            />
-          ) : query.data ? (
-            <>
+          {(() => {
+            if (query.isLoading) {
+              return <LoadingState className='min-h-64' />
+            }
+            if (query.isError) {
+              return (
+                <ErrorState
+                  title='模型质量数据加载失败'
+                  description={
+                    query.error instanceof Error
+                      ? query.error.message
+                      : '请稍后重试'
+                  }
+                  onRetry={() => void refetch()}
+                />
+              )
+            }
+            if (!query.data) {
+              return null
+            }
+            return (
+              <>
               <div className='grid grid-cols-2 gap-3 xl:grid-cols-4'>
                 <StatCard
                   icon={Activity}
@@ -470,8 +484,9 @@ export function ModelQuality() {
                   ) : null}
                 </CardContent>
               </Card>
-            </>
-          ) : null}
+              </>
+            )
+          })()}
         </div>
       </SectionPageLayout.Content>
     </SectionPageLayout>
