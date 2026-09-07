@@ -14,7 +14,7 @@ type GeneralSetting struct {
 	DocsLink            string `json:"docs_link"`
 	PingIntervalEnabled bool   `json:"ping_interval_enabled"`
 	PingIntervalSeconds int    `json:"ping_interval_seconds"`
-	// FirstTokenTimeoutSeconds limits how long an upstream stream may stay silent before its first SSE data event. Zero disables this protection.
+	// FirstTokenTimeoutSeconds limits how long a stream may run before the client receives its first valid token or tool-call data. Zero disables this protection.
 	FirstTokenTimeoutSeconds int `json:"first_token_timeout_seconds"`
 	// 当前站点额度展示类型：USD / CNY / TOKENS
 	QuotaDisplayType string `json:"quota_display_type"`

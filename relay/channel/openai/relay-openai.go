@@ -19,6 +19,30 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func openAIStreamFrameHasBusinessData(data string) bool {
+	var response dto.ChatCompletionsStreamResponse
+	if err := common.UnmarshalJsonStr(data, &response); err != nil {
+		return false
+	}
+	for _, choice := range response.Choices {
+		if choice.Delta.GetContentString() != "" || choice.Delta.GetReasoningContent() != "" || len(choice.Delta.ToolCalls) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func markOpenAIFrameWritten(status *relaycommon.StreamStatus, data string) {
+	if status == nil {
+		return
+	}
+	if openAIStreamFrameHasBusinessData(data) {
+		status.MarkClientVisible()
+		return
+	}
+	status.MarkProtocolCommitted()
+}
+
 func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, data string, forceFormat bool, thinkToContent bool) error {
 	if data == "" {
 		return nil
@@ -123,10 +147,23 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		if lastStreamData != "" {
+			beforeSize := c.Writer.Size()
 			if err := HandleStreamFormat(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
 				common.SysLog("error handling stream format: " + err.Error())
+				if c.Writer.Size() > beforeSize {
+					sr.ProtocolCommitted()
+				}
 				sr.Error(err)
+			} else if openAIStreamFrameHasBusinessData(lastStreamData) {
+				sr.ClientVisible()
+			} else {
+				sr.ProtocolCommitted()
 			}
+		} else {
+			// OpenAI delays one frame so usage and terminal metadata can be
+			// inspected. Merely accepting this frame must not stop the
+			// downstream first-token timer.
+			sr.Buffered()
 		}
 		if len(data) > 0 {
 			if lastStreamData != "" {
@@ -152,6 +189,18 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 			info.ReceivedResponseCount--
 		}
 	}
+	// An explicit [DONE] may flush OpenAI's delayed final frame. EOF may do so
+	// only after an earlier business frame was already client-visible; a stream
+	// containing just one buffered frame must remain zero-output and retryable.
+	canFlushLastFrame := info.StreamStatus.EndReason == relaycommon.StreamEndReasonDone ||
+		(info.StreamStatus.EndReason == relaycommon.StreamEndReasonEOF && info.StreamStatus.ClientVisible())
+	if canFlushLastFrame && info.RelayFormat == types.RelayFormatOpenAI && shouldSendLastResp {
+		if err := sendStreamData(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
+			return nil, types.NewErrorWithStatusCode(err, types.ErrorCodeBadResponse, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
+		}
+		markOpenAIFrameWritten(info.StreamStatus, lastStreamData)
+	}
+
 	if streamErr := helper.StreamOutcomeError(info); streamErr != nil {
 		logger.LogError(c, "[FAKE-SUCCESS] "+streamErr.Error())
 		return nil, streamErr
@@ -177,12 +226,6 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 					usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens,
 					usage.InputTokens, usage.OutputTokens)
 			}
-		}
-	}
-
-	if info.RelayFormat == types.RelayFormatOpenAI {
-		if shouldSendLastResp {
-			_ = sendStreamData(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent)
 		}
 	}
 

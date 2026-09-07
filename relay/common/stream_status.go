@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -37,6 +38,10 @@ type StreamStatus struct {
 	mu         sync.Mutex
 	Errors     []StreamErrorEntry
 	ErrorCount int
+
+	visibilityTracked atomic.Bool
+	clientVisible     atomic.Bool
+	protocolCommitted atomic.Bool
 }
 
 func NewStreamStatus() *StreamStatus {
@@ -51,6 +56,50 @@ func (s *StreamStatus) SetEndReason(reason StreamEndReason, err error) {
 		s.EndReason = reason
 		s.EndError = err
 	})
+}
+
+// MarkClientVisible records that valid business data (content, reasoning, or
+// tool-call data) has been flushed to the downstream client. Once true, a
+// relay attempt must never be transparently replayed on another upstream.
+func (s *StreamStatus) MarkClientVisible() {
+	if s == nil {
+		return
+	}
+	s.visibilityTracked.Store(true)
+	s.clientVisible.Store(true)
+	s.protocolCommitted.Store(true)
+}
+
+func (s *StreamStatus) ClientVisible() bool {
+	return s != nil && s.clientVisible.Load()
+}
+
+// MarkProtocolCommitted records that bytes belonging to this SSE response
+// have reached the client. Keepalives do not count as a first token, but they
+// still make transparent replay unsafe because a second attempt would splice
+// a new protocol stream into the existing response.
+func (s *StreamStatus) MarkProtocolCommitted() {
+	if s != nil {
+		s.visibilityTracked.Store(true)
+		s.protocolCommitted.Store(true)
+	}
+}
+
+// TrackVisibility opts an adaptor into explicit downstream visibility. Until
+// opted in, ReceivedResponseCount remains the compatibility signal for older
+// adaptors which write accepted chunks directly.
+func (s *StreamStatus) TrackVisibility() {
+	if s != nil {
+		s.visibilityTracked.Store(true)
+	}
+}
+
+func (s *StreamStatus) VisibilityTracked() bool {
+	return s != nil && s.visibilityTracked.Load()
+}
+
+func (s *StreamStatus) ProtocolCommitted() bool {
+	return s != nil && s.protocolCommitted.Load()
 }
 
 func (s *StreamStatus) RecordError(msg string) {

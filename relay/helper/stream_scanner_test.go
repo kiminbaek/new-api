@@ -483,7 +483,7 @@ func TestStreamScannerHandler_FirstTokenTimeout(t *testing.T) {
 	assert.False(t, types.IsSkipRetryError(err), "zero-output first-token timeout must remain retryable")
 }
 
-func TestStreamScannerHandler_FirstTokenTimeoutStopsAfterAcceptedData(t *testing.T) {
+func TestStreamScannerHandler_FirstTokenTimeoutStopsAfterClientVisibleData(t *testing.T) {
 	// Not parallel: changes process-wide general settings.
 	setting := operation_setting.GetGeneralSetting()
 	oldFirstTokenTimeout := setting.FirstTokenTimeoutSeconds
@@ -503,11 +503,42 @@ func TestStreamScannerHandler_FirstTokenTimeoutStopsAfterAcceptedData(t *testing
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}}
 
-	StreamScannerHandler(c, &http.Response{Body: pr}, info, func(data string, sr *StreamResult) {})
+	StreamScannerHandler(c, &http.Response{Body: pr}, info, func(data string, sr *StreamResult) {
+		sr.ClientVisible()
+	})
 
 	require.NotNil(t, info.StreamStatus)
 	assert.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason)
+	assert.True(t, info.StreamStatus.ClientVisible())
 	assert.Equal(t, 1, info.ReceivedResponseCount)
+}
+
+func TestStreamScannerHandler_BufferedFrameStillTimesOut(t *testing.T) {
+	setting := operation_setting.GetGeneralSetting()
+	oldFirstTokenTimeout := setting.FirstTokenTimeoutSeconds
+	setting.FirstTokenTimeoutSeconds = 1
+	t.Cleanup(func() { setting.FirstTokenTimeoutSeconds = oldFirstTokenTimeout })
+
+	pr, pw := io.Pipe()
+	go func() {
+		_, _ = fmt.Fprint(pw, "data: {\"choices\":[{\"delta\":{\"content\":\"held\"}}]}\n")
+		<-time.After(2 * time.Second)
+		_ = pw.Close()
+	}()
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}}
+
+	StreamScannerHandler(c, &http.Response{Body: pr}, info, func(data string, sr *StreamResult) {
+		sr.Buffered()
+	})
+
+	assert.Equal(t, relaycommon.StreamEndReasonFirstTokenTimeout, info.StreamStatus.EndReason)
+	assert.False(t, info.StreamStatus.ClientVisible())
+	assert.False(t, info.StreamStatus.ProtocolCommitted())
+	assert.False(t, types.IsSkipRetryError(StreamOutcomeError(info)))
 }
 
 func TestStreamScannerHandler_FirstTokenTimeoutCanBeDisabled(t *testing.T) {

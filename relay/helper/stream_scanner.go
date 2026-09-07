@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -57,24 +56,37 @@ func StreamOutcomeError(info *relaycommon.RelayInfo) *types.NewAPIError {
 		return nil
 	}
 	reason := info.StreamStatus.EndReason
-	if info.ReceivedResponseCount == 0 {
-		err := fmt.Errorf("upstream stream ended abnormally (reason=%s) with 0 chunks, treating as failure instead of fake success", reason)
+	protocolCommitted := info.StreamStatus.ProtocolCommitted()
+	clientVisible := info.StreamStatus.ClientVisible()
+	if !info.StreamStatus.VisibilityTracked() && info.ReceivedResponseCount > 0 {
+		// Compatibility for adaptors which still write every accepted chunk.
+		protocolCommitted = true
+		clientVisible = true
+	}
+	if !protocolCommitted {
+		err := fmt.Errorf("upstream stream ended abnormally (reason=%s) with 0 chunks (client-visible), treating as failure instead of fake success", reason)
 		if reason == relaycommon.StreamEndReasonClientGone {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeBadResponse, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
 		}
 		return types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusBadGateway)
 	}
 
-	// Once response chunks have reached the client, replaying the request on a
-	// second channel would duplicate or splice the answer. Explicit transport
-	// failures must still fail accounting and reliability, but are marked
-	// SkipRetry so the current request is never transparently replayed.
+	// Once any SSE bytes have reached the client, replaying the request on a
+	// second channel would duplicate or splice the protocol stream. A ping or
+	// empty/usage-only frame is not a first token, but still commits the current
+	// response and therefore makes transparent retry unsafe.
+	if !clientVisible {
+		err := fmt.Errorf("upstream stream ended without client-visible token or tool-call data after protocol commit (chunks=%d, reason=%s)", info.ReceivedResponseCount, reason)
+		return types.NewErrorWithStatusCode(err, types.ErrorCodeBadResponse, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
+	}
+
 	switch reason {
-	case relaycommon.StreamEndReasonTimeout,
+	case relaycommon.StreamEndReasonFirstTokenTimeout,
+		relaycommon.StreamEndReasonTimeout,
 		relaycommon.StreamEndReasonScannerErr,
 		relaycommon.StreamEndReasonPanic,
 		relaycommon.StreamEndReasonPingFail:
-		err := fmt.Errorf("upstream stream interrupted after %d chunks (reason=%s)", info.ReceivedResponseCount, reason)
+		err := fmt.Errorf("upstream stream interrupted after %d chunks and protocol commit (client_visible=%t, reason=%s)", info.ReceivedResponseCount, clientVisible, reason)
 		return types.NewErrorWithStatusCode(err, types.ErrorCodeBadResponse, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
 	default:
 		return nil
@@ -144,12 +156,11 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 		cleanupOnce    sync.Once
 		stopOnce       sync.Once
 		firstTokenOnce sync.Once
-		firstTokenSeen atomic.Bool
 	)
 
 	firstTokenReceived := func() {
 		firstTokenOnce.Do(func() {
-			firstTokenSeen.Store(true)
+			info.StreamStatus.MarkClientVisible()
 			if firstTokenTimer == nil {
 				return
 			}
@@ -248,6 +259,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 						info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonPingFail, err)
 						return
 					}
+					info.StreamStatus.MarkProtocolCommitted()
 					logger.LogDebug(c, "ping data sent")
 				case <-ctx.Done():
 					return
@@ -286,8 +298,19 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 				dataHandler(data, sr)
 			}()
 			if sr.IsAccepted() {
-				firstTokenReceived()
 				info.ReceivedResponseCount++
+				// Adaptors which do not opt in to explicit visibility retain the
+				// historical behavior: an accepted chunk is treated as written.
+				// Buffering adaptors (OpenAI) must declare Buffered,
+				// ProtocolCommitted, or ClientVisible for every accepted frame.
+				if !sr.visibilityWasDeclared() || sr.isClientVisible() {
+					firstTokenReceived()
+				} else {
+					info.StreamStatus.TrackVisibility()
+					if sr.isProtocolCommitted() {
+						info.StreamStatus.MarkProtocolCommitted()
+					}
+				}
 			}
 			if sr.IsStopped() {
 				return
@@ -370,12 +393,12 @@ waitForStreamEnd:
 			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonTimeout, nil)
 			break waitForStreamEnd
 		case <-firstTokenTimerC(firstTokenTimer):
-			if !firstTokenSeen.Load() {
-				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonFirstTokenTimeout, fmt.Errorf("upstream stream produced no SSE data within %d seconds", firstTokenTimeoutSeconds))
+			if !info.StreamStatus.ClientVisible() {
+				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonFirstTokenTimeout, fmt.Errorf("upstream stream produced no client-visible token or tool-call data within %d seconds", firstTokenTimeoutSeconds))
 				break waitForStreamEnd
 			}
-			// A first chunk was accepted concurrently; continue waiting for the
-			// normal stream terminal event.
+			// Client-visible output raced with the timer; continue waiting for
+			// the normal stream terminal event.
 		case <-stopChan:
 			// EndReason already set by the goroutine that triggered stopChan.
 			break waitForStreamEnd

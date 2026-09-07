@@ -8,9 +8,12 @@ import (
 // to record soft errors, signal fatal stops, or mark normal completion.
 // StreamScannerHandler checks IsStopped() after each callback invocation.
 type StreamResult struct {
-	status   *relaycommon.StreamStatus
-	stopped  bool
-	rejected bool
+	status             *relaycommon.StreamStatus
+	stopped            bool
+	rejected           bool
+	visibilityDeclared bool
+	clientVisible      bool
+	protocolCommitted  bool
 }
 
 func newStreamResult(status *relaycommon.StreamStatus) *StreamResult {
@@ -52,8 +55,50 @@ func (r *StreamResult) IsAccepted() bool {
 	return !r.rejected
 }
 
-// reset clears the per-chunk stopped flag so the object can be reused.
+// ClientVisible declares that this callback successfully flushed valid
+// business data to the downstream client. It is intentionally separate from
+// acceptance: an adaptor may accept and cache a frame without writing it.
+func (r *StreamResult) ClientVisible() {
+	r.visibilityDeclared = true
+	r.clientVisible = true
+	r.protocolCommitted = true
+	r.status.MarkClientVisible()
+}
+
+// ProtocolCommitted declares that this callback wrote SSE protocol data which
+// is not a valid first token (for example an empty delta or usage-only frame).
+// It does not stop the first-token timer, but it makes transparent replay
+// unsafe if the current attempt subsequently fails.
+func (r *StreamResult) ProtocolCommitted() {
+	r.visibilityDeclared = true
+	r.protocolCommitted = true
+	r.status.MarkProtocolCommitted()
+}
+
+// Buffered declares that the adaptor accepted the frame but kept it entirely
+// server-side. Buffered data remains retryable until something is flushed.
+func (r *StreamResult) Buffered() {
+	r.visibilityDeclared = true
+	r.status.TrackVisibility()
+}
+
+func (r *StreamResult) isClientVisible() bool {
+	return r.clientVisible
+}
+
+func (r *StreamResult) isProtocolCommitted() bool {
+	return r.protocolCommitted
+}
+
+func (r *StreamResult) visibilityWasDeclared() bool {
+	return r.visibilityDeclared
+}
+
+// reset clears the per-chunk state so the object can be reused.
 func (r *StreamResult) reset() {
 	r.stopped = false
 	r.rejected = false
+	r.visibilityDeclared = false
+	r.clientVisible = false
+	r.protocolCommitted = false
 }
