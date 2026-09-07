@@ -1,6 +1,7 @@
 package model
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -380,4 +381,108 @@ func runUpdateSystemTaskStateIdenticalPayloadKeepsLock(t *testing.T, taskType st
 	require.NoError(t, err)
 	require.NotNil(t, finished)
 	assert.Equal(t, SystemTaskStatusSucceeded, finished.Status)
+}
+
+func TestExpireStaleSystemTaskLockSnapshotSkipsRenewedLease(t *testing.T) {
+	truncateTables(t)
+
+	clockNow := common.GetTimestamp()
+	cleanupNow := clockNow + 2
+	task, err := CreateSystemTask(SystemTaskTypeLogCleanup, nil, nil)
+	require.NoError(t, err)
+	_, claimed, err := ClaimSystemTask(task.ID, task.Type, "runner-a", clockNow+60)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.NoError(t, DB.Model(&SystemTaskLock{}).
+		Where("task_id = ?", task.TaskID).
+		Update("locked_until", clockNow+1).Error)
+
+	snapshotRead := make(chan struct{})
+	continueCleanup := make(chan struct{})
+	cleanupErr := make(chan error, 1)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		var staleSnapshot SystemTaskLock
+		if err := DB.Where("task_id = ?", task.TaskID).First(&staleSnapshot).Error; err != nil {
+			cleanupErr <- err
+			return
+		}
+		close(snapshotRead)
+		<-continueCleanup
+		cleanupErr <- expireStaleSystemTaskLock(staleSnapshot, cleanupNow)
+	}()
+
+	<-snapshotRead
+	require.NoError(t, RenewSystemTaskLock(task.TaskID, "runner-a", clockNow+600))
+	close(continueCleanup)
+	wg.Wait()
+	require.NoError(t, <-cleanupErr)
+
+	reloaded, err := GetSystemTaskByTaskID(task.TaskID)
+	require.NoError(t, err)
+	require.NotNil(t, reloaded)
+	assert.Equal(t, SystemTaskStatusRunning, reloaded.Status)
+
+	var currentLock SystemTaskLock
+	require.NoError(t, DB.Where("task_id = ?", task.TaskID).First(&currentLock).Error)
+	assert.Equal(t, clockNow+600, currentLock.LockedUntil)
+}
+
+func TestExpireStaleSystemTaskLockRollsBackDeleteWhenTaskCannotTransition(t *testing.T) {
+	truncateTables(t)
+
+	now := common.GetTimestamp()
+	task, err := CreateSystemTask(SystemTaskTypeLogCleanup, nil, nil)
+	require.NoError(t, err)
+	_, claimed, err := ClaimSystemTask(task.ID, task.Type, "runner-a", now+60)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.NoError(t, DB.Model(&SystemTaskLock{}).Where("task_id = ?", task.TaskID).Update("locked_until", now-1).Error)
+	require.NoError(t, DB.Model(&SystemTask{}).Where("task_id = ?", task.TaskID).Update("status", SystemTaskStatusPending).Error)
+
+	var snapshot SystemTaskLock
+	require.NoError(t, DB.Where("task_id = ?", task.TaskID).First(&snapshot).Error)
+	assert.ErrorIs(t, expireStaleSystemTaskLock(snapshot, now), ErrSystemTaskLockLost)
+
+	var lockCount int64
+	require.NoError(t, DB.Model(&SystemTaskLock{}).Where("task_id = ?", task.TaskID).Count(&lockCount).Error)
+	assert.Equal(t, int64(1), lockCount, "failed task transition must roll back lock deletion")
+}
+
+func TestFinishSystemTaskRejectsNonTerminalStatus(t *testing.T) {
+	truncateTables(t)
+
+	task, err := CreateSystemTask(SystemTaskTypeLogCleanup, nil, nil)
+	require.NoError(t, err)
+	_, claimed, err := ClaimSystemTask(task.ID, task.Type, "runner-a", common.GetTimestamp()+60)
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	assert.ErrorIs(t, FinishSystemTask(task.TaskID, "runner-a", SystemTaskStatusRunning, nil, ""), ErrInvalidSystemTaskTerminalStatus)
+
+	reloaded, err := GetSystemTaskByTaskID(task.TaskID)
+	require.NoError(t, err)
+	assert.Equal(t, SystemTaskStatusRunning, reloaded.Status)
+	var lockCount int64
+	require.NoError(t, DB.Model(&SystemTaskLock{}).Where("task_id = ?", task.TaskID).Count(&lockCount).Error)
+	assert.Equal(t, int64(1), lockCount)
+}
+
+func TestFinishSystemTaskRollsBackLockDeleteWhenTaskCannotTransition(t *testing.T) {
+	truncateTables(t)
+
+	task, err := CreateSystemTask(SystemTaskTypeLogCleanup, nil, nil)
+	require.NoError(t, err)
+	_, claimed, err := ClaimSystemTask(task.ID, task.Type, "runner-a", common.GetTimestamp()+60)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.NoError(t, DB.Model(&SystemTask{}).Where("task_id = ?", task.TaskID).Update("status", SystemTaskStatusPending).Error)
+
+	assert.ErrorIs(t, FinishSystemTask(task.TaskID, "runner-a", SystemTaskStatusSucceeded, nil, ""), ErrSystemTaskLockLost)
+
+	var lockCount int64
+	require.NoError(t, DB.Model(&SystemTaskLock{}).Where("task_id = ?", task.TaskID).Count(&lockCount).Error)
+	assert.Equal(t, int64(1), lockCount, "failed terminal transition must roll back lock deletion")
 }

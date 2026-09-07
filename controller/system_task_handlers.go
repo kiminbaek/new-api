@@ -62,7 +62,7 @@ type channelTestTaskPayload struct {
 func (channelTestHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
 	payload := channelTestTaskPayload{}
 	if err := task.DecodePayload(&payload); err != nil {
-		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
+		finishSystemTaskHandler(ctx, task, runnerID, model.SystemTaskStatusFailed, nil, err)
 		return
 	}
 	mode := payload.Mode
@@ -75,10 +75,10 @@ func (channelTestHandler) Run(ctx context.Context, task *model.SystemTask, runne
 	if err != nil {
 		// A lost lease/cancelled context is never a successful health run: retain
 		// partial summary for audit but leave the final state failed.
-		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
+		finishSystemTaskHandler(ctx, task, runnerID, model.SystemTaskStatusFailed, summary, err)
 		return
 	}
-	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+	finishSystemTaskHandler(ctx, task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
 
 // modelUpdateHandler runs the scheduled upstream model update detection job.
@@ -116,11 +116,11 @@ type modelUpdateTaskPayload struct {
 func (modelUpdateHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
 	payload := modelUpdateTaskPayload{}
 	if err := task.DecodePayload(&payload); err != nil {
-		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
+		finishSystemTaskHandler(ctx, task, runnerID, model.SystemTaskStatusFailed, nil, err)
 		return
 	}
 	summary := runChannelUpstreamModelUpdateTaskOnce(ctx, payload.Manual, !payload.Manual, service.NewSystemTaskProgressReporter(task, runnerID))
-	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+	finishSystemTaskHandler(ctx, task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
 
 // midjourneyPollHandler runs one Midjourney polling pass per scheduled run.
@@ -141,7 +141,7 @@ func (midjourneyPollHandler) NewPayload() any { return nil }
 
 func (midjourneyPollHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
 	summary := runMidjourneyTaskUpdateOnce(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
-	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+	finishSystemTaskHandler(ctx, task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
 
 // asyncTaskPollHandler runs one async-task (Suno/video) polling pass per
@@ -161,10 +161,14 @@ func (asyncTaskPollHandler) NewPayload() any { return nil }
 
 func (asyncTaskPollHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
 	summary := service.RunTaskPollingOnce(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
-	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+	finishSystemTaskHandler(ctx, task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
 
-func finishSystemTaskHandler(task *model.SystemTask, runnerID string, status model.SystemTaskStatus, result any, runErr error) {
+func finishSystemTaskHandler(ctx context.Context, task *model.SystemTask, runnerID string, status model.SystemTaskStatus, result any, runErr error) {
+	if ctx != nil && ctx.Err() != nil {
+		status = model.SystemTaskStatusFailed
+		runErr = ctx.Err()
+	}
 	errorMessage := ""
 	if runErr != nil {
 		errorMessage = runErr.Error()
