@@ -560,8 +560,79 @@ func DueSmartProbes(limit int) []SmartDownState {
 	return out
 }
 
-// FinishSmartProbe 记录探测结果。ok=true 时记录被移除（调用方负责实际恢复上线）；
-// ok=false 时退避翻倍等下一轮。
+var enableChannelForSmartRecovery = model.EnableChannelForSmartRecovery
+var refreshChannelCacheAfterSmartRecovery = model.InitChannelCache
+
+// FinishSmartProbeWithChannelRecovery records a successful L2 model probe and,
+// for the final model, reopens the DB channel without clearing per-model canary
+// state. A DB failure returns the current model to quarantine while preserving
+// sibling canaries.
+func FinishSmartProbeWithChannelRecovery(chId int, mdl string) (bool, error) {
+	key := smartDownKey(chId, mdl)
+	smartDownMu.Lock()
+	st, exists := smartDown[key]
+	if !exists {
+		smartDownMu.Unlock()
+		return false, fmt.Errorf("smart-down state not found for channel %d model %s", chId, mdl)
+	}
+	for otherKey, other := range smartDown {
+		if otherKey != key && other.ChannelId == chId && other.Level == SmartDownModel && other.CanaryStage == 0 {
+			startCanaryLocked(st)
+			smartDownMu.Unlock()
+			return false, nil
+		}
+	}
+	smartDownMu.Unlock()
+
+	// Do DB/cache I/O without smartDownMu. Channel selection holds its cache
+	// read lock before calling the SmartDown hook; reversing that order here
+	// would deadlock. The disabled cache still gates traffic during this phase.
+	if err := enableChannelForSmartRecovery(chId); err != nil {
+		smartDownMu.Lock()
+		if current := smartDown[key]; current == st {
+			failProbeLocked(current, "L2 channel enable failed: "+err.Error())
+		}
+		smartDownMu.Unlock()
+		return false, err
+	}
+
+	smartDownMu.Lock()
+	if current := smartDown[key]; current == st {
+		startCanaryLocked(current)
+	}
+	smartDownMu.Unlock()
+	// Publish the DB-enabled channel only after every model has a canary gate.
+	refreshChannelCacheAfterSmartRecovery()
+	return true, nil
+}
+
+func startCanaryLocked(st *SmartDownState) {
+	st.Probing = false
+	st.ProbeStartedAt = 0
+	st.LastError = ""
+	st.CanaryStage = 1
+	st.CanaryPercent = canaryPercents[1]
+	st.CanarySuccess = 0
+	st.CanaryFailure = 0
+	st.NextProbeAt = 0
+}
+
+func failProbeLocked(st *SmartDownState, errMsg string) {
+	st.Probing = false
+	st.ProbeStartedAt = 0
+	st.CanaryStage = 0
+	st.CanaryPercent = 0
+	st.CanarySuccess = 0
+	st.Attempts++
+	st.LastError = common.LocalLogPreview(errMsg)
+	backoff := smartProbeBaseInterval << uint(minInt(st.Attempts, 8))
+	if backoff > smartProbeMaxInterval || backoff <= 0 {
+		backoff = smartProbeMaxInterval
+	}
+	st.NextProbeAt = time.Now().Add(backoff).Unix()
+}
+
+// FinishSmartProbe 记录探测结果。ok=true 时进入 1% Canary；ok=false 时退避。
 func FinishSmartProbe(chId int, mdl string, ok bool, errMsg string) (channelFullyRecovered bool) {
 	key := smartDownKey(chId, mdl)
 	smartDownMu.Lock()
@@ -577,14 +648,7 @@ func FinishSmartProbe(chId int, mdl string, ok bool, errMsg string) (channelFull
 		}
 		// A successful synthetic probe starts controlled real-traffic recovery;
 		// it does not prove production traffic is healthy yet.
-		st.Probing = false
-		st.ProbeStartedAt = 0
-		st.LastError = ""
-		st.CanaryStage = 1
-		st.CanaryPercent = canaryPercents[1]
-		st.CanarySuccess = 0
-		st.CanaryFailure = 0
-		st.NextProbeAt = 0
+		startCanaryLocked(st)
 		// Once every model on an L2 channel has reached at least stage 1, the DB
 		// channel may reopen. Per-model canary gates still control real traffic.
 		for _, other := range smartDown {
@@ -594,14 +658,7 @@ func FinishSmartProbe(chId int, mdl string, ok bool, errMsg string) (channelFull
 		}
 		return true
 	}
-	st.Probing = false
-	st.Attempts++
-	st.LastError = common.LocalLogPreview(errMsg)
-	backoff := smartProbeBaseInterval << uint(minInt(st.Attempts, 8))
-	if backoff > smartProbeMaxInterval || backoff <= 0 {
-		backoff = smartProbeMaxInterval
-	}
-	st.NextProbeAt = time.Now().Add(backoff).Unix()
+	failProbeLocked(st, errMsg)
 	return false
 }
 

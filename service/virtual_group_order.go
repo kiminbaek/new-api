@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/gin-gonic/gin"
 )
 
 const neutralSuccessRate = 0.5
@@ -98,6 +100,40 @@ func vgOrderCompute(virtualName string, base []string) []string {
 		return rate(sorted[i]) > rate(sorted[j])
 	})
 	return sorted
+}
+
+// OrderedVirtualMembersForRequest keeps every configured member but moves
+// members with a live channel in the request's actual group(s) to the front.
+func OrderedVirtualMembersForRequest(c *gin.Context, virtualName, usingGroup string) []string {
+	ordered := OrderedVirtualMembers(virtualName)
+	groups := []string{usingGroup}
+	if usingGroup == "auto" {
+		groups = GetRequestAutoGroups(c, common.GetContextKeyString(c, constant.ContextKeyUserGroup))
+	}
+	return prioritizeVirtualMembersForGroups(ordered, groups, func(group, member string) bool {
+		channel, err := model.GetRandomSatisfiedChannel(group, member, 0, GetChannelConstraints(c).Filters)
+		return err == nil && channel != nil
+	})
+}
+
+func prioritizeVirtualMembersForGroups(members, groups []string, available func(string, string) bool) []string {
+	live := make([]string, 0, len(members))
+	unavailable := make([]string, 0, len(members))
+	for _, member := range members {
+		ok := false
+		for _, group := range groups {
+			if group != "" && available(group, member) {
+				ok = true
+				break
+			}
+		}
+		if ok {
+			live = append(live, member)
+		} else {
+			unavailable = append(unavailable, member)
+		}
+	}
+	return append(live, unavailable...)
 }
 
 // IsVirtualModel 透传 model 层判断（调用方只引 service 即可）。

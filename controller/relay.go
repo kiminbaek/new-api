@@ -28,6 +28,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	hosttypes "github.com/QuantumNous/new-api/types"
 
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/samber/lo"
@@ -156,10 +157,25 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 	relayInfo.SetEstimatePromptTokens(tokens)
 
-	priceData, err := helper.ModelPriceHelper(c, relayInfo, tokens, meta)
-	if err != nil {
-		newAPIError = types.NewError(err, types.ErrorCodeModelPriceError, types.ErrOptionWithStatusCode(http.StatusBadRequest))
-		return
+	vgMembers := common.GetContextKeyStringSlice(c, constant.ContextKeyVirtualMembers)
+	priceData := hosttypes.PriceData{}
+	forceInitialSelect := false
+	if len(vgMembers) > 0 {
+		var priceErr error
+		var selected int
+		priceData, selected, priceErr = selectInitialVirtualMember(c, relayInfo, vgMembers, tokens, meta)
+		if priceErr != nil {
+			newAPIError = types.NewError(priceErr, types.ErrorCodeModelPriceError, types.ErrOptionWithStatusCode(http.StatusBadRequest))
+			return
+		}
+		forceInitialSelect = selected > 0
+		vgMembers = append(append([]string(nil), vgMembers[selected:]...), vgMembers[:selected]...)
+	} else {
+		priceData, err = helper.ModelPriceHelper(c, relayInfo, tokens, meta)
+		if err != nil {
+			newAPIError = types.NewError(err, types.ErrorCodeModelPriceError, types.ErrOptionWithStatusCode(http.StatusBadRequest))
+			return
+		}
 	}
 
 	// common.SetContextKey(c, constant.ContextKeyTokenCountMeta, meta)
@@ -190,28 +206,26 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		ModelName:   relayInfo.OriginModelName,
 		RequestPath: c.Request.URL.Path,
 		Retry:       common.GetPointer(0),
+		ForceSelect: forceInitialSelect,
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
-	// [CUSTOM] 需求2: 渠道级尝试计数（retry_times 语义B）
-	tried := map[int]int{}
-	capWarned := map[int]bool{}
-	// [CUSTOM P0-fix] 需求5 容灾链修复：虚拟组成员列表提升到循环外，轮转与降级共用
-	vgMembers := common.GetContextKeyStringSlice(c, constant.ContextKeyVirtualMembers)
-
+	// [CUSTOM] 需求2: 渠道级尝试计数按虚拟成员隔离；同一渠道可为不同模型提供独立路由。
+	tried := map[string]map[int]int{}
+	capWarned := map[string]map[int]bool{}
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
 		relayInfo.RetryIndex = retryParam.GetRetry()
 		// [CUSTOM] 需求5 模型分级：重试预算内轮转虚拟组成员（选渠/计费随成员切换）
-		if idx := retryParam.GetRetry(); idx > 0 {
-			if len(vgMembers) > 0 {
-				nextMember := vgMembers[idx%len(vgMembers)]
-				retryParam.ModelName = nextMember
-				relayInfo.OriginModelName = nextMember
-				relayInfo.UpstreamModelName = nextMember
-				common.SetContextKey(c, constant.ContextKeyOriginalModel, nextMember)
-				if pd, pdErr := helper.ModelPriceHelper(c, relayInfo, tokens, meta); pdErr == nil {
-					relayInfo.PriceData = pd
+		if len(vgMembers) > 0 {
+			member := vgMembers[retryParam.GetRetry()%len(vgMembers)]
+			if member != retryParam.ModelName {
+				if memberErr := prepareVirtualMemberAttempt(c, relayInfo, retryParam, member, tokens, meta); memberErr != nil {
+					logger.LogWarn(c, fmt.Sprintf("[CUSTOM] virtual member %q pricing/reservation failed: %s", member, memberErr.Error()))
+					newAPIError = memberErr
+					continue
 				}
+			} else {
+				retryParam.UseMember(member)
 			}
 		}
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
@@ -233,10 +247,15 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		// [CUSTOM] 需求2: 渠道级重试上限——超限则跳过该渠道，消耗一次重试预算继续换渠道
 		// [CUSTOM-fix] ChannelMeta 此时未初始化（嵌入指针为nil），改从 context 读渠道设置
 		if cs, ok := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting); ok && cs.RetryTimes != nil {
-			tried[channel.Id]++
-			if tried[channel.Id] > *cs.RetryTimes+1 {
-				if !capWarned[channel.Id] {
-					capWarned[channel.Id] = true
+			member := retryParam.ModelName
+			if tried[member] == nil {
+				tried[member] = map[int]int{}
+				capWarned[member] = map[int]bool{}
+			}
+			tried[member][channel.Id]++
+			if tried[member][channel.Id] > *cs.RetryTimes+1 {
+				if !capWarned[member][channel.Id] {
+					capWarned[member][channel.Id] = true
 					logger.LogWarn(c, fmt.Sprintf("[CUSTOM] channel #%d hit retry_times=%d cap, skip to next", channel.Id, *cs.RetryTimes))
 				}
 				// [CUSTOM-fix P1] 加入排除集，避免选择器再次命中该渠道空耗重试预算
@@ -444,10 +463,92 @@ func fastTokenCountMetaForPricing(request dto.Request) *types.TokenCountMeta {
 	return meta
 }
 
+var priceVirtualMember = helper.ModelPriceHelper
+var preConsumeVirtualMember = service.PreConsumeBilling
+
+func selectInitialVirtualMember(c *gin.Context, info *relaycommon.RelayInfo, members []string, tokens int, meta *types.TokenCountMeta) (hosttypes.PriceData, int, error) {
+	var lastErr error
+	for idx, member := range members {
+		candidate := *info
+		candidate.OriginModelName = member
+		candidate.BillingModelName = ""
+		candidate.PriceData = hosttypes.PriceData{}
+		candidate.TieredBillingSnapshot = nil
+		candidate.BillingRequestInput = nil
+		priceData, err := priceVirtualMember(c, &candidate, tokens, meta)
+		if err != nil {
+			lastErr = err
+			logger.LogWarn(c, fmt.Sprintf("[CUSTOM] virtual member %q pricing failed before routing: %s", member, err.Error()))
+			continue
+		}
+		info.OriginModelName = member
+		info.BillingModelName = candidate.BillingModelName
+		info.PriceData = priceData
+		info.TieredBillingSnapshot = candidate.TieredBillingSnapshot
+		info.BillingRequestInput = candidate.BillingRequestInput
+		common.SetContextKey(c, constant.ContextKeyOriginalModel, member)
+		return priceData, idx, nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("virtual group has no members")
+	}
+	return hosttypes.PriceData{}, -1, lastErr
+}
+
+func prepareVirtualMemberAttempt(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam, member string, tokens int, meta *types.TokenCountMeta) *types.NewAPIError {
+	if info == nil || retryParam == nil || member == "" {
+		return types.NewErrorWithStatusCode(errors.New("invalid virtual member attempt"), types.ErrorCodeModelPriceError, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+	}
+
+	// Price on a copy so a failed member never leaves stale/partial pricing or
+	// tiered snapshots on the live request.
+	candidate := *info
+	candidate.OriginModelName = member
+	candidate.BillingModelName = ""
+	candidate.PriceData = hosttypes.PriceData{}
+	candidate.TieredBillingSnapshot = nil
+	candidate.BillingRequestInput = nil
+	priceData, err := priceVirtualMember(c, &candidate, tokens, meta)
+	if err != nil {
+		return types.NewError(err, types.ErrorCodeModelPriceError, types.ErrOptionWithStatusCode(http.StatusBadRequest))
+	}
+
+	if info.Billing != nil && !priceData.FreeModel {
+		if err := info.Billing.Reserve(priceData.QuotaToPreConsume); err != nil {
+			return types.NewErrorWithStatusCode(err, types.ErrorCodePreConsumeTokenQuotaFailed, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
+	}
+
+	previousOrigin := info.OriginModelName
+	previousBillingModel := info.BillingModelName
+	previousPrice := info.PriceData
+	previousTiered := info.TieredBillingSnapshot
+	previousInput := info.BillingRequestInput
+	info.OriginModelName = candidate.OriginModelName
+	info.BillingModelName = candidate.BillingModelName
+	info.PriceData = priceData
+	info.TieredBillingSnapshot = candidate.TieredBillingSnapshot
+	info.BillingRequestInput = candidate.BillingRequestInput
+
+	if info.Billing == nil && !priceData.FreeModel {
+		if apiErr := preConsumeVirtualMember(c, priceData.QuotaToPreConsume, info); apiErr != nil {
+			info.OriginModelName = previousOrigin
+			info.BillingModelName = previousBillingModel
+			info.PriceData = previousPrice
+			info.TieredBillingSnapshot = previousTiered
+			info.BillingRequestInput = previousInput
+			return apiErr
+		}
+	}
+	common.SetContextKey(c, constant.ContextKeyOriginalModel, member)
+	retryParam.UseMember(member)
+	return nil
+}
+
 var selectChannelForRelay = service.CacheGetRandomSatisfiedChannel
 
 func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError) {
-	if info.ChannelMeta == nil && len(retryParam.Excluded) == 0 {
+	if info.ChannelMeta == nil && len(retryParam.Excluded) == 0 && !retryParam.ForceSelect {
 		autoBan := c.GetBool("auto_ban")
 		autoBanInt := 1
 		if !autoBan {
@@ -469,6 +570,7 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 	}
 
 	info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
+	retryParam.ForceSelect = false
 
 	newAPIError := middleware.SetupContextForSelectedChannel(c, channel, info.OriginModelName)
 	if newAPIError != nil {

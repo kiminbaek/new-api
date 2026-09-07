@@ -789,6 +789,47 @@ func hasEnabledMultiKey(keys []string, statusList map[int]int) bool {
 	return false
 }
 
+// EnableChannelForSmartRecovery reopens an L2-disabled channel without touching
+// the in-memory SmartDown/Canary registry. Channel and ability rows commit in
+// one transaction; caches are rebuilt only after a successful commit.
+func EnableChannelForSmartRecovery(channelId int) error {
+	if channelId <= 0 {
+		return errors.New("channel ID is 0")
+	}
+	if common.MemoryCacheEnabled {
+		channelStatusLock.Lock()
+		defer channelStatusLock.Unlock()
+	}
+	pollingLock := GetChannelPollingLock(channelId)
+	pollingLock.Lock()
+	defer pollingLock.Unlock()
+
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var channel Channel
+		if err := tx.First(&channel, channelId).Error; err != nil {
+			return err
+		}
+		if channel.Status != common.ChannelStatusAutoDisabled {
+			return fmt.Errorf("channel %d is not auto-disabled", channelId)
+		}
+		info := channel.GetOtherInfo()
+		delete(info, "status_reason")
+		delete(info, "status_time")
+		channel.Status = common.ChannelStatusEnabled
+		channel.SetOtherInfo(info)
+		if err := tx.Model(&Channel{}).Where("id = ?", channelId).Updates(map[string]any{
+			"status": channel.Status, "other_info": channel.OtherInfo,
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&Ability{}).Where("channel_id = ?", channelId).Update("enabled", true).Error
+	})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func UpdateChannelStatus(channelId int, usingKey string, status int, reason string) bool {
 	if common.MemoryCacheEnabled {
 		channelStatusLock.Lock()

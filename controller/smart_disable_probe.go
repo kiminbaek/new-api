@@ -114,12 +114,20 @@ func probeOne(st service.SmartDownState, testUserID int) {
 	result := testChannel(ctx, ch, testUserID, st.Model, "", shouldUseStreamForAutomaticChannelTest(ch))
 
 	if result.newAPIError == nil && result.localErr == nil {
-		channelFullyRecovered := service.FinishSmartProbe(st.ChannelId, st.Model, true, "")
+		channelFullyRecovered := false
+		if ch.Status != common.ChannelStatusEnabled {
+			channelFullyRecovered, err = service.FinishSmartProbeWithChannelRecovery(st.ChannelId, st.Model)
+			if err != nil {
+				common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用恢复失败：通道「%s」（#%d）模型 %s 探测通过但 DB 启用失败，保留隔离态：%s",
+					ch.Name, ch.Id, st.Model, common.LocalLogPreview(err.Error())))
+				return
+			}
+		} else {
+			channelFullyRecovered = service.FinishSmartProbe(st.ChannelId, st.Model, true, "")
+		}
 		service.RecordRelaySuccess(st.ChannelId, st.Model)
-		// L2 升级导致整渠道被禁的场景：模型已实测恢复 → 把渠道也重新启用
-		if ch.Status != common.ChannelStatusEnabled && channelFullyRecovered {
-			service.EnableChannel(ch.Id, "", ch.Name)
-			common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用恢复：通道「%s」（#%d）全部隔离模型均已实测恢复，L2 整渠道禁用解除", ch.Name, ch.Id))
+		if channelFullyRecovered {
+			common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用恢复：通道「%s」（#%d）全部隔离模型均已实测恢复，L2 整渠道禁用解除并保留 1%% 金丝雀", ch.Name, ch.Id))
 		}
 		common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用恢复：通道「%s」（#%d）模型 %s 探测通过，进入 1%% 金丝雀（下线时长 %s，探测 %d 次）",
 			ch.Name, ch.Id, st.Model, time.Since(time.Unix(st.DisabledAt, 0)).Truncate(time.Second), st.Attempts+1))

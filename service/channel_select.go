@@ -43,7 +43,9 @@ type RetryParam struct {
 	Retry        *int
 	resetNextTry bool
 	// [CUSTOM-fix P1] 本请求内已被渠道级重试帽(retry_times)排除的渠道集合
-	Excluded map[int]bool
+	Excluded       map[int]bool
+	memberExcluded map[string]map[int]bool
+	ForceSelect    bool
 }
 
 // Exclude 标记某渠道在本请求剩余重试中不再参与选择。
@@ -52,6 +54,19 @@ func (p *RetryParam) Exclude(channelId int) {
 		p.Excluded = make(map[int]bool)
 	}
 	p.Excluded[channelId] = true
+}
+
+// UseMember switches to a member-scoped exclusion set. A failed channel for
+// one virtual member must not exclude the same channel for another member.
+func (p *RetryParam) UseMember(modelName string) {
+	p.ModelName = modelName
+	if p.memberExcluded == nil {
+		p.memberExcluded = make(map[string]map[int]bool)
+	}
+	if p.memberExcluded[modelName] == nil {
+		p.memberExcluded[modelName] = make(map[int]bool)
+	}
+	p.Excluded = p.memberExcluded[modelName]
 }
 
 func (p *RetryParam) GetRetry() int {

@@ -126,7 +126,7 @@ func Distribute() func(c *gin.Context) {
 
 				// [CUSTOM] 需求5 模型分级：虚拟名展开为有序成员（置于令牌限制之后，令牌按虚拟名鉴权）
 				if service.IsVirtualModel(modelRequest.Model) {
-					members := service.OrderedVirtualMembers(modelRequest.Model)
+					members := service.OrderedVirtualMembersForRequest(c, modelRequest.Model, usingGroup)
 					if len(members) == 0 {
 						abortWithOpenAiMessage(c, http.StatusServiceUnavailable,
 							i18n.T(c, i18n.MsgDistributorNoAvailableChannel, map[string]any{"Group": usingGroup, "Model": modelRequest.Model}),
