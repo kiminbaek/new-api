@@ -98,21 +98,25 @@ func runAutoPriorityTick(interval time.Duration) {
 	byModel := map[string][]apEntry{}
 	now := time.Now()
 	ForEachRelayStat(func(chId int, mdl string, samples, succ int) {
-		if samples < common.AutoPriorityMinSamples {
-			return
-		}
-		byModel[mdl] = append(byModel[mdl], apEntry{ChId: chId, Samples: samples, Succ: succ})
+		byModel[mdl] = append(byModel[mdl], apEntry{ChId: chId})
 	})
 	// Calculate decayed health after ForEachRelayStat releases its read lock.
-	// Re-entering the same RWMutex while a writer waits can deadlock.
+	// Re-entering the same RWMutex while a writer waits can deadlock. Eligibility
+	// also uses the decayed effective sample count, so stale history cannot keep a
+	// member in competition forever.
 	for mdl, entries := range byModel {
+		eligible := entries[:0]
 		for i := range entries {
 			health := AssessRelayHealth(entries[i].ChId, mdl, now)
+			if health.EffectiveCount < float64(common.AutoPriorityMinSamples) {
+				continue
+			}
 			entries[i].Health = health.Score / 100
-			entries[i].EffectiveSamples = math.Max(1, health.EffectiveCount)
+			entries[i].EffectiveSamples = health.EffectiveCount
 			entries[i].Confidence = health.Confidence
+			eligible = append(eligible, entries[i])
 		}
-		byModel[mdl] = entries
+		byModel[mdl] = eligible
 	}
 
 	chanCache := map[int]*model.Channel{}
@@ -130,35 +134,30 @@ func runAutoPriorityTick(interval time.Duration) {
 
 	apMu.Lock()
 	defer apMu.Unlock()
+	apLoadStateLocked()
 	changed := false
+	active := make(map[string]struct{})
 	for mdl, entries := range byModel {
 		if len(entries) < 2 {
 			continue // 该模型只有一个渠道在跑，无竞争不调
 		}
-		// [CUSTOM O2] 按样本数加权均值：20 样本的小渠道与 128 样本的大渠道
-		// 不应同权，否则低流量渠道的噪声会拉偏整体基准。
-		var wsum, wcount float64
-		for _, e := range entries {
-			r := float64(e.Succ) / float64(e.Samples)
-			wsum += r * float64(e.Samples)
-			wcount += float64(e.Samples)
+		// The peer baseline is the 6h-decayed health score, weighted by decayed
+		// evidence and confidence. Low-confidence members therefore neither drag
+		// the baseline nor receive a full-size priority swing.
+		mean, ok := autoPriorityHealthMean(entries)
+		if !ok {
+			continue // fail open: no trustworthy evidence means no dynamic writes
 		}
-		mean := wsum / wcount
 		for _, e := range entries {
 			ch := getCh(e.ChId)
 			if ch == nil {
 				continue
 			}
-			rate := float64(e.Succ) / float64(e.Samples)
-			delta := int(math.Round((rate - mean) * float64(common.AutoPriorityScale)))
-			if delta > common.AutoPriorityMaxDelta {
-				delta = common.AutoPriorityMaxDelta
-			} else if delta < -common.AutoPriorityMaxDelta {
-				delta = -common.AutoPriorityMaxDelta
-			}
+			delta := autoPriorityDelta(e, mean)
 			base := manualBasePriority(ch, mdl)
 			eff := base + int64(delta)
 			key := fmt.Sprintf("%d|%s", e.ChId, mdl)
+			active[key] = struct{}{}
 			if prev, ok := apApplied[key]; ok && prev == eff {
 				continue
 			}
@@ -168,16 +167,87 @@ func runAutoPriorityTick(interval time.Duration) {
 			}
 			apApplied[key] = eff
 			changed = true
-			common.SysLog(fmt.Sprintf("[CUSTOM] auto-priority: ch#%d %s rate=%.2f mean=%.2f prio=%d (base %d, delta %+d)",
-				e.ChId, mdl, rate, mean, eff, base, delta))
+			common.SysLog(fmt.Sprintf("[CUSTOM] auto-priority: ch#%d %s health=%.2f confidence=%.2f mean=%.2f prio=%d (base %d, delta %+d)",
+				e.ChId, mdl, e.Health, e.Confidence, mean, eff, base, delta))
 		}
+	}
+	if restoreInactiveAutoPriorityLocked(active, getCh) {
+		changed = true
 	}
 	if changed {
 		apSaveStateLocked()
-		// [CUSTOM-fix P0→S7] 缓存同步已下沉到 UpdateAbilityPriorityByChannelModel
-		// （RefreshAbilityPriorityCache 精准单键更新），不再全量重建。
 	}
 	_ = interval
+}
+
+func autoPriorityHealthMean(entries []apEntry) (float64, bool) {
+	var wsum, wcount float64
+	for _, e := range entries {
+		weight := e.EffectiveSamples * e.Confidence
+		wsum += e.Health * weight
+		wcount += weight
+	}
+	if wcount == 0 {
+		return 0, false
+	}
+	return wsum / wcount, true
+}
+
+func autoPriorityDelta(entry apEntry, mean float64) int {
+	delta := int(math.Round((entry.Health - mean) * float64(common.AutoPriorityScale) * entry.Confidence))
+	if delta > common.AutoPriorityMaxDelta {
+		return common.AutoPriorityMaxDelta
+	}
+	if delta < -common.AutoPriorityMaxDelta {
+		return -common.AutoPriorityMaxDelta
+	}
+	return delta
+}
+
+func apLoadStateLocked() {
+	if len(apApplied) != 0 {
+		return
+	}
+	b, err := os.ReadFile(apStateFile)
+	if err != nil {
+		return
+	}
+	var st apTouched
+	if json.Unmarshal(b, &st) == nil && st.Keys != nil {
+		apApplied = st.Keys
+	}
+}
+
+// restoreInactiveAutoPriorityLocked returns members that left the current
+// competition set to their manual baseline. It only updates ability priority;
+// abilities and virtual-group members are never deleted or disabled.
+func restoreInactiveAutoPriorityLocked(active map[string]struct{}, getCh func(int) *model.Channel) bool {
+	changed := false
+	for key := range apApplied {
+		if _, ok := active[key]; ok {
+			continue
+		}
+		var chId int
+		var mdl string
+		if _, err := fmt.Sscanf(key, "%d|%s", &chId, &mdl); err != nil {
+			delete(apApplied, key)
+			changed = true
+			continue
+		}
+		ch := getCh(chId)
+		if ch == nil {
+			continue // fail open and retain state for a later retry
+		}
+		base := manualBasePriority(ch, mdl)
+		if err := model.UpdateAbilityPriorityByChannelModel(chId, mdl, base); err != nil {
+			common.SysError("[CUSTOM] auto-priority restore inactive fail: " + err.Error())
+			continue
+		}
+		delete(apApplied, key)
+		changed = true
+		common.SysLog(fmt.Sprintf("[CUSTOM] auto-priority: ch#%d %s left competition, restored manual base %d", chId, mdl, base))
+	}
+	return changed
 }
 
 // restoreAutoPriority 启动时未开启调度器：把上次触达的 ability.priority 恢复为手动基准
@@ -217,8 +287,6 @@ func restoreAutoPriority() {
 
 type apEntry struct {
 	ChId             int
-	Samples          int
-	Succ             int
 	Health           float64
 	EffectiveSamples float64
 	Confidence       float64

@@ -1,8 +1,11 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"hash/fnv"
 	"math"
+	"net/http"
 	"strings"
 	"time"
 
@@ -68,6 +71,63 @@ type FaultAttribution struct {
 	Confidence float64 `json:"confidence"`
 	Action     string  `json:"action"`
 	Summary    string  `json:"summary"`
+}
+
+// ShouldRecordRelayHealthFailure reports whether a failed relay attempt is
+// attributable to the selected upstream channel. Client input/cancellation and
+// ambiguous failures are deliberately observation-only so callers cannot poison
+// rolling health, consecutive-failure gates, or canary recovery.
+func ShouldRecordRelayHealthFailure(err *types.NewAPIError, firstTokenTimeout, clientGone bool) bool {
+	if err == nil {
+		return false
+	}
+	if clientGone || errors.Is(err, context.Canceled) {
+		return false
+	}
+	if firstTokenTimeout {
+		return true
+	}
+
+	code := err.StatusCode
+	switch err.GetErrorCode() {
+	case types.ErrorCodeChannelInvalidKey,
+		types.ErrorCodeChannelResponseTimeExceeded,
+		types.ErrorCodeReadResponseBodyFailed,
+		types.ErrorCodeBadResponseBody,
+		types.ErrorCodeEmptyResponse,
+		types.ErrorCodeModelNotFound:
+		return true
+	}
+	if code >= 400 && code < 500 && code != http.StatusTooManyRequests {
+		return false
+	}
+	switch err.GetErrorCode() {
+	case types.ErrorCodeInvalidRequest,
+		types.ErrorCodeSensitiveWordsDetected,
+		types.ErrorCodePromptBlocked,
+		types.ErrorCodeReadRequestBodyFailed,
+		types.ErrorCodeConvertRequestFailed,
+		types.ErrorCodeAccessDenied,
+		types.ErrorCodeBadRequestBody,
+		types.ErrorCodeCountTokenFailed,
+		types.ErrorCodeModelPriceError,
+		types.ErrorCodeInvalidApiType,
+		types.ErrorCodeGenRelayInfoFailed,
+		types.ErrorCodeInsufficientUserQuota,
+		types.ErrorCodePreConsumeTokenQuotaFailed:
+		return false
+	}
+
+	if code == http.StatusTooManyRequests || code == http.StatusBadGateway || code == http.StatusServiceUnavailable {
+		return true
+	}
+	attribution := AttributeChannelError(err)
+	switch attribution.Category {
+	case "account_quota", "authentication", "empty_stream", "model_missing", "rate_limit", "timeout":
+		return true
+	default:
+		return false
+	}
 }
 
 func AttributeChannelError(err *types.NewAPIError) FaultAttribution {

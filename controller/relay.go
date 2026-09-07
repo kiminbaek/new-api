@@ -357,14 +357,23 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		newAPIError = service.NormalizeViolationFeeError(newAPIError)
 		relayInfo.LastError = newAPIError
 
-		// [CUSTOM] 需求2/4: 失败记账；配置 fail_threshold 且未达阈值时压制本次自动禁用
-		service.RecordRelayFailure(channel.Id, relayInfo.OriginModelName)
-		transition := service.RecordSmartCanaryOutcome(channel.Id, relayInfo.OriginModelName, false)
-		if transition.RolledBack {
-			common.SysLog(fmt.Sprintf("[CUSTOM] 金丝雀回滚：通道「%s」（#%d）模型 %s 真实流量失败，退回隔离", channel.Name, channel.Id, relayInfo.OriginModelName))
+		// Only upstream-attributable failures may affect channel health. Client
+		// input/cancellation and ambiguous errors remain observable in request logs
+		// but cannot poison rolling health, failure streaks, or canary recovery.
+		firstTokenTimeout := relayInfo.StreamStatus != nil && relayInfo.StreamStatus.EndReason == relaycommon.StreamEndReasonFirstTokenTimeout
+		clientGone := relayInfo.StreamStatus != nil && relayInfo.StreamStatus.EndReason == relaycommon.StreamEndReasonClientGone
+		recordHealthFailure := service.ShouldRecordRelayHealthFailure(newAPIError, firstTokenTimeout, clientGone)
+		if recordHealthFailure {
+			service.RecordRelayFailure(channel.Id, relayInfo.OriginModelName)
+			transition := service.RecordSmartCanaryOutcome(channel.Id, relayInfo.OriginModelName, false)
+			if transition.RolledBack {
+				common.SysLog(fmt.Sprintf("[CUSTOM] 金丝雀回滚：通道「%s」（#%d）模型 %s 真实流量失败，退回隔离", channel.Name, channel.Id, relayInfo.OriginModelName))
+			}
 		}
 		autoBan := channel.GetAutoBan()
-		if cs2, ok2 := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting); ok2 && cs2.FailThreshold != nil && *cs2.FailThreshold > 0 {
+		if !recordHealthFailure {
+			autoBan = false
+		} else if cs2, ok2 := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting); ok2 && cs2.FailThreshold != nil && *cs2.FailThreshold > 0 {
 			th := cs2.FailThreshold
 			if fails := service.RelayConsecutiveFailures(channel.Id, relayInfo.OriginModelName); fails < *th {
 				autoBan = false
@@ -630,14 +639,17 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 	// 不要使用context获取渠道信息，异步处理时可能会出现渠道信息不一致的情况
 	// do not use context to get channel info, there may be inconsistent channel info when processing asynchronously
 
-	// [CUSTOM] 智能自动禁用：分级处置优先（模型级下线 / key 级 / 整渠道），
-	// 未启用时回落上游原逻辑（一律整渠道禁用）。
-	if service.SmartDisableEnabled() {
+	// [CUSTOM] 智能自动禁用：只有可明确归因给上游渠道的失败才参与
+	// 分级处置；客户端输入、取消和未知错误只保留请求错误日志。
+	firstTokenTimeout := relayInfo != nil && relayInfo.StreamStatus != nil && relayInfo.StreamStatus.EndReason == relaycommon.StreamEndReasonFirstTokenTimeout
+	clientGone := relayInfo != nil && relayInfo.StreamStatus != nil && relayInfo.StreamStatus.EndReason == relaycommon.StreamEndReasonClientGone
+	healthFailure := service.ShouldRecordRelayHealthFailure(err, firstTokenTimeout, clientGone)
+	if service.SmartDisableEnabled() && healthFailure {
 		modelName := c.GetString("original_model")
 		gopool.Go(func() {
 			service.ApplyDisablePolicy(channelError, modelName, err)
 		})
-	} else if service.ShouldDisableChannel(err) && channelError.AutoBan {
+	} else if !service.SmartDisableEnabled() && healthFailure && service.ShouldDisableChannel(err) && channelError.AutoBan {
 		gopool.Go(func() {
 			service.DisableChannel(channelError, err.ErrorWithStatusCode())
 		})
