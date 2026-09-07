@@ -24,8 +24,6 @@ import { updateSystemOption } from '../api'
 import type { UpdateOptionRequest } from '../types'
 
 // Configuration keys that require status refresh
-const PRICING_RELATED_KEYS = new Set(['tool_price_setting.prices'])
-
 const STATUS_RELATED_KEYS = new Set([
   'HeaderNavModules',
   'SidebarModulesAdmin',
@@ -49,9 +47,6 @@ export function useUpdateOption() {
     onSuccess: (_data, variables) => {
       // Always refresh system-options
       queryClient.invalidateQueries({ queryKey: ['system-options'] })
-      if (PRICING_RELATED_KEYS.has(variables.key)) {
-        queryClient.invalidateQueries({ queryKey: ['pricing'] })
-      }
 
       // If updating frontend-display-related config, also refresh status
       if (STATUS_RELATED_KEYS.has(variables.key)) {

@@ -78,7 +78,15 @@ func GetPricing(c *gin.Context) {
 
 func ResetModelRatio(c *gin.Context) {
 	defaultStr := ratio_setting.DefaultModelRatio2JSONString()
-	err := model.UpdatePricingOptionsAtomic(map[string]string{"ModelRatio": defaultStr})
+	err := model.UpdateOption("ModelRatio", defaultStr)
+	if err != nil {
+		c.JSON(200, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+	err = ratio_setting.UpdateModelRatioByJSONString(defaultStr)
 	if err != nil {
 		c.JSON(200, gin.H{
 			"success": false,

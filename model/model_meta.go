@@ -172,7 +172,13 @@ func publishModelPricingOptions(updates map[string]string) error {
 			return fmt.Errorf("invalid committed model pricing option %s: %w", key, err)
 		}
 	}
-	return publishPricingOptionGeneration(updates)
+	common.OptionMapRWMutex.Lock()
+	for _, key := range modelPricingOptionKeys {
+		common.OptionMap[key] = updates[key]
+	}
+	common.OptionMapRWMutex.Unlock()
+	RefreshPricing()
+	return nil
 }
 
 func applyModelPricingPatchTx(tx *gorm.DB, oldName string, newName string, patch ModelPricingPatch) (map[string]string, error) {

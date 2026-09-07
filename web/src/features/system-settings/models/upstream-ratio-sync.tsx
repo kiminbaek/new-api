@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { CheckSquare, RefreshCcw } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -25,8 +25,11 @@ import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { requireSuccessfulResponse } from '@/lib/api-response'
 
-import { fetchUpstreamRatios, getUpstreamChannels } from '../api'
-import { usePricingOptionsMutation } from '../hooks/use-pricing-options-mutation'
+import {
+  fetchUpstreamRatios,
+  getUpstreamChannels,
+  updateSystemOption,
+} from '../api'
 import type {
   DifferencesMap,
   RatioType,
@@ -119,6 +122,7 @@ function parseJsonRecord<T>(raw: string | undefined | null): Record<string, T> {
 
 export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
   const { t } = useTranslation()
+  const queryClient = useQueryClient()
 
   const [channelDialogOpen, setChannelDialogOpen] = useState(false)
   const [conflictDialogOpen, setConflictDialogOpen] = useState(false)
@@ -194,8 +198,37 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
     },
   })
 
-  const { mutate: syncMutate, isPending: isSyncPending } =
-    usePricingOptionsMutation()
+  const { mutate: syncMutate, isPending: isSyncPending } = useMutation({
+    mutationFn: async (updates: Array<{ key: string; value: string }>) => {
+      for (const update of updates) {
+        await updateSystemOption(update)
+      }
+    },
+    onSuccess: () => {
+      toast.success(t('Prices synced successfully'))
+      queryClient.invalidateQueries({ queryKey: ['system-options'] })
+
+      setDifferences((prevDiffs) => {
+        const newDiffs = { ...prevDiffs }
+        Object.entries(resolutions).forEach(([model, ratios]) => {
+          Object.keys(ratios).forEach((ratioType) => {
+            if (newDiffs[model]?.[ratioType as RatioType]) {
+              delete newDiffs[model][ratioType as RatioType]
+              if (Object.keys(newDiffs[model]).length === 0) {
+                delete newDiffs[model]
+              }
+            }
+          })
+        })
+        return newDiffs
+      })
+
+      setResolutions({})
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || t('Failed to sync prices'))
+    },
+  })
 
   const handleOpenChannelDialog = () => {
     setChannelDialogOpen(true)
@@ -351,41 +384,16 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
         })
       })
 
-      const values = Object.fromEntries(
-        Object.entries(finalRatios).map(([key, value]) => [
-          key,
-          JSON.stringify(value, null, 2),
-        ])
-      )
+      const updates = Object.entries(finalRatios).map(([key, value]) => ({
+        key,
+        value: JSON.stringify(value, null, 2),
+      }))
 
       return new Promise<boolean>((resolve) => {
-        syncMutate(
-          { values },
-          {
-            onSuccess: () => {
-              toast.success(t('Prices synced successfully'))
-              setDifferences((prevDiffs) => {
-                const newDiffs = { ...prevDiffs }
-                Object.entries(resolutions).forEach(([model, ratios]) => {
-                  Object.keys(ratios).forEach((ratioType) => {
-                    if (newDiffs[model]?.[ratioType as RatioType]) {
-                      delete newDiffs[model][ratioType as RatioType]
-                      if (Object.keys(newDiffs[model]).length === 0)
-                        delete newDiffs[model]
-                    }
-                  })
-                })
-                return newDiffs
-              })
-              setResolutions({})
-              resolve(true)
-            },
-            onError: (error) => {
-              toast.error(error.message || t('Failed to sync prices'))
-              resolve(false)
-            },
-          }
-        )
+        syncMutate(updates, {
+          onSuccess: () => resolve(true),
+          onError: () => resolve(false),
+        })
       })
     },
     [resolutions, syncMutate]

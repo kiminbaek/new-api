@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
@@ -344,10 +343,34 @@ func UpdateOption(c *gin.Context) {
 			return
 		}
 	case "billing_setting.billing_expr":
-		err = validateBillingExpressions(option.Value.(string))
-		if err != nil {
-			common.ApiError(c, err)
+		expressions := make(map[string]string)
+		if err = common.UnmarshalJsonStr(option.Value.(string), &expressions); err != nil {
+			common.ApiErrorMsg(c, "计费表达式配置必须是模型到表达式的 JSON 对象: "+err.Error())
 			return
+		}
+		models := make([]string, 0, len(expressions))
+		for modelName := range expressions {
+			models = append(models, modelName)
+		}
+		sort.Strings(models)
+		generation := jsplugin.DefaultRegistry.Generation()
+		for _, modelName := range models {
+			expression := expressions[modelName]
+			if plugin, ok := generation.GetByModel(modelName); ok {
+				err = billing_setting.SmokeTestTaskExpr(expression, plugin.Meta.UsageSchema)
+			} else if target, resolved := model.ResolveTaskModelAlias(generation, modelName); resolved {
+				if plugin, ok := generation.Get(target.PluginKey); ok {
+					err = billing_setting.SmokeTestTaskExpr(expression, plugin.Meta.UsageSchema)
+				} else {
+					err = billing_setting.SmokeTestExpr(expression)
+				}
+			} else {
+				err = billing_setting.SmokeTestExpr(expression)
+			}
+			if err != nil {
+				common.ApiErrorMsg(c, fmt.Sprintf("模型 %s 的计费表达式无效: %v", modelName, err))
+				return
+			}
 		}
 	case "console_setting.api_info":
 		err = console_setting.ValidateConsoleSettings(option.Value.(string), "ApiInfo")
@@ -495,145 +518,5 @@ func UpdateOptionsBulk(c *gin.Context) {
 	}
 	sort.Strings(keys)
 	recordManageAudit(c, "option.bulk_update", map[string]interface{}{"keys": keys})
-	c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
-}
-
-type PricingOptionsBulkUpdateRequest struct {
-	Values map[string]string `json:"values"`
-}
-
-var pricingOptionsBulkKeys = map[string]struct{}{
-	"ModelPrice": {}, "ModelRatio": {}, "CacheRatio": {}, "CreateCacheRatio": {},
-	"CompletionRatio": {}, "ImageRatio": {}, "AudioRatio": {}, "AudioCompletionRatio": {},
-	"ExposeRatioEnabled": {}, "billing_setting.billing_mode": {}, "billing_setting.billing_expr": {},
-	"GroupRatio": {}, "GroupGroupRatio": {}, "TopupGroupRatio": {}, "UserUsableGroups": {},
-	"AutoGroups": {}, "MaxTokenAutoGroups": {}, "DefaultUseAutoGroup": {},
-	"group_ratio_setting.group_special_usable_group": {},
-}
-
-func validateFiniteNonNegativeMap(raw string) error {
-	var values map[string]float64
-	if err := json.Unmarshal([]byte(raw), &values); err != nil {
-		return err
-	}
-	for key, value := range values {
-		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
-			return fmt.Errorf("%s 必须是非负有限数字", key)
-		}
-	}
-	return nil
-}
-
-func validatePricingBulkValue(key, value string) error {
-	switch key {
-	case "ModelPrice", "ModelRatio", "CacheRatio", "CreateCacheRatio", "CompletionRatio", "ImageRatio", "AudioRatio", "AudioCompletionRatio", "TopupGroupRatio":
-		return validateFiniteNonNegativeMap(value)
-	case "GroupRatio":
-		return ratio_setting.CheckGroupRatio(value)
-	case "GroupGroupRatio":
-		var values map[string]map[string]float64
-		if err := json.Unmarshal([]byte(value), &values); err != nil {
-			return err
-		}
-		for _, ratios := range values {
-			for name, ratio := range ratios {
-				if math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio < 0 {
-					return fmt.Errorf("%s 必须是非负有限数字", name)
-				}
-			}
-		}
-		return nil
-	case "UserUsableGroups":
-		var values map[string]string
-		return json.Unmarshal([]byte(value), &values)
-	case "AutoGroups":
-		var values []string
-		return json.Unmarshal([]byte(value), &values)
-	case "group_ratio_setting.group_special_usable_group":
-		var values map[string]map[string]string
-		return json.Unmarshal([]byte(value), &values)
-	case "ExposeRatioEnabled", "DefaultUseAutoGroup":
-		if value != "true" && value != "false" {
-			return fmt.Errorf("%s 必须是 true 或 false", key)
-		}
-		return nil
-	case "MaxTokenAutoGroups":
-		return setting.ValidateMaxTokenAutoGroups(value)
-	case "billing_setting.billing_mode":
-		var modes map[string]string
-		if err := json.Unmarshal([]byte(value), &modes); err != nil {
-			return err
-		}
-		for modelName, mode := range modes {
-			if mode != billing_setting.BillingModeRatio && mode != billing_setting.BillingModeTieredExpr {
-				return fmt.Errorf("模型 %s 的计费模式无效", modelName)
-			}
-		}
-		return nil
-	case "billing_setting.billing_expr":
-		return validateBillingExpressions(value)
-	default:
-		return fmt.Errorf("该设置不支持价格批量更新: %s", key)
-	}
-}
-
-func validateBillingExpressions(value string) error {
-	expressions := make(map[string]string)
-	if err := common.UnmarshalJsonStr(value, &expressions); err != nil {
-		return fmt.Errorf("计费表达式配置必须是模型到表达式的 JSON 对象: %w", err)
-	}
-	models := make([]string, 0, len(expressions))
-	for name := range expressions {
-		models = append(models, name)
-	}
-	sort.Strings(models)
-	generation := jsplugin.DefaultRegistry.Generation()
-	for _, modelName := range models {
-		expression := expressions[modelName]
-		var err error
-		if plugin, ok := generation.GetByModel(modelName); ok {
-			err = billing_setting.SmokeTestTaskExpr(expression, plugin.Meta.UsageSchema)
-		} else if target, resolved := model.ResolveTaskModelAlias(generation, modelName); resolved {
-			if plugin, ok := generation.Get(target.PluginKey); ok {
-				err = billing_setting.SmokeTestTaskExpr(expression, plugin.Meta.UsageSchema)
-			} else {
-				err = billing_setting.SmokeTestExpr(expression)
-			}
-		} else {
-			err = billing_setting.SmokeTestExpr(expression)
-		}
-		if err != nil {
-			return fmt.Errorf("模型 %s 的计费表达式无效: %w", modelName, err)
-		}
-	}
-	return nil
-}
-
-func UpdatePricingOptionsBulk(c *gin.Context) {
-	var request PricingOptionsBulkUpdateRequest
-	if err := common.DecodeJson(c.Request.Body, &request); err != nil || len(request.Values) == 0 {
-		common.ApiErrorMsg(c, "无效的价格批量设置参数")
-		return
-	}
-	for key, value := range request.Values {
-		if _, ok := pricingOptionsBulkKeys[key]; !ok {
-			common.ApiErrorMsg(c, "该设置不支持价格批量更新: "+key)
-			return
-		}
-		if err := validatePricingBulkValue(key, value); err != nil {
-			common.ApiError(c, err)
-			return
-		}
-	}
-	if err := model.UpdatePricingOptionsAtomic(request.Values); err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	keys := make([]string, 0, len(request.Values))
-	for key := range request.Values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	recordManageAudit(c, "option.pricing_bulk_update", map[string]interface{}{"keys": keys})
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": ""})
 }

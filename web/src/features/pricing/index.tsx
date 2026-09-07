@@ -19,7 +19,6 @@ For commercial licensing, please contact support@quantumnous.com
 import { useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { ErrorState } from '@/components/error-state'
 import { PublicLayout } from '@/components/layout'
 import { PageTransition } from '@/components/page-transition'
 
@@ -51,8 +50,6 @@ export function Pricing() {
     endpointMap,
     autoGroups,
     isLoading,
-    error,
-    refetch,
     priceRate,
     usdExchangeRate,
   } = usePricingData()
@@ -157,18 +154,6 @@ export function Pricing() {
         <div className='mx-auto w-full max-w-[1800px] px-3 pt-16 pb-8 sm:px-6 sm:pt-20 sm:pb-10 xl:px-8'>
           <LoadingSkeleton viewMode={viewMode} />
         </div>
-      </PublicLayout>
-    )
-  }
-
-  if (error) {
-    return (
-      <PublicLayout>
-        <ErrorState
-          title={t('Failed to load model prices')}
-          description={error.message}
-          onRetry={() => void refetch()}
-        />
       </PublicLayout>
     )
   }

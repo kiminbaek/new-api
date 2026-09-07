@@ -48,25 +48,10 @@ export async function updateSystemOption(request: UpdateOptionRequest) {
   return res.data
 }
 
-export async function updateSystemOptionsBulk(
-  request: UpdateOptionsBulkRequest
-) {
+export async function updateSystemOptionsBulk(request: UpdateOptionsBulkRequest) {
   const res = await api.put<UpdateOptionResponse>('/api/option/bulk', request)
   if (!res.data?.success) {
     throw new Error(res.data?.message || 'Failed to update settings')
-  }
-  return res.data
-}
-
-export async function updatePricingOptionsBulk(
-  request: UpdateOptionsBulkRequest
-) {
-  const res = await api.put<UpdateOptionResponse>(
-    '/api/option/pricing/bulk',
-    request
-  )
-  if (!res.data?.success) {
-    throw new Error(res.data?.message || 'Failed to update pricing settings')
   }
   return res.data
 }
@@ -118,9 +103,6 @@ export async function resetModelRatios() {
   const res = await api.post<UpdateOptionResponse>(
     '/api/option/rest_model_ratio'
   )
-  if (!res.data?.success) {
-    throw new Error(res.data?.message || 'Failed to reset model ratios')
-  }
   return res.data
 }
 

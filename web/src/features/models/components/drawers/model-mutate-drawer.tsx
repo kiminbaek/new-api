@@ -554,7 +554,6 @@ export function ModelMutateDrawer({
           isEditing ? 'Model updated successfully' : 'Model created successfully'
         )
         queryClient.invalidateQueries({ queryKey: modelsQueryKeys.lists() })
-        queryClient.invalidateQueries({ queryKey: ['pricing'] })
         queryClient.invalidateQueries({ queryKey: ['system-options'] })
         onOpenChange(false)
       } catch (error: unknown) {

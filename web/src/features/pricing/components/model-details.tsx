@@ -34,9 +34,9 @@ import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { CopyButton } from '@/components/copy-button'
+import { ErrorState } from '@/components/error-state'
 import { StaticDataTable } from '@/components/data-table'
 import { sideDrawerContentClassName } from '@/components/drawer-layout'
-import { ErrorState } from '@/components/error-state'
 import { GroupBadge } from '@/components/group-badge'
 import { PublicLayout } from '@/components/layout'
 import { Button } from '@/components/ui/button'
@@ -1436,8 +1436,6 @@ export function ModelDetails() {
     endpointMap,
     autoGroups,
     isLoading,
-    error,
-    refetch,
     priceRate,
     usdExchangeRate,
   } = usePricingData()
@@ -1474,20 +1472,6 @@ export function ModelDetails() {
               <Skeleton key={`section-${key}`} className='h-24 w-full' />
             ))}
           </div>
-        </div>
-      </PublicLayout>
-    )
-  }
-
-  if (error) {
-    return (
-      <PublicLayout>
-        <div className='mx-auto max-w-2xl px-4 sm:px-6'>
-          <ErrorState
-            title={t('Failed to load model prices')}
-            description={error.message}
-            onRetry={() => void refetch()}
-          />
         </div>
       </PublicLayout>
     )
