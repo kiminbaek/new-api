@@ -264,3 +264,94 @@ func TestOaiStreamHandler_MalformedDataFrameReturnsError(t *testing.T) {
 	assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
 	assert.Zero(t, info.ReceivedResponseCount)
 }
+
+func TestParseOpenAIStreamError(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		wantErr string
+	}{
+		{name: "object error", data: `{"error":{"message":"An internal error occurred. Please try again later.","type":"server_error"}}`, wantErr: "An internal error occurred"},
+		{name: "string error", data: `{"error":"upstream unavailable"}`, wantErr: "upstream unavailable"},
+		{name: "typed error", data: `{"type":"upstream_error","message":"hidden"}`, wantErr: "upstream returned an error event"},
+		{name: "explicit error type", data: `{"type":"error"}`, wantErr: "upstream returned an error event"},
+		{name: "normal chunk", data: `{"choices":[{"delta":{"content":"hello"}}]}`},
+		{name: "null error compatibility field", data: `{"error":null,"choices":[{"delta":{"content":"hello"}}]}`},
+		{name: "false error compatibility field", data: `{"error":false,"choices":[{"delta":{"content":"hello"}}]}`},
+		{name: "zero error compatibility field", data: `{"error":0,"choices":[{"delta":{"content":"hello"}}]}`},
+		{name: "empty error object", data: `{"error":{},"choices":[{"delta":{"content":"hello"}}]}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := parseOpenAIStreamError(tt.data)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestOaiStreamHandler_FirstErrorEventIsRetryable(t *testing.T) {
+	body := "data: {\"error\":{\"message\":\"An internal error occurred. Please try again later.\",\"type\":\"server_error\"}}\n\n"
+	c, recorder, info := setupFakeSuccessTest(t, body)
+	usage, apiErr := OaiStreamHandler(c, info, fakeResp(body))
+	require.NotNil(t, apiErr)
+	assert.Nil(t, usage)
+	assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
+	assert.False(t, types.IsSkipRetryError(apiErr))
+	assert.Contains(t, apiErr.Error(), "An internal error occurred")
+	assert.Empty(t, recorder.Body.String())
+	assert.Zero(t, info.ReceivedResponseCount)
+	assert.False(t, info.StreamStatus.ProtocolCommitted())
+	assert.False(t, info.StreamStatus.ClientVisible())
+	assert.Equal(t, 1, info.StreamStatus.TotalErrorCount())
+}
+
+func TestOaiStreamHandler_BufferedContentThenErrorIsRetryable(t *testing.T) {
+	body := "data: {\"choices\":[{\"delta\":{\"content\":\"buffered\"}}]}\n" +
+		"data: {\"error\":{\"message\":\"internal failure\"}}\n"
+	c, recorder, info := setupFakeSuccessTest(t, body)
+	usage, apiErr := OaiStreamHandler(c, info, fakeResp(body))
+	require.NotNil(t, apiErr)
+	assert.Nil(t, usage)
+	assert.False(t, types.IsSkipRetryError(apiErr))
+	assert.Empty(t, recorder.Body.String())
+	assert.Equal(t, 1, info.ReceivedResponseCount)
+	assert.False(t, info.StreamStatus.ProtocolCommitted())
+}
+
+func TestOaiStreamHandler_ErrorAfterVisibleContentSkipsRetry(t *testing.T) {
+	body := "data: {\"choices\":[{\"delta\":{\"content\":\"visible\"}}]}\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"buffered\"}}]}\n" +
+		"data: {\"error\":{\"message\":\"internal failure\"}}\n"
+	c, recorder, info := setupFakeSuccessTest(t, body)
+	usage, apiErr := OaiStreamHandler(c, info, fakeResp(body))
+	require.NotNil(t, apiErr)
+	assert.Nil(t, usage)
+	assert.True(t, types.IsSkipRetryError(apiErr))
+	assert.Contains(t, recorder.Body.String(), "visible")
+	assert.NotContains(t, recorder.Body.String(), "buffered")
+	assert.True(t, info.StreamStatus.ProtocolCommitted())
+	assert.True(t, info.StreamStatus.ClientVisible())
+}
+
+func TestOaiStreamHandler_ResetsReceivedResponseCountBetweenAttempts(t *testing.T) {
+	failedBody := "data: {\"choices\":[{\"delta\":{\"content\":\"buffered\"}}]}\n" +
+		"data: {\"error\":{\"message\":\"internal failure\"}}\n"
+	c1, _, info := setupFakeSuccessTest(t, failedBody)
+	usage, apiErr := OaiStreamHandler(c1, info, fakeResp(failedBody))
+	require.NotNil(t, apiErr)
+	assert.Nil(t, usage)
+	assert.Equal(t, 1, info.ReceivedResponseCount)
+
+	successBody := "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n" +
+		"data: [DONE]\n"
+	c2, _, _ := setupFakeSuccessTest(t, successBody)
+	usage, apiErr = OaiStreamHandler(c2, info, fakeResp(successBody))
+	require.Nil(t, apiErr)
+	require.NotNil(t, usage)
+	assert.Equal(t, 1, info.ReceivedResponseCount)
+}

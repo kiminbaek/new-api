@@ -30,12 +30,26 @@ func (r *StreamResult) Error(err error) {
 	r.rejected = true
 }
 
-// Stop records a fatal error and marks the stream to stop after this chunk.
+// Stop records a fatal error and marks the stream to stop after accepting this
+// chunk. Use RejectAndStop when the current frame is itself an error event and
+// must not count as downstream-visible protocol data.
 func (r *StreamResult) Stop(err error) {
 	if err != nil {
 		r.status.RecordError(err.Error())
 	}
 	r.status.SetEndReason(relaycommon.StreamEndReasonHandlerStop, err)
+	r.stopped = true
+}
+
+// RejectAndStop records one fatal error, rejects the current frame, and stops
+// scanning. Rejected frames do not increment ReceivedResponseCount and cannot
+// stop the first-token timer or make transparent retry unsafe.
+func (r *StreamResult) RejectAndStop(err error) {
+	if err != nil {
+		r.status.RecordError(err.Error())
+	}
+	r.status.SetEndReason(relaycommon.StreamEndReasonHandlerStop, err)
+	r.rejected = true
 	r.stopped = true
 }
 

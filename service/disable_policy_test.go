@@ -53,6 +53,13 @@ func TestClassifyChannelError_ServerErrorsAreModelLevel(t *testing.T) {
 	}
 }
 
+func TestClassifyChannelError_ServerErrorWithSkipRetryRemainsModelLevel(t *testing.T) {
+	err := types.NewErrorWithStatusCode(errors.New("upstream stream failed after output"),
+		types.ErrorCodeBadResponse, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
+	assert.True(t, types.IsSkipRetryError(err))
+	assert.Equal(t, ActionDisableModel, ClassifyChannelError(err, true))
+}
+
 func TestClassifyChannelError_RequestSideErrorsAreIgnored(t *testing.T) {
 	for _, code := range []int{200, 400, 404, 413, 422} {
 		err := types.NewErrorWithStatusCode(errors.New("bad request"),

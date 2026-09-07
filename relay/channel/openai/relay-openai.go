@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -41,6 +42,51 @@ func markOpenAIFrameWritten(status *relaycommon.StreamStatus, data string) {
 		return
 	}
 	status.MarkProtocolCommitted()
+}
+
+type openAIStreamErrorEnvelope struct {
+	Type  string          `json:"type"`
+	Error json.RawMessage `json:"error"`
+}
+
+type openAIStreamErrorDetail struct {
+	Message string `json:"message"`
+	Type    string `json:"type"`
+	Code    any    `json:"code"`
+}
+
+func parseOpenAIStreamError(data string) error {
+	var envelope openAIStreamErrorEnvelope
+	if err := common.UnmarshalJsonStr(data, &envelope); err != nil {
+		return nil
+	}
+
+	explicitErrorEvent := envelope.Type == "error" || envelope.Type == "upstream_error"
+	message := ""
+	trimmedError := strings.TrimSpace(string(envelope.Error))
+	if trimmedError != "" && trimmedError != "null" {
+		var detail openAIStreamErrorDetail
+		if err := common.Unmarshal(envelope.Error, &detail); err == nil {
+			if strings.TrimSpace(detail.Message) != "" {
+				message = strings.TrimSpace(detail.Message)
+			} else if strings.TrimSpace(detail.Type) != "" || detail.Code != nil {
+				message = "upstream returned an error event"
+			}
+		}
+		if message == "" {
+			var text string
+			if err := common.Unmarshal(envelope.Error, &text); err == nil && strings.TrimSpace(text) != "" {
+				message = strings.TrimSpace(text)
+			}
+		}
+	}
+	if message == "" && !explicitErrorEvent {
+		return nil
+	}
+	if message == "" {
+		message = "upstream returned an error event"
+	}
+	return fmt.Errorf("upstream stream error: %s", message)
 }
 
 func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, data string, forceFormat bool, thinkToContent bool) error {
@@ -132,6 +178,10 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 
 	defer service.CloseResponseBodyGracefully(resp)
 
+	// RelayInfo is reused across channel retries. Keep diagnostics scoped to
+	// the current upstream attempt instead of accumulating rejected chunks.
+	info.ReceivedResponseCount = 0
+
 	model := info.UpstreamModelName
 	var responseId string
 	var createAt int64 = 0
@@ -144,8 +194,14 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	var secondLastStreamData string // 保留倒数第二个stream data；部分兼容网关把完整usage放在倒数第二个事件
 	seenStreamToolCalls := make(map[string]struct{})
 	var streamFunctionCallNames []string
+	var upstreamStreamError error
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
+		if streamErr := parseOpenAIStreamError(data); streamErr != nil {
+			upstreamStreamError = streamErr
+			sr.RejectAndStop(streamErr)
+			return
+		}
 		if lastStreamData != "" {
 			beforeSize := c.Writer.Size()
 			if err := HandleStreamFormat(c, info, lastStreamData, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
@@ -178,6 +234,19 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 			}
 		}
 	})
+
+	if upstreamStreamError != nil {
+		options := make([]types.NewAPIErrorOptions, 0, 1)
+		if info.StreamStatus.ProtocolCommitted() {
+			options = append(options, types.ErrOptionWithSkipRetry())
+		}
+		return nil, types.NewOpenAIError(
+			upstreamStreamError,
+			types.ErrorCodeBadResponse,
+			http.StatusBadGateway,
+			options...,
+		)
+	}
 
 	// 处理最后的响应。OpenAI 流会延迟一帧格式化；如果最后一帧无法解析，
 	// 撤销 scanner 对该帧的有效计数，避免 data: garbage 被当成成功输出。

@@ -145,17 +145,23 @@ func ClassifyChannelError(err *types.NewAPIError, _ bool) DisableAction {
 		return ActionDisableModel
 	}
 
-	// 明确不该重试也不该惩罚的：请求侧错误（400 参数错、内容审核等）。
-	if types.IsSkipRetryError(err) {
-		return ActionNone
-	}
-
 	code := err.StatusCode
 	switch {
 	case code >= 200 && code < 300:
 		return ActionNone
 	case code == 400 || code == 404 || code == 413 || code == 422:
 		// 请求本身的问题，渠道无罪。
+		return ActionNone
+	case code >= 500 || code == 408 || code == 429:
+		// SkipRetry can also mean that valid stream data already reached the
+		// client and replay is unsafe. It does not make an upstream failure
+		// channel-innocent, so classify attributable server errors first.
+		return ActionDisableModel
+	}
+
+	// Other explicit no-retry errors are request-side or otherwise not safe to
+	// attribute to the selected upstream channel.
+	if types.IsSkipRetryError(err) {
 		return ActionNone
 	}
 
