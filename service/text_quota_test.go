@@ -930,6 +930,29 @@ func TestCalculateTextToolCallSurchargeGeneralizedBuiltInTools(t *testing.T) {
 	assert.Equal(t, 10.0, summary.ToolSurchargeItems[1].Price)
 }
 
+func TestCalculateTextToolCallSurchargeUsesFrozenRequestPrice(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	operation_setting.SetToolPriceForTest("frozen_charge_fn", 5.0)
+	prices := operation_setting.SnapshotToolPricesForModel("o1")
+	operation_setting.SetToolPriceForTest("frozen_charge_fn", 50.0)
+	t.Cleanup(func() { operation_setting.DeleteToolPriceForTest("frozen_charge_fn") })
+
+	relayInfo := &relaycommon.RelayInfo{
+		OriginModelName: "o1",
+		ResponsesUsageInfo: &relaycommon.ResponsesUsageInfo{BuiltInTools: map[string]*relaycommon.BuildInToolInfo{
+			"frozen_charge_fn": {CallCount: 2},
+		}},
+	}
+	relayInfo.PriceData.SetToolPrices(prices)
+	summary := &textQuotaSummary{ModelName: "o1", GroupRatio: 1}
+	surcharge := calculateTextToolCallSurcharge(ctx, relayInfo, summary)
+	expected := decimal.NewFromFloat(10.0 / 1000).Mul(decimal.NewFromFloat(common.QuotaPerUnit))
+	assert.True(t, expected.Equal(surcharge), "got %s want %s", surcharge, expected)
+	require.Len(t, summary.ToolSurchargeItems, 1)
+	assert.Equal(t, 5.0, summary.ToolSurchargeItems[0].Price)
+}
+
 func TestCalculateTextToolCallSurchargeKeepsSearchPreviewFallbackWithCustomFunctions(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())

@@ -1499,7 +1499,18 @@ func RefundSubscriptionPreConsume(requestId string) error {
 			record.Status = "refunded"
 			return tx.Save(&record).Error
 		}
-		if err := PostConsumeUserSubscriptionDelta(record.UserSubscriptionId, -record.PreConsumed); err != nil {
+		var sub UserSubscription
+		if err := lockForUpdate(tx).
+			Where("id = ?", record.UserSubscriptionId).
+			First(&sub).Error; err != nil {
+			return err
+		}
+		newUsed := sub.AmountUsed - record.PreConsumed
+		if newUsed < 0 {
+			return fmt.Errorf("subscription refund underflow, used=%d refund=%d", sub.AmountUsed, record.PreConsumed)
+		}
+		if err := tx.Model(&UserSubscription{}).Where("id = ?", sub.Id).
+			Update("amount_used", newUsed).Error; err != nil {
 			return err
 		}
 		record.Status = "refunded"

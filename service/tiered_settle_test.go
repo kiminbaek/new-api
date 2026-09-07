@@ -452,6 +452,7 @@ func TestPrepareTieredBillingForSelectedGroupTopUpArrearsAllowsNegativeBalance(t
 	seedUser(t, userID, 20_000)
 
 	relayInfo := &relaycommon.RelayInfo{
+		RequestId:             "tiered-topup-arrears",
 		UserId:                userID,
 		IsPlayground:          true,
 		FinalPreConsumedQuota: 50_000,
@@ -1122,4 +1123,35 @@ func TestBillingSessionRefundRetriesOnlyFailedStage(t *testing.T) {
 	}, time.Second, time.Millisecond)
 	assert.Equal(t, 1, tokenCalls, "successful token refund must not run twice")
 	assert.Equal(t, 2, funding.calls)
+}
+
+func TestBillingSessionPersistentSettlementSkipsUnlimitedToken(t *testing.T) {
+	truncate(t)
+	const userID, tokenID = 1702, 1702
+	seedUser(t, userID, 1000)
+	seedToken(t, tokenID, userID, "sk-unlimited-settlement", 777)
+
+	relayInfo := &relaycommon.RelayInfo{
+		RequestId:      "unlimited-token-settlement",
+		UserId:         userID,
+		TokenId:        tokenID,
+		TokenKey:       "sk-unlimited-settlement",
+		TokenUnlimited: true,
+	}
+	session := &BillingSession{
+		relayInfo: relayInfo, funding: &WalletFunding{userId: userID, consumed: 100}, preConsumedQuota: 100,
+	}
+	require.NoError(t, session.Settle(150))
+
+	userQuota, err := model.GetUserQuota(userID, false)
+	require.NoError(t, err)
+	assert.Equal(t, 950, userQuota)
+	assert.Equal(t, 777, getTokenRemainQuota(t, tokenID))
+	var token model.Token
+	require.NoError(t, model.DB.First(&token, tokenID).Error)
+	assert.Zero(t, token.UsedQuota)
+	row, err := model.GetBillingSettlement(relayInfo.RequestId)
+	require.NoError(t, err)
+	assert.True(t, row.TokenApplied)
+	assert.Equal(t, model.BillingSettlementCompleted, row.Status)
 }

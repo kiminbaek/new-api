@@ -213,6 +213,32 @@ func GetToolPriceForModel(toolName, modelName string) float64 {
 	return 0
 }
 
+// SnapshotToolPricesForModel resolves every currently configured tool price for
+// one model. The returned map is detached from the mutable global index and is
+// safe to keep for the lifetime of a request.
+func SnapshotToolPricesForModel(modelName string) map[string]float64 {
+	idx := currentIndex.Load()
+	if idx == nil {
+		RebuildToolPriceIndex()
+		idx = currentIndex.Load()
+	}
+	if idx == nil {
+		return nil
+	}
+	names := make(map[string]struct{}, len(idx.defaults)+len(idx.prefixes))
+	for name := range idx.defaults {
+		names[name] = struct{}{}
+	}
+	for name := range idx.prefixes {
+		names[name] = struct{}{}
+	}
+	prices := make(map[string]float64, len(names))
+	for name := range names {
+		prices[name] = GetToolPriceForModel(name, modelName)
+	}
+	return prices
+}
+
 // GetToolPrice is a convenience wrapper when no model name is needed.
 func GetToolPrice(toolName string) float64 {
 	return GetToolPriceForModel(toolName, "")

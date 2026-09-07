@@ -2,6 +2,8 @@ package controller
 
 import (
 	"encoding/json"
+	"errors"
+	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -86,70 +88,63 @@ func GetModelMeta(c *gin.Context) {
 	common.ApiSuccess(c, &m)
 }
 
+type modelMutationRequest struct {
+	model.Model
+	Pricing model.ModelPricingPatch `json:"pricing"`
+}
+
 // CreateModelMeta 新建模型
 func CreateModelMeta(c *gin.Context) {
-	var m model.Model
-	if err := c.ShouldBindJSON(&m); err != nil {
+	var req modelMutationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
 		common.ApiError(c, err)
 		return
 	}
+	m := req.Model
 	if m.ModelName == "" {
 		common.ApiErrorMsg(c, "模型名称不能为空")
 		return
 	}
-	// 名称冲突检查
-	if dup, err := model.IsModelNameDuplicated(0, m.ModelName); err != nil {
-		common.ApiError(c, err)
-		return
-	} else if dup {
-		common.ApiErrorMsg(c, "模型名称已存在")
-		return
-	}
-
-	if err := m.Insert(); err != nil {
+	if err := model.CreateModelWithPricing(&m, req.Pricing); err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	model.RefreshPricing()
 	common.ApiSuccess(c, &m)
 }
 
 // UpdateModelMeta 更新模型
 func UpdateModelMeta(c *gin.Context) {
 	statusOnly := c.Query("status_only") == "true"
-
-	var m model.Model
-	if err := c.ShouldBindJSON(&m); err != nil {
+	var req modelMutationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
 		common.ApiError(c, err)
 		return
 	}
+	m := req.Model
 	if m.Id == 0 {
 		common.ApiErrorMsg(c, "缺少模型 ID")
 		return
 	}
-
 	if statusOnly {
-		// 只更新状态，防止误清空其他字段
 		if err := model.DB.Model(&model.Model{}).Where("id = ?", m.Id).Update("status", m.Status).Error; err != nil {
 			common.ApiError(c, err)
 			return
 		}
-	} else {
-		// 名称冲突检查
-		if dup, err := model.IsModelNameDuplicated(m.Id, m.ModelName); err != nil {
-			common.ApiError(c, err)
-			return
-		} else if dup {
-			common.ApiErrorMsg(c, "模型名称已存在")
-			return
-		}
-
-		if err := m.Update(); err != nil {
-			common.ApiError(c, err)
-			return
-		}
+		common.ApiSuccess(c, &m)
+		return
 	}
-	model.RefreshPricing()
+	if m.ModelName == "" {
+		common.ApiErrorMsg(c, "模型名称不能为空")
+		return
+	}
+	if err := model.SaveModelWithPricing(&m, m.Revision, req.Pricing); err != nil {
+		if errors.Is(err, model.ErrModelRevisionConflict) {
+			c.JSON(http.StatusConflict, gin.H{"success": false, "message": "模型已被其他操作修改，请刷新后重试"})
+			return
+		}
+		common.ApiError(c, err)
+		return
+	}
 	common.ApiSuccess(c, &m)
 }
 

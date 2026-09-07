@@ -555,9 +555,11 @@ func ApplyTaskBillingAdjustment(task *Task, expectedQuota int, finalQuota int) (
 					return err
 				}
 				newUsed := sub.AmountUsed + int64(delta)
-				if newUsed < 0 || (sub.AmountTotal > 0 && newUsed > sub.AmountTotal) {
-					return fmt.Errorf("subscription billing delta out of range: used=%d total=%d", newUsed, sub.AmountTotal)
+				if newUsed < 0 {
+					return fmt.Errorf("subscription billing delta underflow: used=%d delta=%d", sub.AmountUsed, delta)
 				}
+				// Final async settlement records delivered usage in full, even when
+				// the actual task cost exceeds the remaining plan allowance.
 				if err := tx.Model(&UserSubscription{}).Where("id = ?", sub.Id).Update("amount_used", newUsed).Error; err != nil {
 					return err
 				}

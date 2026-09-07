@@ -1,12 +1,17 @@
 package model
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -33,6 +38,7 @@ type Model struct {
 	SyncOfficial int            `json:"sync_official" gorm:"default:1"`
 	CreatedTime  int64          `json:"created_time" gorm:"bigint"`
 	UpdatedTime  int64          `json:"updated_time" gorm:"bigint"`
+	Revision     int64          `json:"revision" gorm:"not null;default:1"`
 	DeletedAt    gorm.DeletedAt `json:"-" gorm:"index;uniqueIndex:uk_model_name_delete_at,priority:2"`
 
 	BoundChannels []BoundChannel `json:"bound_channels,omitempty" gorm:"-"`
@@ -80,6 +86,239 @@ func (mi *Model) Update() error {
 	return DB.Model(&Model{}).Where("id = ?", mi.Id).
 		Select("model_name", "description", "icon", "tags", "vendor_id", "endpoints", "status", "sync_official", "name_rule", "updated_time").
 		Updates(mi).Error
+}
+
+var ErrModelRevisionConflict = errors.New("model revision conflict")
+
+var modelPricingAfterModelWriteHook func() error
+
+var modelPricingOptionKeys = []string{
+	"ModelPrice", "ModelRatio", "CacheRatio", "CompletionRatio",
+	"ImageRatio", "AudioRatio", "AudioCompletionRatio",
+}
+
+type ModelPricingPatch struct {
+	ModelPrice           *float64 `json:"model_price"`
+	ModelRatio           *float64 `json:"model_ratio"`
+	CacheRatio           *float64 `json:"cache_ratio"`
+	CompletionRatio      *float64 `json:"completion_ratio"`
+	ImageRatio           *float64 `json:"image_ratio"`
+	AudioRatio           *float64 `json:"audio_ratio"`
+	AudioCompletionRatio *float64 `json:"audio_completion_ratio"`
+}
+
+func (p ModelPricingPatch) values() map[string]*float64 {
+	return map[string]*float64{
+		"ModelPrice": p.ModelPrice, "ModelRatio": p.ModelRatio,
+		"CacheRatio": p.CacheRatio, "CompletionRatio": p.CompletionRatio,
+		"ImageRatio": p.ImageRatio, "AudioRatio": p.AudioRatio,
+		"AudioCompletionRatio": p.AudioCompletionRatio,
+	}
+}
+
+func ensureModelPricingOptionRows() error {
+	for _, key := range modelPricingOptionKeys {
+		option := Option{Key: key, Value: "{}"}
+		if err := DB.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "key"}}, DoNothing: true}).Create(&option).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func readPricingMapTx(tx *gorm.DB, key string) (map[string]float64, error) {
+	var option Option
+	result := lockForUpdate(tx).Where(commonKeyCol+" = ?", key).Limit(1).Find(&option)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	values := make(map[string]float64)
+	if result.RowsAffected == 0 || strings.TrimSpace(option.Value) == "" {
+		return values, nil
+	}
+	if err := json.Unmarshal([]byte(option.Value), &values); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+func writePricingMapTx(tx *gorm.DB, key string, values map[string]float64) error {
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return err
+	}
+	option := Option{Key: key, Value: string(encoded)}
+	return tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "key"}},
+		DoUpdates: clause.AssignmentColumns([]string{"value"}),
+	}).Create(&option).Error
+}
+
+// publishModelPricingOptions updates the seven pricing option snapshots as one
+// in-memory generation. The database transaction has already validated and
+// committed every JSON value, so publishing cannot leave a partially refreshed
+// pricing cache when one per-key hot-loader fails midway.
+func publishModelPricingOptions(updates map[string]string) error {
+	if len(updates) != len(modelPricingOptionKeys) {
+		return errors.New("incomplete model pricing option snapshot")
+	}
+	for _, key := range modelPricingOptionKeys {
+		value, ok := updates[key]
+		if !ok {
+			return fmt.Errorf("missing model pricing option %s", key)
+		}
+		var decoded map[string]float64
+		if err := json.Unmarshal([]byte(value), &decoded); err != nil {
+			return fmt.Errorf("invalid committed model pricing option %s: %w", key, err)
+		}
+	}
+	common.OptionMapRWMutex.Lock()
+	for _, key := range modelPricingOptionKeys {
+		common.OptionMap[key] = updates[key]
+	}
+	common.OptionMapRWMutex.Unlock()
+	RefreshPricing()
+	return nil
+}
+
+func applyModelPricingPatchTx(tx *gorm.DB, oldName string, newName string, patch ModelPricingPatch) (map[string]string, error) {
+	updates := make(map[string]string, len(modelPricingOptionKeys))
+	patchValues := patch.values()
+	keys := append([]string(nil), modelPricingOptionKeys...)
+	sort.Strings(keys)
+	for _, key := range keys {
+		values, err := readPricingMapTx(tx, key)
+		if err != nil {
+			return nil, err
+		}
+		if oldName != "" && oldName != newName {
+			delete(values, oldName)
+		}
+		value := patchValues[key]
+		delete(values, newName)
+		if value != nil {
+			values[newName] = *value
+		}
+		if err := writePricingMapTx(tx, key, values); err != nil {
+			return nil, err
+		}
+		encoded, _ := json.Marshal(values)
+		updates[key] = string(encoded)
+	}
+	return updates, nil
+}
+
+func CreateModelWithPricing(incoming *Model, patch ModelPricingPatch) error {
+	if incoming == nil || strings.TrimSpace(incoming.ModelName) == "" {
+		return errors.New("invalid model atomic create")
+	}
+	optionBulkUpdateMu.Lock()
+	defer optionBulkUpdateMu.Unlock()
+	if err := ensureModelPricingOptionRows(); err != nil {
+		return err
+	}
+	var optionUpdates map[string]string
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var duplicate int64
+		if err := tx.Model(&Model{}).Where("model_name = ?", incoming.ModelName).Count(&duplicate).Error; err != nil {
+			return err
+		}
+		if duplicate > 0 {
+			return errors.New("model name already exists")
+		}
+		now := common.GetTimestamp()
+		incoming.CreatedTime = now
+		incoming.UpdatedTime = now
+		incoming.Revision = 1
+		originalStatus := incoming.Status
+		originalSyncOfficial := incoming.SyncOfficial
+		if err := tx.Create(incoming).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&Model{}).Where("id = ?", incoming.Id).Updates(map[string]any{
+			"status": originalStatus, "sync_official": originalSyncOfficial,
+		}).Error; err != nil {
+			return err
+		}
+		if modelPricingAfterModelWriteHook != nil {
+			if err := modelPricingAfterModelWriteHook(); err != nil {
+				return err
+			}
+		}
+		var err error
+		optionUpdates, err = applyModelPricingPatchTx(tx, "", incoming.ModelName, patch)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	return publishModelPricingOptions(optionUpdates)
+}
+
+// SaveModelWithPricing atomically updates one model entity and its seven
+// per-model pricing entries. expectedRevision provides optimistic concurrency;
+// unrelated model entries are merged under row locks instead of overwritten.
+func SaveModelWithPricing(incoming *Model, expectedRevision int64, patch ModelPricingPatch) error {
+	if incoming == nil || incoming.Id <= 0 || expectedRevision <= 0 {
+		return errors.New("invalid model atomic update")
+	}
+	optionBulkUpdateMu.Lock()
+	defer optionBulkUpdateMu.Unlock()
+	if err := ensureModelPricingOptionRows(); err != nil {
+		return err
+	}
+	var optionUpdates map[string]string
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var current Model
+		if err := lockForUpdate(tx).Where("id = ?", incoming.Id).First(&current).Error; err != nil {
+			return err
+		}
+		if current.Revision != expectedRevision {
+			return ErrModelRevisionConflict
+		}
+		if incoming.ModelName == "" {
+			return errors.New("model name is empty")
+		}
+		var duplicate int64
+		if err := tx.Model(&Model{}).Where("model_name = ? AND id <> ?", incoming.ModelName, incoming.Id).Count(&duplicate).Error; err != nil {
+			return err
+		}
+		if duplicate > 0 {
+			return errors.New("model name already exists")
+		}
+		now := common.GetTimestamp()
+		result := tx.Model(&Model{}).Where("id = ? AND revision = ?", incoming.Id, expectedRevision).
+			Updates(map[string]any{
+				"model_name": incoming.ModelName, "description": incoming.Description,
+				"icon": incoming.Icon, "tags": incoming.Tags, "vendor_id": incoming.VendorID,
+				"endpoints": incoming.Endpoints, "status": incoming.Status,
+				"sync_official": incoming.SyncOfficial, "name_rule": incoming.NameRule,
+				"updated_time": now, "revision": gorm.Expr("revision + 1"),
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrModelRevisionConflict
+		}
+		if modelPricingAfterModelWriteHook != nil {
+			if err := modelPricingAfterModelWriteHook(); err != nil {
+				return err
+			}
+		}
+		var err error
+		optionUpdates, err = applyModelPricingPatchTx(tx, current.ModelName, incoming.ModelName, patch)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	if err := publishModelPricingOptions(optionUpdates); err != nil {
+		return err
+	}
+	incoming.Revision = expectedRevision + 1
+	incoming.UpdatedTime = common.GetTimestamp()
+	return nil
 }
 
 func (mi *Model) Delete() error {

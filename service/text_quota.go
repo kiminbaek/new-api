@@ -18,6 +18,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	hosttypes "github.com/QuantumNous/new-api/types"
 
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
@@ -100,11 +101,14 @@ func isLegacyClaudeDerivedOpenAIUsage(relayInfo *relaycommon.RelayInfo, usage *d
 	return usage.ClaudeCacheCreation5mTokens > 0 || usage.ClaudeCacheCreation1hTokens > 0
 }
 
-func collectToolSurchargeItem(items []ToolSurchargeItem, name string, count int, modelName string) []ToolSurchargeItem {
+func collectToolSurchargeItem(items []ToolSurchargeItem, name string, count int, modelName string, priceData *hosttypes.PriceData) []ToolSurchargeItem {
 	if count <= 0 {
 		return items
 	}
-	price := operation_setting.GetToolPriceForModel(name, modelName)
+	price, frozen := priceData.ToolPrice(name)
+	if !frozen {
+		price = operation_setting.GetToolPriceForModel(name, modelName)
+	}
 	if price <= 0 || math.IsNaN(price) || math.IsInf(price, 0) {
 		return items
 	}
@@ -156,12 +160,12 @@ func calculateTextToolCallSurcharge(ctx *gin.Context, relayInfo *relaycommon.Rel
 			if tool == nil {
 				continue
 			}
-			items = collectToolSurchargeItem(items, name, tool.CallCount, summary.ModelName)
+			items = collectToolSurchargeItem(items, name, tool.CallCount, summary.ModelName, &relayInfo.PriceData)
 		}
 	}
 	if relayInfo.RelayMode != relayconstant.RelayModeResponses &&
 		strings.HasSuffix(summary.ModelName, "search-preview") {
-		items = collectToolSurchargeItem(items, dto.BuildInToolWebSearchPreview, 1, summary.ModelName)
+		items = collectToolSurchargeItem(items, dto.BuildInToolWebSearchPreview, 1, summary.ModelName, &relayInfo.PriceData)
 	}
 
 	items = collectToolSurchargeItem(
@@ -169,10 +173,11 @@ func calculateTextToolCallSurcharge(ctx *gin.Context, relayInfo *relaycommon.Rel
 		dto.BuildInToolWebSearch,
 		ctx.GetInt("claude_web_search_requests"),
 		summary.ModelName,
+		&relayInfo.PriceData,
 	)
 
 	if ctx.GetBool("gemini_google_search_call") {
-		items = collectToolSurchargeItem(items, dto.BuildInToolGoogleSearch, 1, summary.ModelName)
+		items = collectToolSurchargeItem(items, dto.BuildInToolGoogleSearch, 1, summary.ModelName, &relayInfo.PriceData)
 	}
 
 	summary.ToolSurchargeItems = mergeToolSurchargeItems(items)

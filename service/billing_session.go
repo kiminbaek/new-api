@@ -62,15 +62,23 @@ func (s *BillingSession) Settle(actualQuota int) error {
 		s.settled = true
 		return nil
 	}
-	// 1) 调整资金来源（仅在尚未提交时执行，防止重复调用）
+	// Production wallet/subscription settlements use a durable database ledger.
+	// Each mutation and its stage marker commit in the same transaction, so a
+	// process crash resumes without charging either stage twice.
+	if _, wallet := s.funding.(*WalletFunding); wallet {
+		return s.settlePersistently(delta)
+	}
+	if _, subscription := s.funding.(*SubscriptionFunding); subscription {
+		return s.settlePersistently(delta)
+	}
+
+	// Test/extension funding sources retain the in-memory staged contract.
 	if !s.fundingSettled {
 		if err := s.funding.Settle(delta); err != nil {
 			return err
 		}
 		s.fundingSettled = true
 	}
-	// 2) 调整令牌额度。失败时保留 tokenSettled=false；再次调用 Settle
-	// 只重试本阶段，不会重复执行已成功的 funding.Settle。
 	if !s.tokenSettled {
 		if !s.relayInfo.IsPlayground {
 			var tokenErr error
@@ -80,14 +88,47 @@ func (s *BillingSession) Settle(actualQuota int) error {
 				tokenErr = increaseTokenQuotaForBilling(s.relayInfo.TokenId, s.relayInfo.TokenKey, -delta)
 			}
 			if tokenErr != nil {
-				common.SysLog(fmt.Sprintf("token settlement pending after funding settled (userId=%d, tokenId=%d, delta=%d): %s",
-					s.relayInfo.UserId, s.relayInfo.TokenId, delta, tokenErr.Error()))
 				return tokenErr
 			}
 		}
 		s.tokenSettled = true
 	}
 	// 3) 仅在两阶段都成功后写日志增量并完成状态。
+	if s.funding.Source() == BillingSourceSubscription {
+		s.relayInfo.SubscriptionPostDelta += int64(delta)
+	}
+	s.settled = true
+	return nil
+}
+
+func (s *BillingSession) settlePersistently(delta int) error {
+	if err := model.FlushBatchUpdates(); err != nil {
+		return fmt.Errorf("flush pending quota updates before durable settlement: %w", err)
+	}
+	subscriptionId := 0
+	if sub, ok := s.funding.(*SubscriptionFunding); ok {
+		subscriptionId = sub.subscriptionId
+	}
+	spec := model.BillingSettlementSpec{
+		RequestId:      s.relayInfo.RequestId,
+		UserId:         s.relayInfo.UserId,
+		SubscriptionId: subscriptionId,
+		TokenId:        s.relayInfo.TokenId,
+		FundingSource:  s.funding.Source(),
+		Delta:          delta,
+		SkipToken:      s.relayInfo.IsPlayground || s.relayInfo.TokenUnlimited || s.relayInfo.TokenId <= 0,
+	}
+	if err := model.SettleBillingPersistently(spec); err != nil {
+		if row, readErr := model.GetBillingSettlement(spec.RequestId); readErr == nil {
+			s.fundingSettled = row.FundingApplied
+			s.tokenSettled = row.TokenApplied
+		}
+		common.SysLog(fmt.Sprintf("durable billing settlement pending (requestId=%s, userId=%d, tokenId=%d, delta=%d): %s",
+			spec.RequestId, spec.UserId, spec.TokenId, delta, err.Error()))
+		return err
+	}
+	s.fundingSettled = true
+	s.tokenSettled = true
 	if s.funding.Source() == BillingSourceSubscription {
 		s.relayInfo.SubscriptionPostDelta += int64(delta)
 	}

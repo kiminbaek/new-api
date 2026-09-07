@@ -165,6 +165,7 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 		CacheCreation1hRatio: cacheCreationRatio1h,
 		QuotaToPreConsume:    preConsumedQuota,
 	}
+	priceData.SetToolPrices(operation_setting.SnapshotToolPricesForModel(billingModelName))
 	if usePrice {
 		for name, ratio := range meta.BillingRatios {
 			priceData.AddOtherRatio(name, ratio)
@@ -250,6 +251,7 @@ func ModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (hostt
 		Quota:          quota,
 		GroupRatioInfo: groupRatioInfo,
 	}
+	priceData.SetToolPrices(operation_setting.SnapshotToolPricesForModel(info.GetBillingModelName()))
 	return priceData, nil
 }
 
@@ -330,6 +332,7 @@ func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, billing
 		GroupRatioInfo:    groupRatioInfo,
 		QuotaToPreConsume: preConsumedQuota,
 	}
+	priceData.SetToolPrices(operation_setting.SnapshotToolPricesForModel(billingModelName))
 
 	logger.LogDebug(c, "model_price_helper_tiered result: model=%s preConsume=%d quotaBeforeGroup=%.2f groupRatio=%.2f tier=%s", billingModelName, preConsumedQuota, quotaBeforeGroup, groupRatioInfo.GroupRatio, trace.MatchedTier)
 

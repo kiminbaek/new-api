@@ -26,6 +26,7 @@ type PriceData struct {
 	AudioRatio           float64
 	AudioCompletionRatio float64
 	otherRatios          map[string]float64
+	toolPrices           map[string]float64
 	UsePrice             bool
 	Quota                int // 按次计费的最终额度（MJ / Task）
 	QuotaToPreConsume    int // 按量计费的预消耗额度
@@ -69,6 +70,27 @@ func (p *PriceData) OtherRatios() map[string]float64 {
 		return nil
 	}
 	return ratios
+}
+
+func (p *PriceData) SetToolPrices(prices map[string]float64) {
+	p.toolPrices = nil
+	if len(prices) == 0 {
+		return
+	}
+	p.toolPrices = make(map[string]float64, len(prices))
+	for name, price := range prices {
+		if name != "" && price >= 0 && !math.IsNaN(price) && !math.IsInf(price, 0) {
+			p.toolPrices[name] = price
+		}
+	}
+}
+
+func (p *PriceData) ToolPrice(name string) (float64, bool) {
+	if p == nil || p.toolPrices == nil {
+		return 0, false
+	}
+	price, ok := p.toolPrices[name]
+	return price, ok
 }
 
 func (p *PriceData) OtherRatioMultiplier() float64 {

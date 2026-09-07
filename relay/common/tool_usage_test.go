@@ -50,6 +50,19 @@ func TestCountBillableToolCallFunctionCallRequiresPrice(t *testing.T) {
 	assert.NotContains(t, info.ResponsesUsageInfo.BuiltInTools, "unpriced_fn")
 }
 
+func TestCountBillableToolCallUsesFrozenRequestPrice(t *testing.T) {
+	operation_setting.SetToolPriceForTest("frozen_fn", 5.0)
+	prices := operation_setting.SnapshotToolPricesForModel("gpt-5.1")
+	operation_setting.SetToolPriceForTest("frozen_fn", 0)
+	t.Cleanup(func() { operation_setting.DeleteToolPriceForTest("frozen_fn") })
+
+	info := &RelayInfo{OriginModelName: "gpt-5.1"}
+	info.PriceData.SetToolPrices(prices)
+	info.CountBillableToolCall(dto.BuildInCallFunctionCall, "frozen_fn")
+	require.NotNil(t, info.ResponsesUsageInfo)
+	assert.Equal(t, 1, info.ResponsesUsageInfo.BuiltInTools["frozen_fn"].CallCount)
+}
+
 func TestCountBillableToolCallFunctionCallSkipsReservedNames(t *testing.T) {
 	info := &RelayInfo{OriginModelName: "gpt-5.1"}
 
