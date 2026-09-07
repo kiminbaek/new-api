@@ -1,6 +1,10 @@
 package model
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -11,12 +15,14 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/performance_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var optionBulkUpdateMu sync.Mutex
@@ -226,11 +232,17 @@ func loadOptionsFromDatabase() {
 	}
 }
 
+func syncOptionsFromDatabase() {
+	optionBulkUpdateMu.Lock()
+	defer optionBulkUpdateMu.Unlock()
+	loadOptionsFromDatabase()
+}
+
 func SyncOptions(frequency int) {
 	for {
 		time.Sleep(time.Duration(frequency) * time.Second)
 		common.SysLog("syncing options from database")
-		loadOptionsFromDatabase()
+		syncOptionsFromDatabase()
 	}
 }
 
@@ -318,6 +330,225 @@ func UpdateOptionsBulk(values map[string]string) error {
 			return err
 		}
 	}
+	return nil
+}
+
+var pricingBulkAfterWriteHook func() error
+var refreshPricingAfterPublish = RefreshPricing
+
+var pricingBulkOptionKeys = map[string]struct{}{
+	"ModelPrice": {}, "ModelRatio": {}, "CacheRatio": {}, "CreateCacheRatio": {},
+	"CompletionRatio": {}, "ImageRatio": {}, "AudioRatio": {}, "AudioCompletionRatio": {},
+	"ExposeRatioEnabled": {}, "billing_setting.billing_mode": {}, "billing_setting.billing_expr": {},
+	"GroupRatio": {}, "GroupGroupRatio": {}, "TopupGroupRatio": {}, "UserUsableGroups": {},
+	"AutoGroups": {}, "MaxTokenAutoGroups": {}, "DefaultUseAutoGroup": {},
+	"group_ratio_setting.group_special_usable_group": {},
+}
+
+func validatePricingOptionValue(key, value string) error {
+	finiteMap := func() error {
+		var values map[string]float64
+		if err := json.Unmarshal([]byte(value), &values); err != nil {
+			return err
+		}
+		for name, ratio := range values {
+			if math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio < 0 {
+				return fmt.Errorf("%s contains invalid value for %s", key, name)
+			}
+		}
+		return nil
+	}
+	switch key {
+	case "ModelPrice", "ModelRatio", "CacheRatio", "CreateCacheRatio", "CompletionRatio", "ImageRatio", "AudioRatio", "AudioCompletionRatio", "TopupGroupRatio", "GroupRatio":
+		return finiteMap()
+	case "GroupGroupRatio":
+		var values map[string]map[string]float64
+		if err := json.Unmarshal([]byte(value), &values); err != nil {
+			return err
+		}
+		for _, ratios := range values {
+			for name, ratio := range ratios {
+				if math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio < 0 {
+					return fmt.Errorf("%s contains invalid value for %s", key, name)
+				}
+			}
+		}
+		return nil
+	case "UserUsableGroups":
+		var values map[string]string
+		return json.Unmarshal([]byte(value), &values)
+	case "billing_setting.billing_mode":
+		var modes map[string]string
+		if err := json.Unmarshal([]byte(value), &modes); err != nil {
+			return err
+		}
+		for modelName, mode := range modes {
+			if mode != billing_setting.BillingModeRatio && mode != billing_setting.BillingModeTieredExpr {
+				return fmt.Errorf("invalid billing mode for %s", modelName)
+			}
+		}
+		return nil
+	case "billing_setting.billing_expr":
+		expressions := map[string]string{}
+		if err := json.Unmarshal([]byte(value), &expressions); err != nil {
+			return err
+		}
+		generation := jsplugin.DefaultRegistry.Generation()
+		for modelName, expression := range expressions {
+			var err error
+			if plugin, ok := generation.GetByModel(modelName); ok {
+				err = billing_setting.SmokeTestTaskExpr(expression, plugin.Meta.UsageSchema)
+			} else if target, resolved := ResolveTaskModelAlias(generation, modelName); resolved {
+				if plugin, ok := generation.Get(target.PluginKey); ok {
+					err = billing_setting.SmokeTestTaskExpr(expression, plugin.Meta.UsageSchema)
+				} else {
+					err = billing_setting.SmokeTestExpr(expression)
+				}
+			} else {
+				err = billing_setting.SmokeTestExpr(expression)
+			}
+			if err != nil {
+				return fmt.Errorf("invalid billing expression for %s: %w", modelName, err)
+			}
+		}
+		return nil
+	case "AutoGroups":
+		var values []string
+		return json.Unmarshal([]byte(value), &values)
+	case "group_ratio_setting.group_special_usable_group":
+		var values map[string]map[string]string
+		return json.Unmarshal([]byte(value), &values)
+	case "ExposeRatioEnabled", "DefaultUseAutoGroup":
+		if value != "true" && value != "false" {
+			return fmt.Errorf("%s must be true or false", key)
+		}
+		return nil
+	case "MaxTokenAutoGroups":
+		return setting.ValidateMaxTokenAutoGroups(value)
+	default:
+		return fmt.Errorf("pricing option is not allowed: %s", key)
+	}
+}
+
+// UpdatePricingOptionsAtomic persists a complete pricing/group edit in one
+// transaction and publishes the committed option generation exactly once.
+func UpdatePricingOptionsAtomic(values map[string]string) error {
+	optionBulkUpdateMu.Lock()
+	defer optionBulkUpdateMu.Unlock()
+	if len(values) == 0 {
+		return errors.New("empty pricing option update")
+	}
+	for key := range values {
+		if _, ok := pricingBulkOptionKeys[key]; !ok {
+			return fmt.Errorf("pricing option is not allowed: %s", key)
+		}
+	}
+	if err := DB.Transaction(func(tx *gorm.DB) error {
+		for key, value := range values {
+			if err := validatePricingOptionValue(key, value); err != nil {
+				return fmt.Errorf("invalid pricing option %s: %w", key, err)
+			}
+		}
+		keys := make([]string, 0, len(values))
+		for key := range values {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			option := Option{Key: key, Value: values[key]}
+			if err := tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "key"}},
+				DoUpdates: clause.AssignmentColumns([]string{"value"}),
+			}).Create(&option).Error; err != nil {
+				return err
+			}
+			if pricingBulkAfterWriteHook != nil {
+				if err := pricingBulkAfterWriteHook(); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return publishPricingOptionGeneration(values)
+}
+
+func publishPricingOptionGeneration(updates map[string]string) error {
+	common.OptionMapRWMutex.Lock()
+	next := make(map[string]string, len(common.OptionMap)+len(updates))
+	for key, value := range common.OptionMap {
+		next[key] = value
+	}
+	for key, value := range updates {
+		next[key] = value
+	}
+	common.OptionMap = next
+	common.OptionMapRWMutex.Unlock()
+
+	// Values have already passed controller validation. Load every runtime map
+	// before rebuilding the derived pricing cache.
+	loaders := map[string]func(string) error{
+		"ModelPrice":           ratio_setting.UpdateModelPriceByJSONString,
+		"ModelRatio":           ratio_setting.UpdateModelRatioByJSONString,
+		"CacheRatio":           ratio_setting.UpdateCacheRatioByJSONString,
+		"CreateCacheRatio":     ratio_setting.UpdateCreateCacheRatioByJSONString,
+		"CompletionRatio":      ratio_setting.UpdateCompletionRatioByJSONString,
+		"ImageRatio":           ratio_setting.UpdateImageRatioByJSONString,
+		"AudioRatio":           ratio_setting.UpdateAudioRatioByJSONString,
+		"AudioCompletionRatio": ratio_setting.UpdateAudioCompletionRatioByJSONString,
+		"GroupRatio":           ratio_setting.UpdateGroupRatioByJSONString,
+		"GroupGroupRatio":      ratio_setting.UpdateGroupGroupRatioByJSONString,
+		"TopupGroupRatio":      common.UpdateTopupGroupRatioByJSONString,
+		"UserUsableGroups":     setting.UpdateUserUsableGroupsByJSONString,
+		"AutoGroups":           setting.UpdateAutoGroupsByJsonString,
+	}
+	keys := make([]string, 0, len(updates))
+	for key := range updates {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if loader := loaders[key]; loader != nil {
+			if err := loader(updates[key]); err != nil {
+				return fmt.Errorf("publish %s: %w", key, err)
+			}
+		}
+	}
+	if value, ok := updates["MaxTokenAutoGroups"]; ok {
+		if err := setting.UpdateMaxTokenAutoGroups(value); err != nil {
+			return err
+		}
+	}
+	if value, ok := updates["DefaultUseAutoGroup"]; ok {
+		setting.DefaultUseAutoGroup = value == "true"
+	}
+	if value, ok := updates["ExposeRatioEnabled"]; ok {
+		ratio_setting.SetExposeRatioEnabled(value == "true")
+	}
+	if cfg := config.GlobalConfig.Get("billing_setting"); cfg != nil {
+		fields := map[string]string{}
+		if value, ok := updates["billing_setting.billing_mode"]; ok {
+			fields["billing_mode"] = value
+		}
+		if value, ok := updates["billing_setting.billing_expr"]; ok {
+			fields["billing_expr"] = value
+		}
+		if len(fields) > 0 {
+			if err := config.UpdateConfigFromMap(cfg, fields); err != nil {
+				return err
+			}
+		}
+	}
+	if value, ok := updates["group_ratio_setting.group_special_usable_group"]; ok {
+		cfg := config.GlobalConfig.Get("group_ratio_setting")
+		if err := config.UpdateConfigFromMap(cfg, map[string]string{"group_special_usable_group": value}); err != nil {
+			return err
+		}
+	}
+	ratio_setting.InvalidateExposedDataCache()
+	refreshPricingAfterPublish()
 	return nil
 }
 

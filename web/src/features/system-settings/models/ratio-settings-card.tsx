@@ -17,7 +17,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
@@ -27,10 +26,12 @@ import * as z from 'zod'
 import { ConfirmDialog } from '@/components/confirm-dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 
-import { resetModelRatios } from '../api'
 import { SettingsPageTitleStatusPortal } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
-import { useUpdateOption } from '../hooks/use-update-option'
+import {
+  usePricingOptionsMutation,
+  useResetModelRatiosMutation,
+} from '../hooks/use-pricing-options-mutation'
 import { positiveIntegerSchema } from '../utils/numeric-field'
 import { GroupRatioForm } from './group-ratio-form'
 import { ModelRatioForm } from './model-ratio-form'
@@ -161,25 +162,11 @@ export function RatioSettingsCard({
   visibleTabs = ['models', 'groups', 'tool-prices', 'upstream-sync'],
 }: RatioSettingsCardProps) {
   const { t } = useTranslation()
-  const updateOption = useUpdateOption()
-  const queryClient = useQueryClient()
   const [confirmOpen, setConfirmOpen] = useState(false)
 
-  const resetMutation = useMutation({
-    mutationFn: resetModelRatios,
-    onSuccess: (data) => {
-      if (data.success) {
-        toast.success(t('Model prices reset successfully'))
-        queryClient.invalidateQueries({ queryKey: ['system-options'] })
-        setConfirmOpen(false)
-      } else {
-        toast.error(data.message || t('Failed to reset model ratios'))
-      }
-    },
-    onError: (error: Error) => {
-      toast.error(error.message || t('Failed to reset model ratios'))
-    },
-  })
+  const resetMutation = useResetModelRatiosMutation()
+
+  const pricingMutation = usePricingOptionsMutation()
 
   const modelNormalizedDefaults = useRef({
     ModelPrice: normalizeJsonString(modelDefaults.ModelPrice),
@@ -345,15 +332,19 @@ export function RatioSettingsCard({
         return
       }
 
-      for (const key of updates) {
-        const apiKey = apiKeyMap[key as string] || (key as string)
-        await updateOption.mutateAsync({ key: apiKey, value: normalized[key] })
-      }
+      const requestValues = Object.fromEntries(
+        updates.map((key) => [
+          apiKeyMap[key as string] || (key as string),
+          String(normalized[key]),
+        ])
+      )
+      await pricingMutation.mutateAsync({ values: requestValues })
+      toast.success(t('Model prices saved successfully'))
 
       modelNormalizedDefaults.current = normalized
       setSavedModelValues(normalized)
     },
-    [t, updateOption]
+    [pricingMutation, t]
   )
 
   const saveGroupRatios = useCallback(
@@ -383,14 +374,19 @@ export function RatioSettingsCard({
         (key) => normalized[key] !== groupNormalizedDefaults.current[key]
       )
 
-      for (const key of updates) {
-        const apiKey = apiKeyMap[key] || key
-        await updateOption.mutateAsync({ key: apiKey, value: normalized[key] })
+      if (updates.length === 0) {
+        toast.info(t('No group price changes to save'))
+        return
       }
+      const requestValues = Object.fromEntries(
+        updates.map((key) => [apiKeyMap[key] || key, String(normalized[key])])
+      )
+      await pricingMutation.mutateAsync({ values: requestValues })
+      toast.success(t('Group prices saved successfully'))
 
       groupNormalizedDefaults.current = normalized
     },
-    [updateOption]
+    [pricingMutation, t]
   )
 
   const handleResetRatios = useCallback(() => {
@@ -399,8 +395,16 @@ export function RatioSettingsCard({
 
   const { mutate: resetMutate } = resetMutation
   const handleConfirmReset = useCallback(() => {
-    resetMutate()
-  }, [resetMutate])
+    resetMutate(undefined, {
+      onSuccess: () => {
+        toast.success(t('Model prices reset successfully'))
+        setConfirmOpen(false)
+      },
+      onError: (error) => {
+        toast.error(error.message || t('Failed to reset model ratios'))
+      },
+    })
+  }, [resetMutate, t])
 
   const tabLabels: Record<RatioTabId, string> = {
     models: 'Model prices',
@@ -427,7 +431,7 @@ export function RatioSettingsCard({
           savedValues={savedModelValues}
           onSave={saveModelRatios}
           onReset={handleResetRatios}
-          isSaving={updateOption.isPending}
+          isSaving={pricingMutation.isPending}
           isResetting={resetMutation.isPending}
           variant={tab === 'unset-models' ? 'unset' : 'default'}
         />
@@ -438,7 +442,7 @@ export function RatioSettingsCard({
         <GroupRatioForm
           form={groupForm}
           onSave={saveGroupRatios}
-          isSaving={updateOption.isPending}
+          isSaving={pricingMutation.isPending}
         />
       )
     }
