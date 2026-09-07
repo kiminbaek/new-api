@@ -186,16 +186,18 @@ func (a *TaskAdaptor) AdjustBillingOnSubmit(info *relaycommon.RelayInfo, taskDat
 	return ratios
 }
 
-func (a *TaskAdaptor) AdjustBillingOnComplete(task *model.Task, result *relaycommon.TaskInfo) int {
+func (a *TaskAdaptor) AdjustBillingOnComplete(task *model.Task, result *relaycommon.TaskInfo) (int, error) {
 	if !a.hasHook(context.Background(), "extractUsageOnComplete") {
-		return 0
+		return 0, nil
 	}
 	value, err := a.plugin.Engine.Call(context.Background(), "extractUsageOnComplete", jsonValue(task), jsonValue(result))
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("plugin completion usage hook failed: %w", err)
 	}
-	a.applyCompletionUsageFacts(result, value)
-	return 0
+	if err := a.applyCompletionUsageFacts(result, value); err != nil {
+		return 0, err
+	}
+	return 0, nil
 }
 
 func (a *TaskAdaptor) BuildRequestURL(info *relaycommon.RelayInfo) (string, error) {
@@ -469,7 +471,7 @@ func (a *TaskAdaptor) ParseResponse(c *gin.Context, resp *http.Response, info *r
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		logger.LogDebug(c, "task_plugin subsystem=adaptor event=parse_submit_failed plugin=%q stage=read_response reason=read_failed status=%d", a.plugin.Meta.Key, resp.StatusCode)
-		return nil, service.TaskErrorWrapper(err, "read_response_body_failed", http.StatusInternalServerError)
+		return nil, service.TaskErrorWrapperLocal(err, "read_response_body_failed", http.StatusInternalServerError)
 	}
 	logger.LogDebug(
 		c,
@@ -494,7 +496,7 @@ func (a *TaskAdaptor) ParseResponse(c *gin.Context, resp *http.Response, info *r
 			resp.StatusCode,
 			time.Since(started).Milliseconds(),
 		)
-		return nil, service.TaskErrorWrapper(err, "plugin_submit_response_failed", http.StatusBadGateway)
+		return nil, service.TaskErrorWrapperLocal(err, "plugin_submit_response_failed", http.StatusBadGateway)
 	}
 	if object, ok := value.(map[string]any); ok {
 		if _, forbidden := object["clientResponse"]; forbidden {
@@ -513,13 +515,13 @@ func (a *TaskAdaptor) ParseResponse(c *gin.Context, resp *http.Response, info *r
 			resp.StatusCode,
 			time.Since(started).Milliseconds(),
 		)
-		return nil, service.TaskErrorWrapper(err, "plugin_submit_response_invalid", http.StatusBadGateway)
+		return nil, service.TaskErrorWrapperLocal(err, "plugin_submit_response_invalid", http.StatusBadGateway)
 	}
 	var taskData []byte
 	if parsed.TaskData != nil {
 		taskData, err = common.Marshal(parsed.TaskData)
 		if err != nil {
-			return nil, service.TaskErrorWrapper(err, "plugin_submit_response_invalid", http.StatusBadGateway)
+			return nil, service.TaskErrorWrapperLocal(err, "plugin_submit_response_invalid", http.StatusBadGateway)
 		}
 	}
 	var immediate *relaycommon.TaskInfo
@@ -766,20 +768,20 @@ func (a *TaskAdaptor) ParseTaskResult(body []byte) (*relaycommon.TaskInfo, error
 	return result, nil
 }
 
-func (a *TaskAdaptor) applyCompletionUsageFacts(result *relaycommon.TaskInfo, facts any) {
+func (a *TaskAdaptor) applyCompletionUsageFacts(result *relaycommon.TaskInfo, facts any) error {
 	values, err := a.validatedCompletionUsageFacts(facts)
 	if err != nil {
 		a.logRejectedUsage("extractUsageOnComplete", err)
-		return
+		return err
 	}
 	if len(values) == 0 {
-		return
+		return nil
 	}
 	result.UsageFacts = values
 	if units := positiveInt(values["upstreamUnits"]); units > 0 {
 		result.CompletionTokens = units
 		result.TotalTokens = units
-		return
+		return nil
 	}
 	if completionTokens, exists := values["completionTokens"]; exists {
 		result.CompletionTokens = positiveInt(completionTokens)
@@ -787,6 +789,7 @@ func (a *TaskAdaptor) applyCompletionUsageFacts(result *relaycommon.TaskInfo, fa
 	if totalTokens, exists := values["totalTokens"]; exists {
 		result.TotalTokens = positiveInt(totalTokens)
 	}
+	return nil
 }
 
 func (a *TaskAdaptor) ConvertToOpenAIVideo(task *model.Task) ([]byte, error) {

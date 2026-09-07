@@ -512,7 +512,9 @@ func TestTaskAdaptorMapsJSContract(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "SUCCESS", result.Status)
 	assert.Equal(t, "https://cdn.example/video.mp4", result.Url)
-	assert.Zero(t, adaptor.AdjustBillingOnComplete(&model.Task{}, result))
+	actualQuota, err := adaptor.AdjustBillingOnComplete(&model.Task{}, result)
+	require.NoError(t, err)
+	assert.Zero(t, actualQuota)
 	assert.Equal(t, 23, result.TotalTokens)
 
 	rendered, err := adaptor.ConvertToOpenAIVideo(&model.Task{TaskID: "task_public", Status: model.TaskStatusSuccess})

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -1354,8 +1355,8 @@ func (m *mockAdaptor) FetchTask(string, string, map[string]any, string) (*http.R
 	return nil, nil
 }
 func (m *mockAdaptor) ParseTaskResult([]byte) (*relaycommon.TaskInfo, error) { return nil, nil }
-func (m *mockAdaptor) AdjustBillingOnComplete(_ *model.Task, _ *relaycommon.TaskInfo) int {
-	return m.adjustReturn
+func (m *mockAdaptor) AdjustBillingOnComplete(_ *model.Task, _ *relaycommon.TaskInfo) (int, error) {
+	return m.adjustReturn, nil
 }
 
 // ===========================================================================
@@ -1380,9 +1381,10 @@ func TestSettle_PerCallBilling_SkipsAdaptorAdjust(t *testing.T) {
 	adaptor := &mockAdaptor{adjustReturn: 2000}
 	taskResult := &relaycommon.TaskInfo{Status: model.TaskStatusSuccess}
 
-	settled := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
+	settled, err := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
 
 	// Per-call: no adjustment despite adaptor returning 2000
+	require.NoError(t, err)
 	assert.False(t, settled)
 	assert.Equal(t, initQuota, getUserQuota(t, userID))
 	assert.Equal(t, tokenRemain, getTokenRemainQuota(t, tokenID))
@@ -1408,9 +1410,10 @@ func TestSettle_PerCallBilling_SkipsTotalTokens(t *testing.T) {
 	adaptor := &mockAdaptor{adjustReturn: 0}
 	taskResult := &relaycommon.TaskInfo{Status: model.TaskStatusSuccess, TotalTokens: 9999}
 
-	settled := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
+	settled, err := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
 
 	// Per-call: no recalculation by tokens
+	require.NoError(t, err)
 	assert.False(t, settled)
 	assert.Equal(t, initQuota, getUserQuota(t, userID))
 	assert.Equal(t, tokenRemain, getTokenRemainQuota(t, tokenID))
@@ -1438,9 +1441,10 @@ func TestSettle_NonPerCallBilling_AppliesAdaptorAdjustment(t *testing.T) {
 	adaptor := &mockAdaptor{adjustReturn: adaptorQuota}
 	taskResult := &relaycommon.TaskInfo{Status: model.TaskStatusSuccess}
 
-	settled := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
+	settled, err := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
 
 	// Non-per-call: adaptor adjustment applies (refund 2000)
+	require.NoError(t, err)
 	assert.True(t, settled)
 	assert.Equal(t, initQuota+(preConsumed-adaptorQuota), getUserQuota(t, userID))
 	assert.Equal(t, tokenRemain+(preConsumed-adaptorQuota), getTokenRemainQuota(t, tokenID))
@@ -1470,8 +1474,9 @@ func TestSettle_TieredEvaluationFailureKeepsPreConsumedCharge(t *testing.T) {
 		TaskUsageBilling: true,
 	}
 
-	settled := settleTaskBillingOnComplete(ctx, &mockAdaptor{}, task, &relaycommon.TaskInfo{Status: model.TaskStatusFailure})
+	settled, err := settleTaskBillingOnComplete(ctx, &mockAdaptor{}, task, &relaycommon.TaskInfo{Status: model.TaskStatusFailure})
 
+	require.NoError(t, err)
 	assert.True(t, settled)
 	assert.Equal(t, preConsumed, task.Quota)
 	assert.False(t, task.BillingPending)
@@ -1502,13 +1507,14 @@ func TestSettle_TieredFailureReturnsFalseForCallerRefund(t *testing.T) {
 	}
 	require.NoError(t, model.DB.Create(task).Error)
 
-	settled := settleTaskBillingOnComplete(
+	settled, err := settleTaskBillingOnComplete(
 		ctx,
 		&mockAdaptor{adjustReturn: 1},
 		task,
 		&relaycommon.TaskInfo{Status: model.TaskStatusFailure, UsageFacts: map[string]any{"seconds": float64(8)}},
 	)
 
+	require.NoError(t, err)
 	assert.False(t, settled)
 	assert.Equal(t, preConsumed, task.Quota)
 	assert.Equal(t, map[string]any{"seconds": float64(5), "clips": float64(2)}, task.PrivateData.BillingContext.TieredSnapshot.UsageFacts)
@@ -1540,13 +1546,14 @@ func TestSettle_TieredSuccessStillRecomputes(t *testing.T) {
 	}
 	require.NoError(t, model.DB.Create(task).Error)
 
-	settled := settleTaskBillingOnComplete(
+	settled, err := settleTaskBillingOnComplete(
 		ctx,
 		&mockAdaptor{adjustReturn: 1},
 		task,
 		&relaycommon.TaskInfo{Status: model.TaskStatusSuccess, UsageFacts: map[string]any{"seconds": float64(8)}},
 	)
 
+	require.NoError(t, err)
 	assert.True(t, settled)
 	assert.Equal(t, 28, task.Quota)
 	assert.Equal(t, map[string]any{"seconds": float64(8), "clips": float64(2)}, task.PrivateData.BillingContext.TieredSnapshot.UsageFacts)
@@ -1614,13 +1621,14 @@ func TestSettle_TieredUsageFactsMergeCompletionOverSubmission(t *testing.T) {
 				EstimatedTier:    "base",
 			}
 
-			settled := settleTaskBillingOnComplete(
+			settled, err := settleTaskBillingOnComplete(
 				context.Background(),
 				&mockAdaptor{},
 				task,
 				&relaycommon.TaskInfo{Status: model.TaskStatusSuccess, UsageFacts: testCase.completionFacts},
 			)
 
+			require.NoError(t, err)
 			assert.True(t, settled)
 			assert.Equal(t, testCase.expectedQuota, task.Quota)
 			assert.Equal(t, map[string]any{"seconds": float64(5), "clips": float64(2)}, submissionFacts)
@@ -1664,7 +1672,7 @@ func TestSettle_TieredSnapshotWriteBackUsesSettledFactsAndMatchedTier(t *testing
 		EstimatedTier:    "720P",
 	}
 
-	settled := settleTaskBillingOnComplete(
+	settled, err := settleTaskBillingOnComplete(
 		context.Background(),
 		&mockAdaptor{},
 		task,
@@ -1673,6 +1681,7 @@ func TestSettle_TieredSnapshotWriteBackUsesSettledFactsAndMatchedTier(t *testing
 			UsageFacts: map[string]any{"resolution": "1080P"},
 		},
 	)
+	require.NoError(t, err)
 
 	require.True(t, settled)
 	snap := task.PrivateData.BillingContext.TieredSnapshot
@@ -1741,7 +1750,7 @@ func TestSettle_TokenRecalcFallsBackToCompletionTokens(t *testing.T) {
 
 			task := makeTask(userID, channelID, preConsumed, tokenID, BillingSourceWallet, 0)
 			require.NoError(t, model.DB.Create(task).Error)
-			settled := settleTaskBillingOnComplete(
+			settled, err := settleTaskBillingOnComplete(
 				context.Background(),
 				&mockAdaptor{},
 				task,
@@ -1751,6 +1760,7 @@ func TestSettle_TokenRecalcFallsBackToCompletionTokens(t *testing.T) {
 					CompletionTokens: testCase.completionTokens,
 				},
 			)
+			require.NoError(t, err)
 
 			assert.Equal(t, testCase.wantSettled, settled)
 			assert.Equal(t, testCase.wantQuota, task.Quota)
@@ -1823,6 +1833,94 @@ func TestTaskBillingAtomicRollbackAndRetry(t *testing.T) {
 			assert.False(t, RecalculateTaskQuota(context.Background(), task, actualQuota, "duplicate retry"))
 			assert.Equal(t, walletQuota+(preConsumed-actualQuota), getUserQuota(t, userID))
 			assert.Equal(t, int64(1), countLogs(t))
+		})
+	}
+}
+
+func TestFailAndRefundMidjourneyTaskEmptyIDConcurrentIsIdempotent(t *testing.T) {
+	truncate(t)
+	ctx := context.Background()
+	const userID, tokenID, channelID = 58, 58, 58
+	const initialUserQuota, initialTokenQuota, chargedQuota = 10_000, 5_000, 1_500
+	seedUser(t, userID, initialUserQuota)
+	seedToken(t, tokenID, userID, "sk-midjourney-empty-id", initialTokenQuota)
+	seedChannel(t, channelID)
+	seedChargedAccounting(t, userID, channelID, tokenID, chargedQuota, 1)
+	task := &model.Midjourney{
+		UserId: userID, Action: "IMAGINE", MjId: "", ChannelId: channelID,
+		Status: "IN_PROGRESS", Progress: "0%", Quota: chargedQuota,
+		TokenId: tokenID, BillingChannelId: channelID,
+	}
+	require.NoError(t, task.Insert())
+
+	var wg sync.WaitGroup
+	results := make(chan bool, 2)
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			copy := *task
+			won, err := FailAndRefundMidjourneyTask(ctx, &copy, "missing mj id")
+			assert.NoError(t, err)
+			results <- won
+		}()
+	}
+	wg.Wait()
+	close(results)
+	wins := 0
+	for won := range results {
+		if won {
+			wins++
+		}
+	}
+	assert.Equal(t, 1, wins)
+	persisted := getMidjourneyTask(t, task.Id)
+	assert.Equal(t, "FAILURE", persisted.Status)
+	assert.Equal(t, "100%", persisted.Progress)
+	assert.Zero(t, persisted.Quota)
+	assert.Equal(t, initialUserQuota+chargedQuota, getUserQuota(t, userID))
+	assert.Equal(t, initialTokenQuota+chargedQuota, getTokenRemainQuota(t, tokenID))
+	assert.Zero(t, getTokenUsedQuota(t, tokenID))
+	usedQuota, _ := getUserUsageAccounting(t, userID)
+	assert.Zero(t, usedQuota)
+	assert.Zero(t, getChannelUsedQuota(t, channelID))
+	assert.Equal(t, int64(1), countLogs(t))
+}
+
+func TestFailAndRefundMidjourneyTaskHonorsLegacyCutoff(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		submitTime   int64
+		wantRefunded bool
+	}{
+		{name: "legacy seconds", submitTime: model.TaskRefundLegacyCutoff - 1, wantRefunded: false},
+		{name: "legacy milliseconds", submitTime: (model.TaskRefundLegacyCutoff - 1) * 1000, wantRefunded: false},
+		{name: "cutoff milliseconds", submitTime: model.TaskRefundLegacyCutoff * 1000, wantRefunded: true},
+		{name: "missing timestamp", submitTime: 0, wantRefunded: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			truncate(t)
+			const userID, channelID, chargedQuota = 59, 59, 600
+			seedUser(t, userID, 10_000)
+			seedChannel(t, channelID)
+			seedChargedAccounting(t, userID, channelID, 0, chargedQuota, 1)
+			task := &model.Midjourney{UserId: userID, Action: "IMAGINE", SubmitTime: tc.submitTime, ChannelId: channelID, BillingChannelId: channelID, Status: "IN_PROGRESS", Progress: "0%", Quota: chargedQuota}
+			require.NoError(t, task.Insert())
+
+			won, err := FailAndRefundMidjourneyTask(context.Background(), task, "missing mj id")
+			require.NoError(t, err)
+			require.True(t, won)
+			persisted := getMidjourneyTask(t, task.Id)
+			assert.Equal(t, "FAILURE", persisted.Status)
+			assert.Zero(t, persisted.Quota)
+			if tc.wantRefunded {
+				assert.Equal(t, 10_000+chargedQuota, getUserQuota(t, userID))
+				assert.Equal(t, int64(1), countLogs(t))
+			} else {
+				assert.Equal(t, 10_000, getUserQuota(t, userID))
+				assert.Contains(t, persisted.FailReason, "旧系统遗留")
+				assert.Zero(t, countLogs(t))
+			}
 		})
 	}
 }

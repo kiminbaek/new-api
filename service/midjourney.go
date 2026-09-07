@@ -94,46 +94,46 @@ func SettleMidjourneyTaskBilling(relayInfo *relaycommon.RelayInfo, task *model.M
 }
 
 // RefundMidjourneyQuota reverses every accounting element recorded for a billed legacy task.
-func RefundMidjourneyQuota(ctx context.Context, task *model.Midjourney, reason string) bool {
-	quota := task.Quota
-	if quota == 0 {
-		return true
+func FailAndRefundMidjourneyTask(ctx context.Context, task *model.Midjourney, reason string) (bool, error) {
+	if task == nil {
+		return false, errors.New("Midjourney task is nil")
 	}
+	if err := model.FlushBatchUpdates(); err != nil {
+		return false, fmt.Errorf("flush Midjourney billing: %w", err)
+	}
+	result, err := model.FailAndRefundMidjourney(ctx, task.Id, task.Status, reason)
+	if err != nil || !result.Won {
+		return result.Won, err
+	}
+	task.Status = "FAILURE"
+	task.Progress = "100%"
+	task.FailReason = reason
+	task.Quota = 0
+	if result.Quota == 0 {
+		return true, nil
+	}
+	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
+		UserId: result.UserID, LogType: model.LogTypeRefund, ChannelId: result.BillingChannelID,
+		ModelName: CovertMjpActionToModelName(task.Action), Quota: result.Quota, TokenId: result.TokenID,
+		Other: map[string]interface{}{"task_id": task.MjId, "local_task_id": task.Id, "reason": reason},
+	})
+	return true, nil
+}
 
-	if err := model.IncreaseUserQuota(task.UserId, quota, false); err != nil {
-		logger.LogWarn(ctx, fmt.Sprintf("退还 Midjourney 用户额度失败 task %s: %s", task.MjId, err.Error()))
+// RefundMidjourneyQuota preserves the legacy helper contract while using the
+// atomic failure/refund transition. Repeated calls are successful no-ops.
+func RefundMidjourneyQuota(ctx context.Context, task *model.Midjourney, reason string) bool {
+	won, err := FailAndRefundMidjourneyTask(ctx, task, reason)
+	if err != nil {
+		logger.LogWarn(ctx, fmt.Sprintf("退还 Midjourney 额度失败 task id=%d mj_id=%q: %s", task.Id, task.MjId, err.Error()))
 		return false
 	}
-
-	if task.TokenId > 0 {
-		tokenKey := resolveTokenKey(ctx, task.TokenId, task.MjId)
-		if tokenKey != "" {
-			if err := model.IncreaseTokenQuota(task.TokenId, tokenKey, quota); err != nil {
-				logger.LogWarn(ctx, fmt.Sprintf("退还 Midjourney 令牌额度失败 task %s: %s", task.MjId, err.Error()))
-			}
+	if !won {
+		var persisted *model.Midjourney
+		if task != nil {
+			persisted = model.GetMjByuId(task.Id)
 		}
-	}
-
-	billingChannelId := task.GetBillingChannelId()
-	model.UpdateUserUsedQuota(task.UserId, -quota)
-	model.UpdateChannelUsedQuota(billingChannelId, -quota)
-	model.RecordTaskBillingLog(model.RecordTaskBillingLogParams{
-		UserId:    task.UserId,
-		LogType:   model.LogTypeRefund,
-		Content:   "",
-		ChannelId: billingChannelId,
-		ModelName: CovertMjpActionToModelName(task.Action),
-		Quota:     quota,
-		TokenId:   task.TokenId,
-		Other: map[string]interface{}{
-			"task_id": task.MjId,
-			"reason":  reason,
-		},
-	})
-
-	task.Quota = 0
-	if err := task.UpdateBillingState(); err != nil {
-		logger.LogError(ctx, fmt.Sprintf("Midjourney 退款成功但清除 quota 失败 task %s: %s", task.MjId, err.Error()))
+		return persisted != nil && persisted.Quota == 0
 	}
 	return true
 }

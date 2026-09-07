@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/QuantumNous/new-api/model"
@@ -83,4 +84,29 @@ func TestFinishSystemTaskHandlerLostLeaseCannotOverwriteTerminalState(t *testing
 	require.NotNil(t, reloaded)
 	assert.Equal(t, model.SystemTaskStatusFailed, reloaded.Status)
 	assert.Equal(t, "task lease expired", reloaded.Error)
+}
+
+func TestFinishSystemTaskHandlerErrorFailsAndPreservesSummary(t *testing.T) {
+	withSystemTaskHandlerDB(t)
+
+	task, err := model.CreateSystemTask(model.SystemTaskTypeAsyncTaskPoll, nil, nil)
+	require.NoError(t, err)
+	const runnerID = "runner-poll-error"
+	claimedTask, claimed, err := model.ClaimSystemTask(task.ID, task.Type, runnerID, 1<<62)
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	summary := service.TaskPollSummary{UnfinishedTasks: 7, PlatformsScanned: 3}
+	finishSystemTaskHandler(context.Background(), claimedTask, runnerID, model.SystemTaskStatusSucceeded, summary, errors.New("platform broken: upstream 502"))
+
+	reloaded, err := model.GetSystemTaskByTaskID(task.TaskID)
+	require.NoError(t, err)
+	require.NotNil(t, reloaded)
+	assert.Equal(t, model.SystemTaskStatusFailed, reloaded.Status)
+	assert.Contains(t, reloaded.Error, "platform broken")
+	response := reloaded.ToResponse()
+	result, ok := response.Result.(map[string]any)
+	require.True(t, ok)
+	assert.EqualValues(t, 7, result["unfinished_tasks"])
+	assert.EqualValues(t, 3, result["platforms_scanned"])
 }

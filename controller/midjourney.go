@@ -3,6 +3,7 @@ package controller
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -31,51 +32,48 @@ type midjourneyPollSummary struct {
 // It honors ctx cancellation (the system-task runner cancels it when the lease
 // is lost) and, when report is non-nil, reports progress as (processedChannels,
 // totalChannels) so the system task surfaces a percentage.
-func runMidjourneyTaskUpdateOnce(ctx context.Context, report func(processed, total int)) midjourneyPollSummary {
+func runMidjourneyTaskUpdateOnce(ctx context.Context, report func(processed, total int)) (midjourneyPollSummary, error) {
 	summary := midjourneyPollSummary{}
+	var pollingErrors []error
 	if ctx == nil {
 		ctx = context.Background()
 	}
 
 	tasks := model.GetAllUnFinishTasks()
 	if len(tasks) == 0 {
-		return summary
+		return summary, nil
 	}
 	summary.UnfinishedTasks = len(tasks)
 
 	logger.LogInfo(ctx, fmt.Sprintf("检测到未完成的任务数有: %v", len(tasks)))
 	taskChannelM := make(map[int][]string)
 	taskM := make(map[string]*model.Midjourney)
-	nullTaskIds := make([]int, 0)
 	for _, task := range tasks {
 		if task.MjId == "" {
-			// 统计失败的未完成任务
-			nullTaskIds = append(nullTaskIds, task.Id)
+			won, err := service.FailAndRefundMidjourneyTask(ctx, task, "任务缺少上游 Midjourney ID，已终止并退还预扣额度")
+			if err != nil {
+				logger.LogError(ctx, fmt.Sprintf("fail null mj_id task id=%d: %v", task.Id, err))
+				pollingErrors = append(pollingErrors, fmt.Errorf("task %d missing mj_id: %w", task.Id, err))
+				continue
+			}
+			if won {
+				summary.NullTasksFailed++
+				logger.LogInfo(ctx, fmt.Sprintf("failed null mj_id task id=%d", task.Id))
+			}
 			continue
 		}
 		taskM[task.MjId] = task
 		taskChannelM[task.ChannelId] = append(taskChannelM[task.ChannelId], task.MjId)
 	}
-	if len(nullTaskIds) > 0 {
-		summary.NullTasksFailed = len(nullTaskIds)
-		err := model.MjBulkUpdateByTaskIds(nullTaskIds, map[string]any{
-			"status":   "FAILURE",
-			"progress": "100%",
-		})
-		if err != nil {
-			logger.LogError(ctx, fmt.Sprintf("Fix null mj_id task error: %v", err))
-		} else {
-			logger.LogInfo(ctx, fmt.Sprintf("Fix null mj_id task success: %v", nullTaskIds))
-		}
-	}
 	if len(taskChannelM) == 0 {
-		return summary
+		return summary, errors.Join(pollingErrors...)
 	}
 
 	totalChannels := len(taskChannelM)
 	processedChannels := 0
 	for channelId, taskIds := range taskChannelM {
 		if ctx != nil && ctx.Err() != nil {
+			pollingErrors = append(pollingErrors, ctx.Err())
 			break
 		}
 		if report != nil {
@@ -209,18 +207,29 @@ func runMidjourneyTaskUpdateOnce(ctx context.Context, report func(processed, tot
 					shouldReturnQuota = true
 				}
 			}
+			if shouldReturnQuota {
+				failedReason := task.FailReason
+				task.Status = preStatus
+				won, err := service.FailAndRefundMidjourneyTask(ctx, task, failedReason)
+				if err != nil {
+					logger.LogError(ctx, "FailAndRefundMidjourneyTask error: "+err.Error())
+				} else if !won {
+					logger.LogInfo(ctx, fmt.Sprintf("Midjourney task %s already terminal, skip duplicate refund", task.MjId))
+				}
+				continue
+			}
 			won, err := task.UpdateWithStatus(preStatus)
 			if err != nil {
 				logger.LogError(ctx, "UpdateMidjourneyTask task error: "+err.Error())
-			} else if won && shouldReturnQuota {
-				service.RefundMidjourneyQuota(ctx, task, "构图失败")
+			} else if !won {
+				logger.LogInfo(ctx, fmt.Sprintf("Midjourney task %s already transitioned", task.MjId))
 			}
 		}
 	}
 	if report != nil && (ctx == nil || ctx.Err() == nil) {
 		report(totalChannels, totalChannels)
 	}
-	return summary
+	return summary, errors.Join(pollingErrors...)
 }
 
 func checkMjTaskNeedUpdate(oldTask *model.Midjourney, newTask dto.MidjourneyDto) bool {

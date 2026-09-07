@@ -1,5 +1,14 @@
 package model
 
+import (
+	"context"
+	"errors"
+
+	"github.com/QuantumNous/new-api/common"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
 type Midjourney struct {
 	Id          int    `json:"id"`
 	Code        int    `json:"code"`
@@ -246,4 +255,135 @@ func CountAllUserTask(userId int, queryParams TaskQueryParams) int64 {
 	}
 	_ = query.Count(&total).Error
 	return total
+}
+
+type MidjourneyRefundResult struct {
+	Won              bool
+	Quota            int
+	TokenID          int
+	TokenKey         string
+	BillingChannelID int
+	UserID           int
+}
+
+// FailAndRefundMidjourney atomically moves one unfinished legacy task to
+// FAILURE and consumes its persisted quota marker while reversing accounting.
+// The primary key identifies tasks whose upstream mj_id is empty; the status
+// predicate and quota marker make concurrent/repeated calls idempotent.
+func FailAndRefundMidjourney(ctx context.Context, taskID int, fromStatus string, reason string) (MidjourneyRefundResult, error) {
+	result := MidjourneyRefundResult{}
+	if taskID <= 0 {
+		return result, errors.New("invalid Midjourney task id")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+
+	err := DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var task Midjourney
+		query := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", taskID)
+		if fromStatus != "" {
+			query = query.Where("status = ?", fromStatus)
+		}
+		if err := query.First(&task).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		if task.Status == "SUCCESS" || task.Status == "FAILURE" {
+			return nil
+		}
+
+		result.UserID = task.UserId
+		result.TokenID = task.TokenId
+		result.BillingChannelID = task.GetBillingChannelId()
+		shouldRefund := !IsTaskRefundLegacy(task.SubmitTime)
+		if shouldRefund {
+			result.Quota = task.Quota
+		} else {
+			reason = "旧系统遗留任务已终止，不进行自动退款，请联系管理员"
+		}
+		if shouldRefund && task.TokenId > 0 {
+			var token Token
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&token, task.TokenId).Error; err != nil {
+				return err
+			}
+			result.TokenKey = token.Key
+		}
+
+		update := tx.Model(&Midjourney{}).
+			Where("id = ? AND status = ? AND status NOT IN ?", task.Id, task.Status, []string{"SUCCESS", "FAILURE"}).
+			Updates(map[string]any{
+				"status": "FAILURE", "progress": "100%", "fail_reason": reason, "quota": 0,
+			})
+		if update.Error != nil {
+			return update.Error
+		}
+		if update.RowsAffected != 1 {
+			return nil
+		}
+		result.Won = true
+		if !shouldRefund || task.Quota == 0 {
+			return nil
+		}
+
+		wallet := tx.Model(&User{}).Where("id = ? AND quota <= ?", task.UserId, common.MaxWalletQuota-task.Quota).
+			Update("quota", gorm.Expr("quota + ?", task.Quota))
+		if wallet.Error != nil {
+			return wallet.Error
+		}
+		if wallet.RowsAffected != 1 {
+			return ErrWalletQuotaLimitExceeded
+		}
+		if task.TokenId > 0 {
+			token := tx.Model(&Token{}).Where("id = ?", task.TokenId).Updates(map[string]any{
+				"remain_quota":  gorm.Expr("remain_quota + ?", task.Quota),
+				"used_quota":    gorm.Expr("used_quota - ?", task.Quota),
+				"accessed_time": common.GetTimestamp(),
+			})
+			if token.Error != nil {
+				return token.Error
+			}
+			if token.RowsAffected != 1 {
+				return gorm.ErrRecordNotFound
+			}
+		}
+		if userUsage := tx.Model(&User{}).Where("id = ?", task.UserId).
+			Update("used_quota", gorm.Expr("used_quota - ?", task.Quota)); userUsage.Error != nil || userUsage.RowsAffected != 1 {
+			if userUsage.Error != nil {
+				return userUsage.Error
+			}
+			return gorm.ErrRecordNotFound
+		}
+		if result.BillingChannelID > 0 {
+			if channelUsage := tx.Model(&Channel{}).Where("id = ?", result.BillingChannelID).
+				Update("used_quota", gorm.Expr("used_quota - ?", task.Quota)); channelUsage.Error != nil || channelUsage.RowsAffected != 1 {
+				if channelUsage.Error != nil {
+					return channelUsage.Error
+				}
+				return gorm.ErrRecordNotFound
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return MidjourneyRefundResult{}, err
+	}
+	if result.Won {
+		if common.RedisEnabled {
+			if err := invalidateUserCache(result.UserID); err != nil {
+				common.SysLog("failed to invalidate user cache after Midjourney refund: " + err.Error())
+			}
+			if result.TokenKey != "" {
+				if err := invalidateTokenCacheForMutation(result.TokenKey); err != nil {
+					common.SysLog("failed to invalidate token cache after Midjourney refund: " + err.Error())
+				}
+			}
+		}
+	}
+	return result, nil
 }

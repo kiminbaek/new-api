@@ -101,8 +101,8 @@ func (a *taskPollingFetchAdaptor) ParseTaskResult([]byte) (*relaycommon.TaskInfo
 	return &relaycommon.TaskInfo{Status: model.TaskStatusInProgress}, nil
 }
 
-func (a *taskPollingFetchAdaptor) AdjustBillingOnComplete(_ *model.Task, _ *relaycommon.TaskInfo) int {
-	return 0
+func (a *taskPollingFetchAdaptor) AdjustBillingOnComplete(_ *model.Task, _ *relaycommon.TaskInfo) (int, error) {
+	return 0, nil
 }
 
 func (a *taskPollingFetchAdaptor) fetchCount() int {
@@ -661,7 +661,7 @@ func TestRunTaskPollingOnceDoesNotRefundHistoricalFailedTask(t *testing.T) {
 	task.TaskID = "historical_failed_already_refunded"
 	task.Status = model.TaskStatusFailure
 	task.Progress = "100%"
-	task.SubmitTime = time.Now().Add(-90 * 24 * time.Hour).Unix()
+	task.SubmitTime = model.TaskRefundLegacyCutoff - 1
 	task.UpdatedAt = time.Now().Add(-time.Minute).Unix()
 	require.NoError(t, model.DB.Create(task).Error)
 
@@ -671,7 +671,8 @@ func TestRunTaskPollingOnceDoesNotRefundHistoricalFailedTask(t *testing.T) {
 	}
 	t.Cleanup(func() { GetTaskAdaptorFunc = previousFactory })
 
-	summary := RunTaskPollingOnce(context.Background(), nil)
+	summary, err := RunTaskPollingOnce(context.Background(), nil)
+	require.NoError(t, err)
 
 	assert.Zero(t, summary.UnfinishedTasks)
 	assert.Equal(t, initialQuota, getUserQuota(t, userID))
@@ -849,4 +850,156 @@ func TestPollingTaskIndexScopesDuplicateUpstreamIDsByChannel(t *testing.T) {
 	assert.Same(t, first, lookupPollingTask(taskMap, first.ChannelId, "1"))
 	assert.Same(t, second, lookupPollingTask(taskMap, second.ChannelId, "1"))
 	assert.NotEqual(t, taskPollingMapKey(first.ChannelId, "1"), taskPollingMapKey(second.ChannelId, "1"))
+}
+
+func TestDispatchPlatformUpdateKeepsPluginKeyMJ(t *testing.T) {
+	truncate(t)
+	const channelID = 190
+	seedTaskPollingChannel(t, channelID, true)
+	task := seedPollingTask(t, channelID, "task_plugin_mj", "upstream_plugin_mj")
+	task.Platform = constant.TaskPlatformMidjourney
+	task.PluginKey = "mj"
+	task.PluginVersion = "1.0.0"
+	require.NoError(t, model.DB.Save(task).Error)
+	adaptor := &taskPollingFetchAdaptor{}
+	previousFactory := GetTaskAdaptorFunc
+	GetTaskAdaptorFunc = func(constant.TaskPlatform) TaskPollingAdaptor { return adaptor }
+	t.Cleanup(func() { GetTaskAdaptorFunc = previousFactory })
+
+	err := DispatchPlatformUpdate(context.Background(), task.Platform,
+		map[int][]string{channelID: {task.GetUpstreamTaskID()}},
+		map[string]*model.Task{taskPollingMapKey(channelID, task.GetUpstreamTaskID()): task})
+	require.NoError(t, err)
+	assert.Equal(t, 1, adaptor.fetchCount(), "plugin key mj must not be mistaken for legacy Midjourney")
+}
+
+func TestRunTaskPollingOnceDoesNotRefetchTerminalBillingRetry(t *testing.T) {
+	truncate(t)
+	const userID, channelID = 191, 191
+	seedUser(t, userID, 10_000)
+	seedTaskPollingChannel(t, channelID, true)
+	task := makeTask(userID, channelID, 700, 0, BillingSourceWallet, 0)
+	task.TaskID = "terminal_pending"
+	task.PrivateData.UpstreamTaskID = "terminal_pending_upstream"
+	task.Platform = "late-success-plugin"
+	task.Status = model.TaskStatusFailure
+	task.Progress = "100%"
+	task.BillingPending = true
+	require.NoError(t, model.DB.Create(task).Error)
+	adaptor := &taskPollingFetchAdaptor{}
+	previousFactory := GetTaskAdaptorFunc
+	GetTaskAdaptorFunc = func(constant.TaskPlatform) TaskPollingAdaptor { return adaptor }
+	t.Cleanup(func() { GetTaskAdaptorFunc = previousFactory })
+
+	_, err := RunTaskPollingOnce(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Zero(t, adaptor.fetchCount(), "terminal billing retries must never contact upstream")
+	var persisted model.Task
+	require.NoError(t, model.DB.First(&persisted, task.ID).Error)
+	assert.EqualValues(t, model.TaskStatusFailure, persisted.Status)
+}
+
+func TestUpdateVideoSingleTaskCancellationCannotPersistLateSuccess(t *testing.T) {
+	truncate(t)
+	const channelID = 192
+	seedTaskPollingChannel(t, channelID, true)
+	task := seedPollingTask(t, channelID, "cancelled_poll", "cancelled_upstream")
+	ctx, cancel := context.WithCancel(context.Background())
+	adaptor := &cancelAfterFetchAdaptor{cancel: cancel}
+	ch, err := model.GetChannelById(channelID, true)
+	require.NoError(t, err)
+
+	err = updateVideoSingleTask(ctx, adaptor, ch, task.GetUpstreamTaskID(), map[string]*model.Task{
+		taskPollingMapKey(channelID, task.GetUpstreamTaskID()): task,
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	var persisted model.Task
+	require.NoError(t, model.DB.First(&persisted, task.ID).Error)
+	assert.EqualValues(t, model.TaskStatusInProgress, persisted.Status)
+}
+
+type cancelAfterFetchAdaptor struct {
+	taskPollingFetchAdaptor
+	cancel context.CancelFunc
+}
+
+func (a *cancelAfterFetchAdaptor) FetchTask(baseURL, key string, body map[string]any, proxy string) (*http.Response, error) {
+	resp, err := a.taskPollingFetchAdaptor.FetchTask(baseURL, key, body, proxy)
+	a.cancel()
+	if err != nil {
+		return nil, err
+	}
+	response := taskdto.TaskResponse[model.Task]{Code: taskdto.TaskSuccessCode, Data: model.Task{TaskID: body["task_id"].(string), Status: model.TaskStatusSuccess, Progress: "100%"}}
+	encoded, marshalErr := common.Marshal(response)
+	if marshalErr != nil {
+		return nil, marshalErr
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(encoded))
+	return resp, nil
+}
+
+func TestDispatchPlatformUpdatePropagatesPollingError(t *testing.T) {
+	truncate(t)
+	const channelID = 193
+	task := &model.Task{TaskID: "poll_error", Platform: "missing", ChannelId: channelID, Status: model.TaskStatusInProgress, Progress: "10%", PrivateData: model.TaskPrivateData{UpstreamTaskID: "upstream_error"}}
+	err := DispatchPlatformUpdate(context.Background(), task.Platform,
+		map[int][]string{channelID: {task.GetUpstreamTaskID()}},
+		map[string]*model.Task{taskPollingMapKey(channelID, task.GetUpstreamTaskID()): task})
+	require.ErrorContains(t, err, "task adaptor factory is not configured")
+}
+
+func TestRunTaskPollingOnceRetriesDurableTargetWithoutUpstream(t *testing.T) {
+	truncate(t)
+	const userID, channelID, preConsumed, finalQuota = 194, 194, 700, 250
+	seedUser(t, userID, 10_000)
+	seedChannel(t, channelID)
+	seedChargedAccounting(t, userID, channelID, 0, preConsumed, 1)
+	task := makeTask(userID, channelID, preConsumed, 0, BillingSourceWallet, 0)
+	task.TaskID = "terminal_target_pending"
+	task.Platform = "durable-target-plugin"
+	task.Status = model.TaskStatusSuccess
+	task.Progress = "100%"
+	task.BillingPending = true
+	task.PrivateData.BillingTargetQuota = intPtr(finalQuota)
+	require.NoError(t, model.DB.Create(task).Error)
+	adaptor := &taskPollingFetchAdaptor{}
+	previousFactory := GetTaskAdaptorFunc
+	GetTaskAdaptorFunc = func(constant.TaskPlatform) TaskPollingAdaptor { return adaptor }
+	t.Cleanup(func() { GetTaskAdaptorFunc = previousFactory })
+
+	_, err := RunTaskPollingOnce(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Zero(t, adaptor.fetchCount())
+	var persisted model.Task
+	require.NoError(t, model.DB.First(&persisted, task.ID).Error)
+	assert.False(t, persisted.BillingPending)
+	assert.Nil(t, persisted.PrivateData.BillingTargetQuota)
+	assert.Equal(t, finalQuota, persisted.Quota)
+	assert.Equal(t, 10_000+(preConsumed-finalQuota), getUserQuota(t, userID))
+}
+
+func TestRunTaskPollingOnceKeepsUnrecoverableSuccessPending(t *testing.T) {
+	truncate(t)
+	const userID, channelID = 195, 195
+	seedUser(t, userID, 10_000)
+	seedChannel(t, channelID)
+	task := makeTask(userID, channelID, 700, 0, BillingSourceWallet, 0)
+	task.TaskID = "terminal_missing_target"
+	task.Platform = "missing-target-plugin"
+	task.Status = model.TaskStatusSuccess
+	task.Progress = "100%"
+	task.BillingPending = true
+	require.NoError(t, model.DB.Create(task).Error)
+	adaptor := &taskPollingFetchAdaptor{}
+	previousFactory := GetTaskAdaptorFunc
+	GetTaskAdaptorFunc = func(constant.TaskPlatform) TaskPollingAdaptor { return adaptor }
+	t.Cleanup(func() { GetTaskAdaptorFunc = previousFactory })
+
+	_, err := RunTaskPollingOnce(context.Background(), nil)
+	require.ErrorContains(t, err, "retry terminal task billing")
+	assert.Zero(t, adaptor.fetchCount())
+	var persisted model.Task
+	require.NoError(t, model.DB.First(&persisted, task.ID).Error)
+	assert.True(t, persisted.BillingPending)
+	assert.Equal(t, 700, persisted.Quota)
 }

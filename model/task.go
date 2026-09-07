@@ -47,9 +47,30 @@ const (
 	TaskStatusUnknown               = "UNKNOWN"
 )
 
+func (t TaskStatus) IsTerminal() bool {
+	return t == TaskStatusSuccess || t == TaskStatusFailure
+}
+
 // TaskRefundLegacyCutoff separates tasks created before timeout refunds were
 // introduced. Those legacy tasks are failed without an automatic refund.
-const TaskRefundLegacyCutoff int64 = 1771718400 // 2026-02-22 00:00:00 UTC
+const (
+	TaskRefundLegacyCutoff       int64 = 1771718400 // 2026-02-22 00:00:00 UTC
+	taskTimestampMillisThreshold int64 = 1_000_000_000_000
+)
+
+// IsTaskRefundLegacy accepts the second timestamps used by generic tasks and
+// the millisecond timestamps used by legacy Midjourney tasks. A missing
+// timestamp is not classified as historical, matching the existing timeout
+// refund policy.
+func IsTaskRefundLegacy(submitTime int64) bool {
+	if submitTime <= 0 {
+		return false
+	}
+	if submitTime >= taskTimestampMillisThreshold {
+		submitTime /= 1000
+	}
+	return submitTime < TaskRefundLegacyCutoff
+}
 
 type Task struct {
 	ID             int64                 `json:"id" gorm:"primary_key;AUTO_INCREMENT"`
@@ -128,6 +149,10 @@ type TaskPrivateData struct {
 	TokenId        int                 `json:"token_id,omitempty"`        // 令牌 ID，用于令牌额度退款
 	NodeName       string              `json:"node_name,omitempty"`       // 发起任务的节点名，轮询结算阶段据此归属日志而非最后查询节点
 	BillingContext *TaskBillingContext `json:"billing_context,omitempty"` // 计费参数快照（用于轮询阶段重新计算）
+	// BillingTargetQuota is the durable terminal settlement plan. It is written
+	// in the same CAS update as the terminal status and consumed atomically with
+	// BillingPending, so retries never need to query upstream again.
+	BillingTargetQuota *int `json:"billing_target_quota,omitempty"`
 	// ResponsesBackground records that the openai_responses create request
 	// asked for background:true. Every task is durable and survives client
 	// disconnect regardless; this only echoes the protocol-level request
@@ -361,11 +386,22 @@ func GetTimedOutUnfinishedTasks(cutoffUnix int64, limit int) []*Task {
 
 func GetAllUnFinishSyncTasks(limit int) []*Task {
 	var tasks []*Task
-	var err error
-	// get all tasks progress is not 100%
-	err = DB.Where("(progress != ? AND status != ? AND status != ?) OR billing_pending = ?",
-		"100%", TaskStatusFailure, TaskStatusSuccess, true).Limit(limit).Order("id").Find(&tasks).Error
+	err := DB.Where("progress != ? AND status NOT IN ?", "100%", []TaskStatus{TaskStatusFailure, TaskStatusSuccess}).
+		Limit(limit).Order("id").Find(&tasks).Error
 	if err != nil {
+		return nil
+	}
+	return tasks
+}
+
+func GetPendingTerminalTaskBilling(limit int) []*Task {
+	var tasks []*Task
+	query := DB.Where("billing_pending = ? AND status IN ? AND (submit_time <= 0 OR (submit_time < ? AND submit_time >= ?) OR submit_time >= ?)",
+		true, []TaskStatus{TaskStatusFailure, TaskStatusSuccess}, taskTimestampMillisThreshold, TaskRefundLegacyCutoff, TaskRefundLegacyCutoff*1000).Order("id")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	if err := query.Find(&tasks).Error; err != nil {
 		return nil
 	}
 	return tasks
@@ -378,8 +414,9 @@ func GetAllUnFinishSyncTasks(limit int) []*Task {
 func HasUnfinishedSyncTasks() bool {
 	var id int64
 	err := DB.Model(&Task{}).
-		Where("(progress != ? AND status != ? AND status != ?) OR billing_pending = ?",
-			"100%", TaskStatusFailure, TaskStatusSuccess, true).
+		Where("(progress != ? AND status NOT IN ?) OR (billing_pending = ? AND status IN ? AND (submit_time <= 0 OR (submit_time < ? AND submit_time >= ?) OR submit_time >= ?))",
+			"100%", []TaskStatus{TaskStatusFailure, TaskStatusSuccess}, true, []TaskStatus{TaskStatusFailure, TaskStatusSuccess},
+			taskTimestampMillisThreshold, TaskRefundLegacyCutoff, TaskRefundLegacyCutoff*1000).
 		Limit(1).
 		Pluck("id", &id).Error
 	return err == nil && id != 0
@@ -524,7 +561,20 @@ func (t *Task) UpdateQuota() error {
 // falls back to INSERT ON CONFLICT when the WHERE-guarded UPDATE matches
 // zero rows, which silently bypasses the CAS guard.
 func (t *Task) UpdateWithStatus(fromStatus TaskStatus) (bool, error) {
-	result := DB.Model(t).Where("status = ?", fromStatus).Select("*").Updates(t)
+	return t.UpdateWithStatusContext(context.Background(), fromStatus)
+}
+
+func (t *Task) UpdateWithStatusContext(ctx context.Context, fromStatus TaskStatus) (bool, error) {
+	if fromStatus.IsTerminal() {
+		return false, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	result := DB.WithContext(ctx).Model(t).Where("status = ? AND status NOT IN ?", fromStatus, []TaskStatus{TaskStatusFailure, TaskStatusSuccess}).Select("*").Updates(t)
 	if result.Error != nil {
 		return false, result.Error
 	}
@@ -615,8 +665,10 @@ func ApplyTaskBillingAdjustment(task *Task, expectedQuota int, finalQuota int) (
 			}
 		}
 
+		settledPrivateData := task.PrivateData
+		settledPrivateData.BillingTargetQuota = nil
 		result := tx.Model(&Task{}).Where("id = ? AND quota = ? AND billing_pending = ?", persisted.ID, expectedQuota, true).Updates(map[string]any{
-			"quota": finalQuota, "billing_pending": false, "private_data": task.PrivateData,
+			"quota": finalQuota, "billing_pending": false, "private_data": settledPrivateData,
 		})
 		if result.Error != nil {
 			return result.Error
@@ -631,6 +683,7 @@ func ApplyTaskBillingAdjustment(task *Task, expectedQuota int, finalQuota int) (
 	}
 	task.Quota = finalQuota
 	task.BillingPending = false
+	task.PrivateData.BillingTargetQuota = nil
 	if common.RedisEnabled {
 		if err := invalidateUserCache(task.UserId); err != nil {
 			common.SysLog("failed to invalidate user cache after task billing: " + err.Error())

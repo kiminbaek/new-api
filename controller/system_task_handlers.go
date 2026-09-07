@@ -145,8 +145,8 @@ func (midjourneyPollHandler) Interval() time.Duration { return 15 * time.Second 
 func (midjourneyPollHandler) NewPayload() any { return nil }
 
 func (midjourneyPollHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
-	summary := runMidjourneyTaskUpdateOnce(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
-	finishSystemTaskHandler(ctx, task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+	summary, err := runMidjourneyTaskUpdateOnce(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
+	finishSystemTaskHandler(ctx, task, runnerID, model.SystemTaskStatusSucceeded, summary, err)
 }
 
 // asyncTaskPollHandler runs one async-task (Suno/video) polling pass per
@@ -165,14 +165,16 @@ func (asyncTaskPollHandler) Interval() time.Duration { return 15 * time.Second }
 func (asyncTaskPollHandler) NewPayload() any { return nil }
 
 func (asyncTaskPollHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
-	summary := service.RunTaskPollingOnce(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
-	finishSystemTaskHandler(ctx, task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
+	summary, err := service.RunTaskPollingOnce(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
+	finishSystemTaskHandler(ctx, task, runnerID, model.SystemTaskStatusSucceeded, summary, err)
 }
 
 func finishSystemTaskHandler(ctx context.Context, task *model.SystemTask, runnerID string, status model.SystemTaskStatus, result any, runErr error) {
 	if ctx != nil && ctx.Err() != nil {
-		status = model.SystemTaskStatusFailed
 		runErr = ctx.Err()
+	}
+	if runErr != nil {
+		status = model.SystemTaskStatusFailed
 	}
 	errorMessage := ""
 	if runErr != nil {
