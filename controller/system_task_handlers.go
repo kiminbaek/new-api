@@ -71,20 +71,10 @@ func (channelTestHandler) Run(ctx context.Context, task *model.SystemTask, runne
 	if isScheduled && operation_setting.GetMonitorSetting().ChannelTestMode == operation_setting.ChannelTestModeScheduledModels {
 		shouldNotify = true
 	}
+	// The SystemTask runner already holds the cross-instance per-type DB lease.
+	// Keep it as the single source of ownership instead of layering a second
+	// lease whose independent failure could cancel an otherwise valid task.
 	runIdentity := task.TaskID + "@" + runnerID
-	if (isScheduled && operation_setting.GetMonitorSetting().ChannelTestMode == operation_setting.ChannelTestModeScheduledModels) || mode == operation_setting.ChannelTestModeScheduledModels {
-		lease, acquired, leaseErr := service.AcquireScheduledModelProbeLease(ctx, runIdentity)
-		if leaseErr != nil {
-			finishSystemTaskHandler(ctx, task, runnerID, model.SystemTaskStatusFailed, nil, leaseErr)
-			return
-		}
-		if !acquired {
-			finishSystemTaskHandler(ctx, task, runnerID, model.SystemTaskStatusFailed, nil, service.ErrScheduledModelProbeLeaseBusy)
-			return
-		}
-		defer lease.Release()
-		ctx = lease.Context()
-	}
 	summary, err := runChannelTestTask(ctx, mode, shouldNotify, isScheduled, runIdentity, service.NewSystemTaskProgressReporter(task, runnerID))
 	if err != nil {
 		// A lost lease/cancelled context is never a successful health run: retain

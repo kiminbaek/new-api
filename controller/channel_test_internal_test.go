@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -564,4 +565,21 @@ func TestModelProbeNotificationIdentitySeparatesRunChannelAndModel(t *testing.T)
 	assert.NotEqual(t, base, modelProbeNotificationIdentity("run-b", []modelProbeResult{{ChannelID: 1, Model: "alpha"}}))
 	assert.NotEqual(t, base, modelProbeNotificationIdentity("run-a", []modelProbeResult{{ChannelID: 2, Model: "alpha"}}))
 	assert.NotEqual(t, base, modelProbeNotificationIdentity("run-a", []modelProbeResult{{ChannelID: 1, Model: "beta"}}))
+}
+
+func TestRecordCompletedModelProbeRunsOnlyTouchesCompletedChannels(t *testing.T) {
+	channelTestLastRun = sync.Map{}
+	t.Cleanup(func() { channelTestLastRun = sync.Map{} })
+
+	recordCompletedModelProbeRuns([]modelProbeResult{
+		{ChannelID: 31, Model: "alpha", Success: true},
+		{ChannelID: 31, Model: "beta", Success: false},
+		{ChannelID: 32, Model: "alpha", Success: true},
+	})
+	_, completed31 := channelTestLastRun.Load(31)
+	_, completed32 := channelTestLastRun.Load(32)
+	_, skipped33 := channelTestLastRun.Load(33)
+	assert.True(t, completed31)
+	assert.True(t, completed32)
+	assert.False(t, skipped33, "a selected but unexecuted channel must remain due")
 }

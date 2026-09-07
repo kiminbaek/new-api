@@ -1341,7 +1341,7 @@ func runChannelTestTask(ctx context.Context, mode string, notify bool, isSchedul
 		if err := ctx.Err(); err != nil {
 			return summary, err
 		}
-		recordChannelTestRun(selected)
+		recordCompletedModelProbeRuns(probes)
 		if notify && (ctx == nil || ctx.Err() == nil) {
 			content := fmt.Sprintf("本轮按渠道×模型顺序巡检完成：共 %d 项，成功 %d，异常 %d。%s", summary.Tested, summary.Succeeded, summary.Failed, formatModelProbeReport(probes))
 			// Sentinel is the production QQ delivery path. NotifyRootUser uses a
@@ -1475,6 +1475,21 @@ func recordChannelTestRun(channels []*model.Channel) {
 	now := time.Now()
 	for _, ch := range channels {
 		channelTestLastRun.Store(ch.Id, now)
+	}
+}
+
+// recordCompletedModelProbeRuns updates scheduling only for channels that
+// actually produced at least one completed probe result. Selected channels
+// whose probe never ran (for example cancellation before their turn) remain due.
+func recordCompletedModelProbeRuns(results []modelProbeResult) {
+	now := time.Now()
+	seen := make(map[int]struct{}, len(results))
+	for _, result := range results {
+		if _, ok := seen[result.ChannelID]; ok {
+			continue
+		}
+		seen[result.ChannelID] = struct{}{}
+		channelTestLastRun.Store(result.ChannelID, now)
 	}
 }
 
