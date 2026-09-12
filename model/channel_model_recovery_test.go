@@ -455,7 +455,7 @@ func TestLegacyBackfillFillsOnlyMissingRowsInMixedDatabase(t *testing.T) {
 	first := createRecoveryChannel(t, common.ChannelStatusAutoDisabled, "a")
 	first.Models = "a"
 	require.NoError(t, DB.Model(&Channel{}).Where("id = ?", first.Id).Update("models", first.Models).Error)
-	require.NoError(t, DB.Create(&ChannelModelRecoveryState{ChannelID: first.Id, ChannelName: first.Name, Model: "a", State: RecoveryStateCanary, AttributionJSON: "{}", Generation: 3, CanaryStage: 1, CanaryPercent: 10, CreatedAt: now.UnixMilli(), UpdatedAt: now.UnixMilli()}).Error)
+	require.NoError(t, DB.Create(&ChannelModelRecoveryState{ChannelID: first.Id, ChannelName: first.Name, Model: "a", State: RecoveryStateCanary, AttributionJSON: "{}", Generation: 3, CanaryStage: 1, CanaryPercent: 10, CanaryFailure: 2, CanarySeen: 4, CreatedAt: now.UnixMilli(), UpdatedAt: now.UnixMilli()}).Error)
 	second := createRecoveryChannel(t, common.ChannelStatusAutoDisabled, "b")
 	second.Models = "b"
 	require.NoError(t, DB.Model(&Channel{}).Where("id = ?", second.Id).Update("models", second.Models).Error)
@@ -466,6 +466,15 @@ func TestLegacyBackfillFillsOnlyMissingRowsInMixedDatabase(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, RecoveryStateQuarantined, firstState.State, "status=3 is authoritative during legacy backfill")
 	assert.Zero(t, firstState.CanaryStage)
+	assert.Zero(t, firstState.CanaryFailure)
+	assert.Zero(t, firstState.CanarySeen)
+	firstGeneration := firstState.Generation
+	firstUpdatedAt := firstState.UpdatedAt
+	require.NoError(t, BackfillLegacyAutoDisabledRecovery(first.Id, now.Add(time.Minute)))
+	firstState, err = GetChannelModelRecoveryState(first.Id, "a")
+	require.NoError(t, err)
+	assert.Equal(t, firstGeneration, firstState.Generation, "normalized legacy recovery must be idempotent across restarts")
+	assert.Equal(t, firstUpdatedAt, firstState.UpdatedAt, "idempotent backfill must not rewrite durable state")
 	var firstAbility Ability
 	require.NoError(t, DB.Where("channel_id = ? AND model = ?", first.Id, "a").First(&firstAbility).Error)
 	assert.False(t, firstAbility.Enabled, "status=3 cannot retain an unroutable Canary ability")

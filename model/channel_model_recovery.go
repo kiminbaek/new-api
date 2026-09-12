@@ -553,17 +553,23 @@ func BackfillLegacyAutoDisabledRecovery(channelID int, now time.Time) error {
 			} else if err != nil {
 				return err
 			} else {
-				result := tx.Model(&ChannelModelRecoveryState{}).Where("id = ? AND generation = ?", row.ID, row.Generation).Updates(map[string]any{
-					"channel_name": channel.Name, "state": RecoveryStateQuarantined,
-					"generation": row.Generation + 1, "lease_owner": "", "lease_until": int64(0),
-					"next_probe_at": stamp, "canary_stage": 0, "canary_percent": 0,
-					"canary_success": 0, "updated_at": stamp,
-				})
-				if result.Error != nil {
-					return result.Error
-				}
-				if result.RowsAffected != 1 {
-					return ErrRecoveryStateConflict
+				needsNormalization := row.State != RecoveryStateQuarantined ||
+					row.LeaseOwner != "" || row.LeaseUntil != 0 ||
+					row.CanaryStage != 0 || row.CanaryPercent != 0 ||
+					row.CanarySuccess != 0 || row.CanaryFailure != 0 || row.CanarySeen != 0
+				if needsNormalization {
+					result := tx.Model(&ChannelModelRecoveryState{}).Where("id = ? AND generation = ?", row.ID, row.Generation).Updates(map[string]any{
+						"channel_name": channel.Name, "state": RecoveryStateQuarantined,
+						"generation": row.Generation + 1, "lease_owner": "", "lease_until": int64(0),
+						"next_probe_at": stamp, "canary_stage": 0, "canary_percent": 0,
+						"canary_success": 0, "canary_failure": 0, "canary_seen": 0, "updated_at": stamp,
+					})
+					if result.Error != nil {
+						return result.Error
+					}
+					if result.RowsAffected != 1 {
+						return ErrRecoveryStateConflict
+					}
 				}
 			}
 			if err := setRecoveryAbilityEnabled(tx, channelID, &modelName, false); err != nil {
