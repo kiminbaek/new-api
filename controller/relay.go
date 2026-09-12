@@ -373,10 +373,15 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		autoBan := channel.GetAutoBan()
 		if !recordHealthFailure {
 			autoBan = false
-		} else if cs2, ok2 := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting); ok2 && cs2.FailThreshold != nil && *cs2.FailThreshold > 0 {
-			th := cs2.FailThreshold
-			if fails := service.RelayConsecutiveFailures(channel.Id, relayInfo.OriginModelName); fails < *th {
-				autoBan = false
+		} else if service.ClassifyChannelError(newAPIError, channel.ChannelInfo.IsMultiKey) != service.ActionDisableChannel {
+			// Per-channel failure thresholds protect transient model/transport
+			// faults from premature quarantine. Deterministic account/auth faults
+			// bypass the streak because another request cannot make them healthy.
+			if cs2, ok2 := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting); ok2 && cs2.FailThreshold != nil && *cs2.FailThreshold > 0 {
+				th := cs2.FailThreshold
+				if fails := service.RelayConsecutiveFailures(channel.Id, relayInfo.OriginModelName); fails < *th {
+					autoBan = false
+				}
 			}
 		}
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), autoBan), newAPIError, relayInfo)
@@ -609,9 +614,8 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
 		return false
 	}
-	if types.IsChannelError(openaiErr) {
-		return true
-	}
+	// Replay safety wins over every failover signal. Stream handlers set
+	// SkipRetry once any client-visible output has been committed.
 	if types.IsSkipRetryError(openaiErr) {
 		return false
 	}
@@ -621,15 +625,18 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	if service.GetChannelConstraints(c).SuppressesRetry() {
 		return false
 	}
+	if operation_setting.IsAlwaysSkipRetryCode(openaiErr.GetErrorCode()) {
+		return false
+	}
+	if types.IsChannelError(openaiErr) || service.ShouldFailoverChannelError(openaiErr) {
+		return true
+	}
 	code := openaiErr.StatusCode
 	if code >= 200 && code < 300 {
 		return false
 	}
 	if code < 100 || code > 599 {
 		return true
-	}
-	if operation_setting.IsAlwaysSkipRetryCode(openaiErr.GetErrorCode()) {
-		return false
 	}
 	return operation_setting.ShouldRetryByStatusCode(code)
 }

@@ -40,3 +40,46 @@ func TestShouldRecordRelayHealthFailure(t *testing.T) {
 		})
 	}
 }
+
+func TestUpstreamSemanticFailuresDriveHealthAndFailover(t *testing.T) {
+	tests := []struct {
+		name     string
+		message  string
+		code     types.ErrorCode
+		status   int
+		category string
+	}{
+		{"quota wrapped as 400", "credit insufficient balance: balance=0 required=4086", "insufficient_user_quota", http.StatusBadRequest, "account_quota"},
+		{"budget pool exhausted", "Budget pool quota has been exhausted", types.ErrorCodeBadResponseStatusCode, http.StatusPaymentRequired, "account_quota"},
+		{"invalid upstream token", "Invalid token", types.ErrorCodeBadResponseStatusCode, http.StatusUnauthorized, "authentication"},
+		{"model unavailable wrapped as 400", "Error from provider: Model is unavailable", types.ErrorCodeBadResponseStatusCode, http.StatusBadRequest, "model_missing"},
+		{"model end of life", "The model has reached its end of life and is no longer available", types.ErrorCodeBadResponseStatusCode, http.StatusGone, "model_missing"},
+		{"upstream key pool empty", "no keys available", types.ErrorCodeChannelNoAvailableKey, http.StatusInternalServerError, "upstream_capacity"},
+		{"gateway timeout", "origin timeout", types.ErrorCodeBadResponseStatusCode, http.StatusGatewayTimeout, "timeout"},
+		{"cloudflare timeout", "origin timeout", types.ErrorCodeBadResponseStatusCode, 524, "timeout"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := types.WithOpenAIError(types.OpenAIError{Message: tt.message, Type: "upstream_error", Code: string(tt.code)}, tt.status)
+			assert.Equal(t, tt.category, AttributeChannelError(err).Category)
+			assert.True(t, ShouldRecordRelayHealthFailure(err, false, false))
+			assert.True(t, ShouldFailoverChannelError(err))
+		})
+	}
+}
+
+func TestLocalQuotaAndRequestErrorsDoNotPoisonChannel(t *testing.T) {
+	localQuota := types.NewErrorWithStatusCode(errors.New("insufficient user quota"), types.ErrorCodeInsufficientUserQuota, http.StatusForbidden)
+	assert.Equal(t, "request_error", AttributeChannelError(localQuota).Category)
+	assert.False(t, ShouldRecordRelayHealthFailure(localQuota, false, false))
+	assert.False(t, ShouldFailoverChannelError(localQuota))
+
+	upstreamBadRequest := types.WithOpenAIError(types.OpenAIError{
+		Message: "该模型始终思考，不支持关闭思考；请使用 low、high 或 max",
+		Type:    "invalid_request_error",
+		Code:    "invalid_request_error",
+	}, http.StatusBadRequest)
+	assert.Equal(t, "request_error", AttributeChannelError(upstreamBadRequest).Category)
+	assert.False(t, ShouldRecordRelayHealthFailure(upstreamBadRequest, false, false))
+	assert.False(t, ShouldFailoverChannelError(upstreamBadRequest))
+}

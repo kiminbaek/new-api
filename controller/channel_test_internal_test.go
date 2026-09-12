@@ -18,6 +18,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	relaytypes "github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
@@ -582,4 +583,42 @@ func TestRecordCompletedModelProbeRunsOnlyTouchesCompletedChannels(t *testing.T)
 	assert.True(t, completed31)
 	assert.True(t, completed32)
 	assert.False(t, skipped33, "a selected but unexecuted channel must remain due")
+}
+
+func TestSequentialModelProbesOnlyCountChannelAttributableFailures(t *testing.T) {
+	oldProbe := scheduledModelProbe
+	oldInterval := common.RequestInterval
+	common.RequestInterval = 0
+	t.Cleanup(func() {
+		scheduledModelProbe = oldProbe
+		common.RequestInterval = oldInterval
+	})
+
+	const requestErrorChannel = 93001
+	scheduledModelProbe = func(_ context.Context, _ *model.Channel, _ int, _ string, _ string, _ bool) testResult {
+		err := relaytypes.WithOpenAIError(relaytypes.OpenAIError{
+			Message: "该模型始终思考，不支持关闭思考；请使用 low、high 或 max",
+			Type:    "invalid_request_error",
+			Code:    "invalid_request_error",
+		}, http.StatusBadRequest)
+		return testResult{localErr: err, newAPIError: err}
+	}
+	channel := &model.Channel{Id: requestErrorChannel, Name: "request-error", Models: "alpha", Status: common.ChannelStatusEnabled}
+	summary, _ := runSequentialModelProbes(context.Background(), []*model.Channel{channel}, 1, nil)
+	assert.Equal(t, 1, summary.Failed)
+	assert.Zero(t, service.RelayConsecutiveFailures(requestErrorChannel, "alpha"), "synthetic request incompatibility must not poison channel health")
+
+	const upstreamErrorChannel = 93002
+	scheduledModelProbe = func(_ context.Context, _ *model.Channel, _ int, _ string, _ string, _ bool) testResult {
+		err := relaytypes.WithOpenAIError(relaytypes.OpenAIError{
+			Message: "upstream service temporarily unavailable",
+			Type:    "upstream_error",
+			Code:    "bad_response_status_code",
+		}, http.StatusServiceUnavailable)
+		return testResult{localErr: err, newAPIError: err}
+	}
+	channel = &model.Channel{Id: upstreamErrorChannel, Name: "upstream-error", Models: "alpha", Status: common.ChannelStatusEnabled}
+	summary, _ = runSequentialModelProbes(context.Background(), []*model.Channel{channel}, 1, nil)
+	assert.Equal(t, 1, summary.Failed)
+	assert.Equal(t, 1, service.RelayConsecutiveFailures(upstreamErrorChannel, "alpha"), "upstream failures must feed smart routing health")
 }

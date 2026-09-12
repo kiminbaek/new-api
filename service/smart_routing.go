@@ -87,22 +87,25 @@ func ShouldRecordRelayHealthFailure(err *types.NewAPIError, firstTokenTimeout, c
 	if firstTokenTimeout {
 		return true
 	}
-
-	code := err.StatusCode
-	switch err.GetErrorCode() {
-	case types.ErrorCodeChannelInvalidKey,
-		types.ErrorCodeChannelResponseTimeExceeded,
-		types.ErrorCodeReadResponseBodyFailed,
-		types.ErrorCodeBadResponseBody,
-		types.ErrorCodeEmptyResponse,
-		types.ErrorCodeModelNotFound:
-		return true
+	if isExplicitLocalRequestError(err) {
+		return false
 	}
-	if code >= 400 && code < 500 && code != http.StatusTooManyRequests {
+	switch AttributeChannelError(err).Category {
+	case "account_quota", "authentication", "upstream_capacity", "empty_stream", "model_missing", "rate_limit", "timeout", "upstream_5xx":
+		return true
+	default:
+		return false
+	}
+}
+
+func isExplicitLocalRequestError(err *types.NewAPIError) bool {
+	if err == nil {
 		return false
 	}
 	switch err.GetErrorCode() {
-	case types.ErrorCodeInvalidRequest,
+	case types.ErrorCodeQueryDataError,
+		types.ErrorCodeUpdateDataError,
+		types.ErrorCodeJsonMarshalFailed,
 		types.ErrorCodeSensitiveWordsDetected,
 		types.ErrorCodePromptBlocked,
 		types.ErrorCodeReadRequestBodyFailed,
@@ -113,18 +116,14 @@ func ShouldRecordRelayHealthFailure(err *types.NewAPIError, firstTokenTimeout, c
 		types.ErrorCodeModelPriceError,
 		types.ErrorCodeInvalidApiType,
 		types.ErrorCodeGenRelayInfoFailed,
-		types.ErrorCodeInsufficientUserQuota,
 		types.ErrorCodePreConsumeTokenQuotaFailed:
-		return false
-	}
-
-	if code == http.StatusTooManyRequests || code == http.StatusBadGateway || code == http.StatusServiceUnavailable {
 		return true
-	}
-	attribution := AttributeChannelError(err)
-	switch attribution.Category {
-	case "account_quota", "authentication", "empty_stream", "model_missing", "rate_limit", "timeout":
-		return true
+	case types.ErrorCodeInvalidRequest:
+		return err.GetErrorType() == types.ErrorTypeNewAPIError
+	case types.ErrorCodeInsufficientUserQuota:
+		// The same code is also returned by some upstream providers. Only the
+		// locally-created new_api_error is the user's own quota failure.
+		return err.GetErrorType() == types.ErrorTypeNewAPIError
 	default:
 		return false
 	}
@@ -134,17 +133,22 @@ func AttributeChannelError(err *types.NewAPIError) FaultAttribution {
 	if err == nil {
 		return FaultAttribution{Category: "unknown", Confidence: 0, Action: "observe", Summary: "无错误信息"}
 	}
+	if isExplicitLocalRequestError(err) {
+		return FaultAttribution{"request_error", .99, "ignore", "本地请求、计费或内容策略错误，渠道无责"}
+	}
 	msg := strings.ToLower(err.Error())
 	code := err.StatusCode
 	switch {
-	case smartMatchAny(msg, smartAccountLevelKeywords):
-		return FaultAttribution{"account_quota", .98, "disable_channel", "账号额度或账户状态异常"}
-	case err.GetErrorCode() == types.ErrorCodeChannelInvalidKey || smartMatchAny(msg, smartKeyLevelKeywords):
+	case code == http.StatusPaymentRequired || smartMatchAny(msg, smartAccountLevelKeywords):
+		return FaultAttribution{"account_quota", .98, "disable_channel", "账号额度、预算池或账户状态异常"}
+	case err.GetErrorCode() == types.ErrorCodeChannelInvalidKey || code == http.StatusUnauthorized || smartMatchAny(msg, smartKeyLevelKeywords):
 		return FaultAttribution{"authentication", .98, "rotate_key", "密钥失效或认证失败"}
+	case err.GetErrorCode() == types.ErrorCodeChannelNoAvailableKey || smartMatchAny(msg, smartUpstreamCapacityKeywords):
+		return FaultAttribution{"upstream_capacity", .96, "quarantine_model", "上游账号池或密钥池无可用容量"}
 	case err.GetErrorCode() == types.ErrorCodeEmptyResponse || strings.Contains(msg, "zero data") || strings.Contains(msg, "零数据"):
 		return FaultAttribution{"empty_stream", .95, "quarantine_model", "上游返回成功状态但没有有效数据"}
-	case err.GetErrorCode() == types.ErrorCodeModelNotFound || code == 404:
-		return FaultAttribution{"model_missing", .92, "quarantine_model", "模型不存在或已从上游下架"}
+	case err.GetErrorCode() == types.ErrorCodeModelNotFound || code == http.StatusNotFound || code == http.StatusGone || smartMatchAny(msg, smartModelUnavailableKeywords):
+		return FaultAttribution{"model_missing", .92, "quarantine_model", "模型不存在、不可用或已从上游下架"}
 	case code == 429:
 		return FaultAttribution{"rate_limit", .90, "deprioritize", "上游限流或并发拥塞"}
 	case code == 408 || err.GetErrorCode() == types.ErrorCodeChannelResponseTimeExceeded || strings.Contains(msg, "timeout"):
@@ -155,6 +159,21 @@ func AttributeChannelError(err *types.NewAPIError) FaultAttribution {
 		return FaultAttribution{"request_error", .95, "ignore", "请求参数或内容策略问题，渠道无责"}
 	default:
 		return FaultAttribution{"network_or_protocol", .60, "observe", "网络或协议异常，需继续采样"}
+	}
+}
+
+// ShouldFailoverChannelError reports whether a zero-output upstream failure is
+// safe and useful to retry on another channel. Replay safety (SkipRetry /
+// affinity / remaining budget) remains the controller's responsibility.
+func ShouldFailoverChannelError(err *types.NewAPIError) bool {
+	if err == nil {
+		return false
+	}
+	switch AttributeChannelError(err).Category {
+	case "account_quota", "authentication", "upstream_capacity", "empty_stream", "model_missing", "rate_limit", "timeout", "upstream_5xx":
+		return true
+	default:
+		return false
 	}
 }
 

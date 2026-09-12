@@ -1005,7 +1005,7 @@ func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, test
 		if probedModel := result.context.GetString("original_model"); probedModel != "" {
 			if newAPIError == nil {
 				service.RecordRelaySuccess(channel.Id, probedModel)
-			} else {
+			} else if service.ShouldRecordRelayHealthFailure(newAPIError, false, false) {
 				service.RecordRelayFailure(channel.Id, probedModel)
 			}
 		}
@@ -1261,8 +1261,22 @@ func runSequentialModelProbes(ctx context.Context, channels []*model.Channel, te
 		if !reconciled {
 			if item.Success {
 				service.RecordRelaySuccess(probe.channel.Id, probe.model)
-			} else {
+			} else if result.newAPIError != nil && service.ShouldRecordRelayHealthFailure(result.newAPIError, false, false) {
 				service.RecordRelayFailure(probe.channel.Id, probe.model)
+				// Scheduled per-model probes must feed the same semantic policy as
+				// real traffic. Otherwise monitoring can know a route is broken while
+				// the selector keeps sending users to it until live traffic accumulates
+				// an independent failure streak.
+				if result.newAPIError != nil && service.SmartDisableEnabled() &&
+					probe.channel.Status == common.ChannelStatusEnabled && probe.channel.GetAutoBan() {
+					usingKey := ""
+					if result.context != nil {
+						usingKey = common.GetContextKeyString(result.context, constant.ContextKeyChannelKey)
+					}
+					channelErr := types.NewChannelError(probe.channel.Id, probe.channel.Type, probe.channel.Name,
+						probe.channel.ChannelInfo.IsMultiKey, usingKey, probe.channel.GetAutoBan())
+					service.ApplyDisablePolicy(*channelErr, probe.model, result.newAPIError)
+				}
 			}
 		}
 		results = append(results, item)

@@ -90,7 +90,12 @@ var smartAccountLevelKeywords = []string{
 	"account has been suspended",
 	"account is suspended",
 	"insufficient balance",
+	"credit insufficient balance",
 	"insufficient_quota",
+	"insufficient_user_quota",
+	"budget pool quota has been exhausted",
+	"token plan entitlement exhausted",
+	"payment required",
 	"欠费",
 	"余额不足",
 	"账户已被禁用",
@@ -102,12 +107,38 @@ var smartKeyLevelKeywords = []string{
 	"incorrect api key",
 	"invalid_api_key",
 	"invalid authentication",
+	"invalid token",
+	"api key is required",
 	"no such api key",
 	"api key not valid",
 	"api key expired",
 	"the security token included in the request is invalid",
 	"密钥无效",
 	"密钥已过期",
+}
+
+// smartModelUnavailableKeywords are upstream model/account-pool failures that
+// make the selected channel unusable for this model, even when providers wrap
+// them in HTTP 400/410 instead of a retryable status.
+var smartModelUnavailableKeywords = []string{
+	"model is unavailable",
+	"model unavailable",
+	"model does not exist",
+	"does not exist",
+	"no longer available",
+	"reached its end of life",
+	"no available channel for model",
+}
+
+// smartUpstreamCapacityKeywords mean the selected upstream currently has no
+// usable account/key pool. They are channel-attributable and safe to fail over.
+var smartUpstreamCapacityKeywords = []string{
+	"no keys available",
+	"no available key",
+	"all accounts unavailable",
+	"no available accounts",
+	"号池内",
+	"账号均不可用",
 }
 
 // SmartDisableEnabled 智能分级禁用是否生效。
@@ -126,16 +157,24 @@ func ClassifyChannelError(err *types.NewAPIError, _ bool) DisableAction {
 
 	lower := strings.ToLower(err.Error())
 
-	// 账号级最优先：这类错误换模型换 key 都没救。
-	if smartMatchAny(lower, smartAccountLevelKeywords) {
+	// Use the shared semantic attribution before looking at raw status codes.
+	// Providers commonly wrap quota/auth/model failures in HTTP 400; treating all
+	// 400s as client mistakes leaves a dead channel selected indefinitely.
+	attribution := AttributeChannelError(err)
+	switch attribution.Category {
+	case "account_quota", "authentication":
 		return ActionDisableChannel
-	}
-
-	// Key authentication failures are channel-level in smart mode. Persistently
-	// disabling one hidden key made a channel look healthy while silently losing
-	// capacity, and successful channel tests could not recover that key.
-	if err.GetErrorCode() == types.ErrorCodeChannelInvalidKey || smartMatchAny(lower, smartKeyLevelKeywords) {
-		return ActionDisableChannel
+	case "upstream_capacity":
+		if err.GetErrorCode() == types.ErrorCodeChannelNoAvailableKey {
+			return ActionDisableChannel
+		}
+		return ActionDisableModel
+	case "model_missing":
+		// Preserve the dedicated 404 streak guard below; explicit 400/410 model
+		// unavailability still participates in normal model-level quarantine.
+		if err.StatusCode != 404 {
+			return ActionDisableModel
+		}
 	}
 
 	// [CUSTOM] 堵住上游暗门：response_time_exceeded 由健康检测自造，带 "channel:"
