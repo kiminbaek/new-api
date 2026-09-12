@@ -342,9 +342,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 
 		if newAPIError == nil {
-			service.RecordRelaySuccess(channel.Id, relayInfo.OriginModelName) // [CUSTOM] 需求4
-			transition := service.RecordSmartCanaryOutcome(channel.Id, relayInfo.OriginModelName, true)
-			if transition.Recovered {
+			transition, canaryErr := service.RecordRealTrafficOutcome(channel.Id, relayInfo.OriginModelName, true)
+			if canaryErr != nil {
+				common.SysLog(fmt.Sprintf("[CUSTOM] 金丝雀成功结果持久化失败：通道「%s」（#%d）模型 %s：%s", channel.Name, channel.Id, relayInfo.OriginModelName, common.LocalLogPreview(canaryErr.Error())))
+			} else if transition.Recovered {
 				service.NotifyChannelRecovered(channel.Id, channel.Name, "L1", relayInfo.OriginModelName, time.Unix(transition.DisabledAt, 0), transition.Attempts)
 				common.SysLog(fmt.Sprintf("[CUSTOM] 金丝雀恢复完成：通道「%s」（#%d）模型 %s 已恢复 100%% 流量", channel.Name, channel.Id, relayInfo.OriginModelName))
 			} else if transition.Promoted {
@@ -364,9 +365,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		clientGone := relayInfo.StreamStatus != nil && relayInfo.StreamStatus.EndReason == relaycommon.StreamEndReasonClientGone
 		recordHealthFailure := service.ShouldRecordRelayHealthFailure(newAPIError, firstTokenTimeout, clientGone)
 		if recordHealthFailure {
-			service.RecordRelayFailure(channel.Id, relayInfo.OriginModelName)
-			transition := service.RecordSmartCanaryOutcome(channel.Id, relayInfo.OriginModelName, false)
-			if transition.RolledBack {
+			transition, canaryErr := service.RecordRealTrafficOutcome(channel.Id, relayInfo.OriginModelName, false)
+			if canaryErr != nil {
+				common.SysLog(fmt.Sprintf("[CUSTOM] 金丝雀失败结果持久化失败：通道「%s」（#%d）模型 %s：%s", channel.Name, channel.Id, relayInfo.OriginModelName, common.LocalLogPreview(canaryErr.Error())))
+			} else if transition.RolledBack {
 				common.SysLog(fmt.Sprintf("[CUSTOM] 金丝雀回滚：通道「%s」（#%d）模型 %s 真实流量失败，退回隔离", channel.Name, channel.Id, relayInfo.OriginModelName))
 			}
 		}
@@ -655,10 +657,6 @@ func processChannelError(c *gin.Context, channelError types.ChannelError, err *t
 		modelName := c.GetString("original_model")
 		gopool.Go(func() {
 			service.ApplyDisablePolicy(channelError, modelName, err)
-		})
-	} else if !service.SmartDisableEnabled() && healthFailure && service.ShouldDisableChannel(err) && channelError.AutoBan {
-		gopool.Go(func() {
-			service.DisableChannel(channelError, err.ErrorWithStatusCode())
 		})
 	}
 
@@ -998,14 +996,23 @@ func executeTaskSubmissionWith(
 		}
 		if taskErr == nil {
 			diagnostics.attemptSucceeded(retryParam.GetRetry()+1, result)
+			if _, outcomeErr := service.RecordRealTrafficOutcome(channel.Id, relayInfo.OriginModelName, true); outcomeErr != nil {
+				common.SysLog(fmt.Sprintf("[CUSTOM] task 金丝雀成功结果持久化失败：通道 #%d 模型 %s：%s", channel.Id, relayInfo.OriginModelName, common.LocalLogPreview(outcomeErr.Error())))
+			}
 			break
 		}
 
 		if !taskErr.LocalError {
+			upstreamErr := types.NewOpenAIError(taskErr.Error, types.ErrorCodeBadResponseStatusCode, taskErr.StatusCode)
+			if service.ShouldRecordRelayHealthFailure(upstreamErr, false, false) {
+				if _, outcomeErr := service.RecordRealTrafficOutcome(channel.Id, relayInfo.OriginModelName, false); outcomeErr != nil {
+					common.SysLog(fmt.Sprintf("[CUSTOM] task 金丝雀失败结果持久化失败：通道 #%d 模型 %s：%s", channel.Id, relayInfo.OriginModelName, common.LocalLogPreview(outcomeErr.Error())))
+				}
+			}
 			processChannelError(c,
 				*types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey,
 					common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()),
-				types.NewOpenAIError(taskErr.Error, types.ErrorCodeBadResponseStatusCode, taskErr.StatusCode),
+				upstreamErr,
 				relayInfo)
 		}
 

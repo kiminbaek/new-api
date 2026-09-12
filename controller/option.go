@@ -440,7 +440,7 @@ func validateAtomicSetting(key, value string) error {
 		return nil
 	}
 	switch key {
-	case "AutomaticDisableChannelEnabled", "SmartAutoDisableEnabled", "AutomaticEnableChannelEnabled", "HealthCheckJitterEnabled", "AutoPriorityEnabled", "monitor_setting.auto_test_channel_enabled", "SentinelEnabled":
+	case "AutomaticDisableChannelEnabled", "SmartAutoDisableEnabled", "HealthCheckJitterEnabled", "AutoPriorityEnabled", "monitor_setting.auto_test_channel_enabled", "SentinelEnabled":
 		if value != "true" && value != "false" {
 			return fmt.Errorf("%s 必须是 true 或 false", key)
 		}
@@ -477,7 +477,7 @@ func validateAtomicSetting(key, value string) error {
 
 var atomicSettingsOptionKeys = map[string]struct{}{
 	"RetryTimes": {}, "ChannelDisableThreshold": {}, "AutomaticDisableChannelEnabled": {},
-	"SmartAutoDisableEnabled": {}, "AutomaticEnableChannelEnabled": {}, "AutomaticDisableKeywords": {},
+	"SmartAutoDisableEnabled": {}, "AutomaticDisableKeywords": {},
 	"AutomaticDisableStatusCodes": {}, "AutomaticRetryStatusCodes": {}, "RelayUserAgent": {},
 	"HealthCheckJitterEnabled": {}, "AutoPriorityEnabled": {}, "AutoPriorityIntervalSec": {},
 	"AutoPriorityMinSamples": {}, "AutoPriorityScale": {}, "AutoPriorityMaxDelta": {},
@@ -511,6 +511,14 @@ func UpdateOptionsBulk(c *gin.Context) {
 	if err := model.UpdateOptionsBulk(request.Values); err != nil {
 		common.ApiError(c, err)
 		return
+	}
+	_, smartChanged := request.Values["SmartAutoDisableEnabled"]
+	_, automaticChanged := request.Values["AutomaticDisableChannelEnabled"]
+	if (smartChanged || automaticChanged) && service.SmartDisableEnabled() {
+		if err := service.RestoreSmartDownFromDB(); err != nil {
+			common.ApiErrorMsg(c, "智能隔离已保存但持久状态加载失败，当前保持安全阻断: "+common.LocalLogPreview(err.Error()))
+			return
+		}
 	}
 	keys := make([]string, 0, len(request.Values))
 	for key := range request.Values {

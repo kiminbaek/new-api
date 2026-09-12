@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -384,7 +387,7 @@ func (channel *Channel) Save() error {
 // saveStatusState persists only the fields owned by the channel status flow.
 // Keeping this allowlist here prevents a stale channel snapshot from
 // overwriting credentials, accounting counters, or channel configuration.
-func (channel *Channel) saveStatusState() error {
+func (channel *Channel) saveStatusStateWithDB(db *gorm.DB) error {
 	if channel.Id == 0 {
 		return errors.New("channel ID is 0")
 	}
@@ -395,7 +398,11 @@ func (channel *Channel) saveStatusState() error {
 	if channel.ChannelInfo.IsMultiKey {
 		updates["channel_info"] = channel.ChannelInfo
 	}
-	return DB.Model(&Channel{}).Where("id = ?", channel.Id).Updates(updates).Error
+	return db.Model(&Channel{}).Where("id = ?", channel.Id).Updates(updates).Error
+}
+
+func (channel *Channel) saveStatusState() error {
+	return channel.saveStatusStateWithDB(DB)
 }
 
 func GetAllChannels(startIdx int, num int, selectAll bool, idSort bool, sortOptions ...ChannelSortOptions) ([]*Channel, error) {
@@ -517,16 +524,20 @@ func BatchDeleteChannels(ids []int) (int64, error) {
 	}
 	var deletedCount int64
 	for _, chunk := range lo.Chunk(ids, 200) {
+		if err := tx.Where("channel_id in (?)", chunk).Delete(&ChannelModelRecoveryState{}).Error; err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+		if err := tx.Where("channel_id in (?)", chunk).Delete(&Ability{}).Error; err != nil {
+			tx.Rollback()
+			return 0, err
+		}
 		result := tx.Where("id in (?)", chunk).Delete(&Channel{})
 		if result.Error != nil {
 			tx.Rollback()
 			return 0, result.Error
 		}
 		deletedCount += result.RowsAffected
-		if err := tx.Where("channel_id in (?)", chunk).Delete(&Ability{}).Error; err != nil {
-			tx.Rollback()
-			return 0, err
-		}
 	}
 	if err := tx.Commit().Error; err != nil {
 		return 0, err
@@ -622,14 +633,22 @@ func (channel *Channel) Update() error {
 			}
 		}
 	}
-	var err error
-	err = DB.Model(channel).Updates(channel).Error
-	if err != nil {
+	return DB.Transaction(func(tx *gorm.DB) error {
+		return channel.updateInTx(tx, time.Now())
+	})
+}
+
+func (channel *Channel) updateInTx(tx *gorm.DB, now time.Time) error {
+	if err := tx.Model(channel).Updates(channel).Error; err != nil {
 		return err
 	}
-	DB.Model(channel).First(channel, "id = ?", channel.Id)
-	err = channel.UpdateAbilities(nil)
-	return err
+	if err := tx.Model(channel).First(channel, "id = ?", channel.Id).Error; err != nil {
+		return err
+	}
+	if err := channel.UpdateAbilities(tx); err != nil {
+		return err
+	}
+	return reconcileRecoveryModelsTx(tx, channel.Id, channel.GetModels(), channel.Status, now)
 }
 
 func (channel *Channel) UpdateResponseTime(responseTime int64) {
@@ -653,12 +672,7 @@ func (channel *Channel) UpdateBalance(balance float64) {
 }
 
 func (channel *Channel) Delete() error {
-	var err error
-	err = DB.Delete(channel).Error
-	if err != nil {
-		return err
-	}
-	err = channel.DeleteAbilities()
+	_, err := BatchDeleteChannels([]int{channel.Id})
 	return err
 }
 
@@ -789,10 +803,10 @@ func hasEnabledMultiKey(keys []string, statusList map[int]int) bool {
 	return false
 }
 
-// EnableChannelForSmartRecovery reopens an L2-disabled channel without touching
-// the in-memory SmartDown/Canary registry. Channel and ability rows commit in
-// one transaction; caches are rebuilt only after a successful commit.
-func EnableChannelForSmartRecovery(channelId int) error {
+// EnableChannelForManualRecovery atomically performs an administrator's
+// explicit full recovery of an auto-disabled channel. It deliberately enables
+// every configured ability, unlike automatic model-scoped recovery.
+func EnableChannelForManualRecovery(channelId int) error {
 	if channelId <= 0 {
 		return errors.New("channel ID is 0")
 	}
@@ -804,25 +818,122 @@ func EnableChannelForSmartRecovery(channelId int) error {
 	pollingLock.Lock()
 	defer pollingLock.Unlock()
 
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var channel Channel
+		if err := lockForUpdate(tx).First(&channel, channelId).Error; err != nil {
+			return err
+		}
+		if channel.Status == common.ChannelStatusManuallyDisabled {
+			return fmt.Errorf("channel %d is manually disabled", channelId)
+		}
+		if channel.Status != common.ChannelStatusAutoDisabled && channel.Status != common.ChannelStatusEnabled {
+			return fmt.Errorf("channel %d status %d cannot be manually recovered", channelId, channel.Status)
+		}
+		if channel.Status == common.ChannelStatusAutoDisabled {
+			info := channel.GetOtherInfo()
+			delete(info, "status_reason")
+			delete(info, "status_time")
+			channel.SetOtherInfo(info)
+			result := tx.Model(&Channel{}).
+				Where("id = ? AND status = ?", channelId, common.ChannelStatusAutoDisabled).
+				Updates(map[string]any{"status": common.ChannelStatusEnabled, "other_info": channel.OtherInfo})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return fmt.Errorf("channel %d manual recovery lost status race", channelId)
+			}
+		}
+		result := tx.Model(&Ability{}).Where("channel_id = ?", channelId).Update("enabled", true)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return fmt.Errorf("channel %d has no abilities to recover", channelId)
+		}
+		stamp := time.Now().UnixMilli()
+		if err := tx.Model(&ChannelModelRecoveryState{}).
+			Where("channel_id = ? AND state <> ?", channelId, RecoveryStateRetired).
+			Updates(map[string]any{
+				"state": RecoveryStateHealthy, "generation": gorm.Expr("generation + 1"),
+				"lease_owner": "", "lease_until": int64(0), "next_probe_at": int64(0),
+				"canary_stage": 0, "canary_percent": 0, "canary_success": 0,
+				"reason": "", "last_error": "", "updated_at": stamp,
+			}).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+// EnableChannelModelForManualRecovery reopens an auto-disabled channel after one
+// configured model has been proven usable. Only that model's abilities are
+// enabled; unverified/failed siblings remain disabled behind SmartDown gates.
+// Channel and ability rows commit in one transaction; caches are rebuilt only
+// after a successful commit.
+func EnableChannelModelForManualRecovery(channelId int, modelName string) error {
+	if channelId <= 0 {
+		return errors.New("channel ID is 0")
+	}
+	modelName = strings.TrimSpace(modelName)
+	if modelName == "" {
+		return errors.New("model name is empty")
+	}
+	if common.MemoryCacheEnabled {
+		channelStatusLock.Lock()
+		defer channelStatusLock.Unlock()
+	}
+	pollingLock := GetChannelPollingLock(channelId)
+	pollingLock.Lock()
+	defer pollingLock.Unlock()
+
 	err := DB.Transaction(func(tx *gorm.DB) error {
 		var channel Channel
-		if err := tx.First(&channel, channelId).Error; err != nil {
+		if err := lockForUpdate(tx).First(&channel, channelId).Error; err != nil {
 			return err
 		}
-		if channel.Status != common.ChannelStatusAutoDisabled {
-			return fmt.Errorf("channel %d is not auto-disabled", channelId)
+		if channel.Status == common.ChannelStatusManuallyDisabled {
+			return fmt.Errorf("channel %d is manually disabled", channelId)
 		}
-		info := channel.GetOtherInfo()
-		delete(info, "status_reason")
-		delete(info, "status_time")
-		channel.Status = common.ChannelStatusEnabled
-		channel.SetOtherInfo(info)
-		if err := tx.Model(&Channel{}).Where("id = ?", channelId).Updates(map[string]any{
-			"status": channel.Status, "other_info": channel.OtherInfo,
-		}).Error; err != nil {
+		if channel.Status != common.ChannelStatusAutoDisabled && channel.Status != common.ChannelStatusEnabled {
+			return fmt.Errorf("channel %d status %d cannot be recovered", channelId, channel.Status)
+		}
+		if channel.Status == common.ChannelStatusAutoDisabled {
+			info := channel.GetOtherInfo()
+			delete(info, "status_reason")
+			delete(info, "status_time")
+			channel.SetOtherInfo(info)
+			result := tx.Model(&Channel{}).
+				Where("id = ? AND status = ?", channelId, common.ChannelStatusAutoDisabled).
+				Updates(map[string]any{"status": common.ChannelStatusEnabled, "other_info": channel.OtherInfo})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return fmt.Errorf("channel %d recovery lost status race", channelId)
+			}
+		}
+		result := tx.Model(&Ability{}).
+			Where("channel_id = ? AND model = ?", channelId, modelName).
+			Update("enabled", true)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return fmt.Errorf("channel %d model %s has no ability to recover", channelId, modelName)
+		}
+		stamp := time.Now().UnixMilli()
+		if err := tx.Model(&ChannelModelRecoveryState{}).
+			Where("channel_id = ? AND model = ? AND state <> ?", channelId, modelName, RecoveryStateRetired).
+			Updates(map[string]any{
+				"state": RecoveryStateHealthy, "generation": gorm.Expr("generation + 1"),
+				"lease_owner": "", "lease_until": int64(0), "next_probe_at": int64(0),
+				"canary_stage": 0, "canary_percent": 0, "canary_success": 0,
+				"reason": "", "last_error": "", "updated_at": stamp,
+			}).Error; err != nil {
 			return err
 		}
-		return tx.Model(&Ability{}).Where("channel_id = ?", channelId).Update("enabled", true).Error
+		return nil
 	})
 	if err != nil {
 		return err
@@ -830,154 +941,186 @@ func EnableChannelForSmartRecovery(channelId int) error {
 	return nil
 }
 
-func UpdateChannelStatus(channelId int, usingKey string, status int, reason string) bool {
+func updateChannelStatusInTx(tx *gorm.DB, channelId int, usingKey string, status int, reason string, now time.Time) (*Channel, bool, error) {
+	var channel Channel
+	if err := lockForUpdate(tx).First(&channel, channelId).Error; err != nil {
+		return nil, false, err
+	}
+	beforeStatus := channel.Status
+	beforeInfo := channel.ChannelInfo
+	changed := false
+	if channel.ChannelInfo.IsMultiKey {
+		handlerMultiKeyUpdate(&channel, usingKey, status, reason)
+		changed = beforeStatus != channel.Status || !reflect.DeepEqual(beforeInfo, channel.ChannelInfo)
+	} else {
+		if channel.Status == status {
+			return nil, false, nil
+		}
+		info := channel.GetOtherInfo()
+		info["status_reason"] = reason
+		info["status_time"] = common.GetTimestamp()
+		channel.SetOtherInfo(info)
+		channel.Status = status
+		changed = true
+	}
+	if !changed {
+		return nil, false, nil
+	}
+	if err := channel.saveStatusStateWithDB(tx); err != nil {
+		return nil, false, err
+	}
+	if beforeStatus != channel.Status {
+		if err := channel.UpdateAbilities(tx); err != nil {
+			return nil, false, err
+		}
+		if err := reconcileRecoveryModelsTx(tx, channel.Id, channel.GetModels(), channel.Status, now); err != nil {
+			return nil, false, err
+		}
+	}
+	return &channel, true, nil
+}
+
+func UpdateChannelStatus(channelId int, usingKey string, status int, reason string) (bool, error) {
 	if common.MemoryCacheEnabled {
 		channelStatusLock.Lock()
 		defer channelStatusLock.Unlock()
 	}
-
-	// ChannelInfo stores both multi-key status and the polling cursor. Hold the
-	// same per-channel lock from the first read through persistence so neither
-	// writer can save a stale JSON snapshot over the other.
 	pollingLock := GetChannelPollingLock(channelId)
 	pollingLock.Lock()
 	defer pollingLock.Unlock()
 
-	if common.MemoryCacheEnabled {
-		channelCache, _ := CacheGetChannel(channelId)
-		if channelCache == nil {
-			return false
-		}
-		if channelCache.ChannelInfo.IsMultiKey {
-			beforeStatus := channelCache.Status
-			// 如果是多Key模式，更新缓存中的状态
-			handlerMultiKeyUpdate(channelCache, usingKey, status, reason)
-			if beforeStatus != channelCache.Status {
-				CacheUpdateChannelStatus(channelId, channelCache.Status)
-			}
-			//CacheUpdateChannel(channelCache)
-			//return true
-		} else {
-			// 如果缓存渠道存在，且状态已是目标状态，直接返回
-			if channelCache.Status == status {
-				return false
-			}
-			CacheUpdateChannelStatus(channelId, status)
-		}
+	var updated *Channel
+	changed := false
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var err error
+		updated, changed, err = updateChannelStatusInTx(tx, channelId, usingKey, status, reason, time.Now())
+		return err
+	})
+	if err != nil {
+		return false, fmt.Errorf("update channel %d status atomically: %w", channelId, err)
 	}
+	if changed && updated != nil {
+		CacheUpdateChannel(updated)
+	}
+	return changed, nil
+}
 
-	shouldUpdateAbilities := false
+func updateChannelStatusesWithMutation(ids []int, status int, reason string, mutation func(*gorm.DB) error) (int, error) {
+	unique := make(map[int]struct{}, len(ids))
+	ordered := make([]int, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			return 0, fmt.Errorf("invalid channel id %d", id)
+		}
+		if _, ok := unique[id]; ok {
+			continue
+		}
+		unique[id] = struct{}{}
+		ordered = append(ordered, id)
+	}
+	sort.Ints(ordered)
+	if common.MemoryCacheEnabled {
+		channelStatusLock.Lock()
+		defer channelStatusLock.Unlock()
+	}
+	locks := make([]*sync.Mutex, 0, len(ordered))
+	for _, id := range ordered {
+		lock := GetChannelPollingLock(id)
+		lock.Lock()
+		locks = append(locks, lock)
+	}
 	defer func() {
-		if shouldUpdateAbilities {
-			err := UpdateAbilityStatus(channelId, status == common.ChannelStatusEnabled)
-			if err != nil {
-				common.SysLog(fmt.Sprintf("failed to update ability status: channel_id=%d, error=%v", channelId, err))
-			}
+		for i := len(locks) - 1; i >= 0; i-- {
+			locks[i].Unlock()
 		}
 	}()
-	channel, err := GetChannelById(channelId, true)
-	if err != nil {
-		return false
-	} else {
-		if channel.Status == status {
-			return false
-		}
 
-		if channel.ChannelInfo.IsMultiKey {
-			beforeStatus := channel.Status
-			handlerMultiKeyUpdate(channel, usingKey, status, reason)
-			if beforeStatus != channel.Status {
-				shouldUpdateAbilities = true
+	updated := make([]*Channel, 0, len(ordered))
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		now := time.Now()
+		for _, id := range ordered {
+			channel, changed, err := updateChannelStatusInTx(tx, id, "", status, reason, now)
+			if err != nil {
+				return fmt.Errorf("update channel %d in batch: %w", id, err)
 			}
-		} else {
-			info := channel.GetOtherInfo()
-			info["status_reason"] = reason
-			info["status_time"] = common.GetTimestamp()
-			channel.SetOtherInfo(info)
-			channel.Status = status
-			shouldUpdateAbilities = true
+			if changed && channel != nil {
+				updated = append(updated, channel)
+			}
 		}
-		err = channel.saveStatusState()
-		if err != nil {
-			common.SysLog(fmt.Sprintf("failed to update channel status: channel_id=%d, status=%d, error=%v", channel.Id, status, err))
-			return false
+		if mutation != nil {
+			return mutation(tx)
 		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
 	}
-	return true
+	for _, channel := range updated {
+		CacheUpdateChannel(channel)
+	}
+	return len(updated), nil
+}
+
+func UpdateChannelStatuses(ids []int, status int, reason string) (int, error) {
+	return updateChannelStatusesWithMutation(ids, status, reason, nil)
+}
+
+func updateChannelsByTag(tag string, mutate func(*Channel)) error {
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var channels []*Channel
+		if err := lockForUpdate(tx).Where("tag = ?", tag).Order("id ASC").Find(&channels).Error; err != nil {
+			return err
+		}
+		now := time.Now()
+		for _, channel := range channels {
+			mutate(channel)
+			if err := channel.updateInTx(tx, now); err != nil {
+				return fmt.Errorf("update channel %d by tag %s: %w", channel.Id, tag, err)
+			}
+		}
+		return nil
+	})
 }
 
 func EnableChannelByTag(tag string) error {
-	err := DB.Model(&Channel{}).Where("tag = ?", tag).Update("status", common.ChannelStatusEnabled).Error
-	if err != nil {
-		return err
-	}
-	err = UpdateAbilityStatusByTag(tag, true)
-	return err
+	return updateChannelsByTag(tag, func(channel *Channel) {
+		channel.Status = common.ChannelStatusEnabled
+	})
 }
 
 func DisableChannelByTag(tag string) error {
-	err := DB.Model(&Channel{}).Where("tag = ?", tag).Update("status", common.ChannelStatusManuallyDisabled).Error
-	if err != nil {
-		return err
-	}
-	err = UpdateAbilityStatusByTag(tag, false)
-	return err
+	return updateChannelsByTag(tag, func(channel *Channel) {
+		channel.Status = common.ChannelStatusManuallyDisabled
+	})
 }
 
 func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *string, group *string, priority *int64, weight *uint, paramOverride *string, headerOverride *string) error {
-	updateData := Channel{}
-	shouldReCreateAbilities := false
-	updatedTag := tag
-	// 如果 newTag 不为空且不等于 tag，则更新 tag
-	if newTag != nil && *newTag != tag {
-		updateData.Tag = newTag
-		updatedTag = *newTag
-	}
-	if modelMapping != nil {
-		updateData.ModelMapping = modelMapping
-	}
-	if models != nil && *models != "" {
-		shouldReCreateAbilities = true
-		updateData.Models = *models
-	}
-	if group != nil && *group != "" {
-		shouldReCreateAbilities = true
-		updateData.Group = *group
-	}
-	if priority != nil {
-		updateData.Priority = priority
-	}
-	if weight != nil {
-		updateData.Weight = weight
-	}
-	if paramOverride != nil {
-		updateData.ParamOverride = paramOverride
-	}
-	if headerOverride != nil {
-		updateData.HeaderOverride = headerOverride
-	}
-
-	err := DB.Model(&Channel{}).Where("tag = ?", tag).Updates(updateData).Error
-	if err != nil {
-		return err
-	}
-	if shouldReCreateAbilities {
-		channels, err := GetChannelsByTag(updatedTag, false, false)
-		if err == nil {
-			for _, channel := range channels {
-				err = channel.UpdateAbilities(nil)
-				if err != nil {
-					common.SysLog(fmt.Sprintf("failed to update abilities: channel_id=%d, tag=%s, error=%v", channel.Id, channel.GetTag(), err))
-				}
-			}
+	return updateChannelsByTag(tag, func(channel *Channel) {
+		if newTag != nil && *newTag != tag {
+			channel.Tag = newTag
 		}
-	} else {
-		err := UpdateAbilityByTag(tag, newTag, priority, weight)
-		if err != nil {
-			return err
+		if modelMapping != nil {
+			channel.ModelMapping = modelMapping
 		}
-	}
-	return nil
+		if models != nil && *models != "" {
+			channel.Models = *models
+		}
+		if group != nil && *group != "" {
+			channel.Group = *group
+		}
+		if priority != nil {
+			channel.Priority = priority
+		}
+		if weight != nil {
+			channel.Weight = weight
+		}
+		if paramOverride != nil {
+			channel.ParamOverride = paramOverride
+		}
+		if headerOverride != nil {
+			channel.HeaderOverride = headerOverride
+		}
+	})
 }
 
 func UpdateChannelUsedQuota(id int, quota int) {
@@ -995,13 +1138,19 @@ func updateChannelUsedQuota(id int, quota int) error {
 }
 
 func DeleteChannelByStatus(status int64) (int64, error) {
-	result := DB.Where("status = ?", status).Delete(&Channel{})
-	return result.RowsAffected, result.Error
+	var ids []int
+	if err := DB.Model(&Channel{}).Where("status = ?", status).Pluck("id", &ids).Error; err != nil {
+		return 0, err
+	}
+	return BatchDeleteChannels(ids)
 }
 
 func DeleteDisabledChannel() (int64, error) {
-	result := DB.Where("status = ? or status = ?", common.ChannelStatusAutoDisabled, common.ChannelStatusManuallyDisabled).Delete(&Channel{})
-	return result.RowsAffected, result.Error
+	var ids []int
+	if err := DB.Model(&Channel{}).Where("status = ? or status = ?", common.ChannelStatusAutoDisabled, common.ChannelStatusManuallyDisabled).Pluck("id", &ids).Error; err != nil {
+		return 0, err
+	}
+	return BatchDeleteChannels(ids)
 }
 
 func GetPaginatedTags(offset int, limit int) ([]*string, error) {

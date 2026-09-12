@@ -84,8 +84,6 @@ func RecordRelaySuccess(chId int, model string) {
 	consecStore[k] = 0
 	chanStreakStore[chId] = 0
 	consecMu.Unlock()
-	// Any successful model proves a relay channel is not account-wide dead.
-	ClearQuotaFailureEvidence(chId)
 }
 
 func RecordRelayFailure(chId int, model string) {
@@ -131,7 +129,6 @@ func PruneRelayStatsForChannel(chId int) {
 	}
 	delete(chanStreakStore, chId)
 	consecMu.Unlock()
-	ClearQuotaFailureEvidence(chId)
 }
 
 // RelayStatSample 返回 (样本数, 成功数, 失败数)

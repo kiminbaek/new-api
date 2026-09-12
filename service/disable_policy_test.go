@@ -6,7 +6,9 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func timeNowUnixPlus(seconds float64) int64 {
@@ -21,6 +24,7 @@ func timeNowUnixPlus(seconds float64) int64 {
 }
 
 func resetSmartState() {
+	recoveryCacheReady.Store(true)
 	smartDownMu.Lock()
 	smartDown = map[string]*SmartDownState{}
 	smartDownMu.Unlock()
@@ -31,9 +35,9 @@ func resetSmartState() {
 	consecStore = map[string]int{}
 	chanStreakStore = map[int]int{}
 	consecMu.Unlock()
-	quotaEvidenceMu.Lock()
-	quotaEvidence = map[int]map[string]int64{}
-	quotaEvidenceMu.Unlock()
+	missingMu.Lock()
+	missingStore = map[string]int{}
+	missingMu.Unlock()
 }
 
 func TestClassifyChannelError_TimeoutNeverKillsChannel(t *testing.T) {
@@ -89,75 +93,39 @@ func TestClassifyChannelError_QuotaDefaultsToModelLevel(t *testing.T) {
 	accountDisabled := types.NewErrorWithStatusCode(errors.New("This organization has been disabled."),
 		types.ErrorCodeDoRequestFailed, http.StatusForbidden)
 	assert.Equal(t, "account_disabled", AttributeChannelError(accountDisabled).Category)
-	assert.Equal(t, ActionDisableChannel, ClassifyChannelError(accountDisabled, true),
-		"explicit account suspension is channel-wide evidence")
+	assert.Equal(t, ActionDisableModel, ClassifyChannelError(accountDisabled, true),
+		"even explicit account suspension starts model-level on relay-of-relay channels")
 }
 
-func TestSingleModelQuotaNeverUsesWholeChannelStreak(t *testing.T) {
+func TestApplyDisablePolicyQuotaAcrossModelsNeverDisablesWholeChannel(t *testing.T) {
 	resetSmartState()
 	oldSmart, oldAuto := common.SmartAutoDisableEnabled, common.AutomaticDisableChannelEnabled
-	oldDisable := smartDisableChannelImpl
 	common.SmartAutoDisableEnabled, common.AutomaticDisableChannelEnabled = true, true
 	defer func() {
 		common.SmartAutoDisableEnabled, common.AutomaticDisableChannelEnabled = oldSmart, oldAuto
-		smartDisableChannelImpl = oldDisable
-	}()
-	disabled := 0
-	smartDisableChannelImpl = func(types.ChannelError, string) { disabled++ }
-	err := types.WithOpenAIError(types.OpenAIError{Message: "credit insufficient balance: balance=0", Code: "insufficient_user_quota"}, http.StatusBadRequest)
-	ch := types.ChannelError{ChannelId: 53, ChannelName: "relay", AutoBan: true}
-	for i := 0; i < smartChannelFastQuarantineStreak; i++ {
-		RecordRelayFailure(53, "glm-5.3-flash")
-	}
-	action, handled := ApplyDisablePolicy(ch, "glm-5.3-flash", err)
-	assert.True(t, handled)
-	assert.NotEqual(t, ActionDisableChannel, action)
-	assert.Zero(t, disabled)
-}
-
-func TestQuotaEvidenceRequiresDistinctModelsAndSuccessClearsIt(t *testing.T) {
-	resetSmartState()
-	assert.Equal(t, 1, RecordQuotaModelFailure(53, "glm-5.3-flash"))
-	assert.Equal(t, 1, RecordQuotaModelFailure(53, "glm-5.3-flash"), "same model must not escalate")
-	RecordRelaySuccess(53, "qwen3.8-flash")
-	assert.Equal(t, 1, RecordQuotaModelFailure(53, "glm-5.3"), "any model success proves channel-wide outage false")
-	assert.Equal(t, 2, RecordQuotaModelFailure(53, "mimo-v2.5"))
-}
-
-func TestApplyDisablePolicyQuotaEscalatesOnlyAcrossModels(t *testing.T) {
-	resetSmartState()
-	oldSmart, oldAuto := common.SmartAutoDisableEnabled, common.AutomaticDisableChannelEnabled
-	oldDisable := smartDisableChannelImpl
-	common.SmartAutoDisableEnabled, common.AutomaticDisableChannelEnabled = true, true
-	defer func() {
-		common.SmartAutoDisableEnabled, common.AutomaticDisableChannelEnabled = oldSmart, oldAuto
-		smartDisableChannelImpl = oldDisable
 	}()
 
-	disabled := 0
-	smartDisableChannelImpl = func(types.ChannelError, string) { disabled++ }
 	err := types.WithOpenAIError(types.OpenAIError{Message: "credit insufficient balance: balance=0", Type: "upstream_error", Code: "insufficient_user_quota"}, http.StatusBadRequest)
 	ch := types.ChannelError{ChannelId: 53, ChannelName: "relay", AutoBan: true}
 
-	RecordRelayFailure(53, "glm-5.3-flash")
-	action, handled := ApplyDisablePolicy(ch, "glm-5.3-flash", err)
-	assert.True(t, handled)
-	assert.NotEqual(t, ActionDisableChannel, action)
-	assert.Zero(t, disabled)
-
-	RecordRelayFailure(53, "glm-5.3")
-	action, handled = ApplyDisablePolicy(ch, "glm-5.3", err)
-	assert.True(t, handled)
-	assert.Equal(t, ActionDisableChannel, action)
-	assert.Equal(t, 1, disabled)
+	for _, modelName := range []string{"glm-5.3-flash", "glm-5.3"} {
+		for i := 0; i < smartHardFailStreak; i++ {
+			RecordRelayFailure(53, modelName)
+		}
+		action, handled := ApplyDisablePolicy(ch, modelName, err)
+		assert.True(t, handled)
+		assert.NotEqual(t, ActionDisableChannel, action,
+			"multiple failed model pools are still model-scoped evidence")
+	}
 }
 
-func TestClassifyChannelError_KeyFailureDisablesVisibleChannel(t *testing.T) {
+func TestClassifyChannelError_KeyFailureStartsModelLevel(t *testing.T) {
 	err := types.NewErrorWithStatusCode(errors.New("Incorrect API key provided"),
 		types.ErrorCodeDoRequestFailed, http.StatusUnauthorized)
-	// Smart mode must never create a hidden, persistent single-key disable.
-	assert.Equal(t, ActionDisableChannel, ClassifyChannelError(err, true))
-	assert.Equal(t, ActionDisableChannel, ClassifyChannelError(err, false))
+	// Even credentials may be model/key-pool scoped on relay-of-relay channels.
+	// Only independently quarantining every configured model may escalate to L2.
+	assert.Equal(t, ActionDisableModel, ClassifyChannelError(err, true))
+	assert.Equal(t, ActionDisableModel, ClassifyChannelError(err, false))
 }
 
 func TestShouldDisableModelNow_SingleBlipIsIgnored(t *testing.T) {
@@ -220,81 +188,6 @@ func TestShouldDisableModelNow_ModelsAreIsolated(t *testing.T) {
 	assert.False(t, other, "sibling model on the same channel must be unaffected")
 }
 
-func TestSmartDownRegistryAndProbeBackoff(t *testing.T) {
-	resetSmartState()
-	RegisterSmartDown(7, "ch7", "gpt-4o", SmartDownModel, "boom")
-	assert.True(t, IsSmartDown(7, "gpt-4o"))
-	assert.False(t, IsSmartDown(7, "claude-sonnet-4"))
-
-	// 首次探测未到期
-	assert.Empty(t, DueSmartProbes(5))
-
-	// 手工把到期时间提前，模拟时间流逝
-	smartDownMu.Lock()
-	smartDown[smartDownKey(7, "gpt-4o")].NextProbeAt = 0
-	smartDownMu.Unlock()
-
-	due := DueSmartProbes(5)
-	assert.Len(t, due, 1)
-	// 已在探测中的项不会被重复取出
-	assert.Empty(t, DueSmartProbes(5))
-
-	// 探测失败 → 退避递增
-	FinishSmartProbe(7, "gpt-4o", false, "still broken")
-	smartDownMu.Lock()
-	first := smartDown[smartDownKey(7, "gpt-4o")].NextProbeAt
-	attempts := smartDown[smartDownKey(7, "gpt-4o")].Attempts
-	smartDown[smartDownKey(7, "gpt-4o")].NextProbeAt = 0
-	smartDownMu.Unlock()
-	assert.Equal(t, 1, attempts)
-	assert.Greater(t, first, int64(0))
-
-	DueSmartProbes(5)
-	FinishSmartProbe(7, "gpt-4o", false, "still broken")
-	smartDownMu.Lock()
-	second := smartDown[smartDownKey(7, "gpt-4o")].NextProbeAt
-	smartDownMu.Unlock()
-	assert.Greater(t, second, first, "backoff must grow after each failed probe")
-
-	// 探测成功 → 记录移除（恢复上线）
-	smartDownMu.Lock()
-	smartDown[smartDownKey(7, "gpt-4o")].NextProbeAt = 0
-	smartDownMu.Unlock()
-	DueSmartProbes(5)
-	FinishSmartProbe(7, "gpt-4o", true, "")
-	assert.False(t, IsSmartDown(7, "gpt-4o"))
-}
-
-func TestFinishSmartProbeOnlyFullyRecoversChannelAfterLastModel(t *testing.T) {
-	resetSmartState()
-	RegisterSmartDown(7, "ch7", "m-a", SmartDownModel, "L2 quarantine")
-	RegisterSmartDown(7, "ch7", "m-b", SmartDownModel, "L2 quarantine")
-
-	fullyRecovered := FinishSmartProbe(7, "m-a", true, "")
-	assert.False(t, fullyRecovered, "one recovered model must not release the whole L2 channel")
-	assert.False(t, IsSmartDown(7, "m-a"))
-	assert.True(t, IsSmartDown(7, "m-b"), "unverified sibling model must stay quarantined")
-
-	fullyRecovered = FinishSmartProbe(7, "m-b", true, "")
-	assert.True(t, fullyRecovered, "the last recovered model may release the L2 channel")
-	assert.False(t, IsSmartDown(7, "m-b"))
-}
-
-func TestSmartDownBackoffIsCapped(t *testing.T) {
-	resetSmartState()
-	RegisterSmartDown(7, "ch7", "gpt-4o", SmartDownModel, "boom")
-	smartDownMu.Lock()
-	smartDown[smartDownKey(7, "gpt-4o")].Attempts = 40
-	smartDownMu.Unlock()
-	FinishSmartProbe(7, "gpt-4o", false, "boom")
-	smartDownMu.Lock()
-	next := smartDown[smartDownKey(7, "gpt-4o")].NextProbeAt
-	smartDownMu.Unlock()
-	// 封顶 30 分钟：不能因为移位溢出变成负数或超长
-	assert.LessOrEqual(t, next, timeNowUnixPlus(smartProbeMaxInterval.Seconds()+5))
-	assert.Greater(t, next, timeNowUnixPlus(0))
-}
-
 func TestClearSmartDownByChannel(t *testing.T) {
 	resetSmartState()
 	RegisterSmartDown(7, "ch7", "gpt-4o", SmartDownModel, "boom")
@@ -315,7 +208,7 @@ func TestSmartDownModelsSnapshot(t *testing.T) {
 	assert.Len(t, down, 1, "channel-level records must not appear as models")
 }
 
-// ===== 渠道级连续失败 / 快速隔离 / 陈旧探测回收 / 统计清理 =====
+// ===== 渠道级观测统计 / 历史恢复 / 陈旧探测回收 / 统计清理 =====
 
 func TestChannelStreakAccumulatesAcrossModelsAndResetsOnAnySuccess(t *testing.T) {
 	resetSmartState()
@@ -330,25 +223,19 @@ func TestChannelStreakAccumulatesAcrossModelsAndResetsOnAnySuccess(t *testing.T)
 	assert.Equal(t, 0, RelayChannelConsecutiveFailures(7))
 }
 
-func TestQuarantineWholeChannelOnChannelStreak(t *testing.T) {
+func TestChannelWideFailureCountCannotFabricateModelFailures(t *testing.T) {
 	resetSmartState()
 	oldFetcher := smartChannelModelsFetcher
-	oldDisable := smartDisableChannelImpl
-	defer func() { smartChannelModelsFetcher = oldFetcher; smartDisableChannelImpl = oldDisable }()
+	defer func() { smartChannelModelsFetcher = oldFetcher }()
 
-	// ApplyDisablePolicy 需要「智能开关 + 上游自动禁用总开关」同时开启才生效
 	oldSmart := common.SmartAutoDisableEnabled
 	oldAutoBan := common.AutomaticDisableChannelEnabled
 	common.SmartAutoDisableEnabled = true
 	common.AutomaticDisableChannelEnabled = true
 	defer func() { common.SmartAutoDisableEnabled = oldSmart; common.AutomaticDisableChannelEnabled = oldAutoBan }()
 
-	smartChannelModelsFetcher = func(int) ([]string, error) { return []string{"m-a", "m-b"}, nil }
-	var disabledReason string
-	smartDisableChannelImpl = func(_ types.ChannelError, reason string) { disabledReason = reason }
-
-	// 渠道级连败 16 次（跨两模型摊薄），单模型只有 8 连败（刚好到 per-model 阈值）
-	for i := 0; i < 8; i++ {
+	smartChannelModelsFetcher = func(int) ([]string, error) { return []string{"m-a", "m-b", "m-good"}, nil }
+	for i := 0; i < smartHardFailStreak*4; i++ {
 		RecordRelayFailure(7, "m-a")
 		RecordRelayFailure(7, "m-b")
 	}
@@ -358,74 +245,20 @@ func TestQuarantineWholeChannelOnChannelStreak(t *testing.T) {
 	action, handled := ApplyDisablePolicy(chErr, "m-a", err)
 
 	assert.True(t, handled)
-	assert.Equal(t, ActionDisableChannel, action, "channel-level streak must fast-quarantine")
-	assert.True(t, IsSmartDown(7, "m-a"))
-	assert.True(t, IsSmartDown(7, "m-b"), "ALL models must be registered so probes can recover them")
-	assert.Contains(t, disabledReason, smartL2Marker)
-	assert.Contains(t, disabledReason, smartL2ModelsPrefix, "restore protocol must persist every quarantined model")
-	assert.Contains(t, disabledReason, `["m-a","m-b"]`)
+	assert.NotEqual(t, ActionDisableChannel, action,
+		"failures from some models must never fabricate failure evidence for an untested usable model")
+	assert.False(t, IsSmartDown(7, "m-good"))
 }
 
-func TestRestoreSmartDownFromNewL2ReasonRestoresEveryModel(t *testing.T) {
+func TestAnyModelSuccessClearsChannelObservationStreak(t *testing.T) {
 	resetSmartState()
-	ch := &model.Channel{Id: 17, Name: "l2-new", Models: "m-a,m-b"}
-	ch.SetOtherInfo(map[string]interface{}{
-		"status_reason": formatSmartL2Reason("全部模型均已被智能下线", []string{"m-a", "m-b"}),
-	})
-
-	assert.True(t, restoreSmartDownForChannel(ch))
-	assert.True(t, IsSmartDown(17, "m-a"))
-	assert.True(t, IsSmartDown(17, "m-b"))
-	assert.False(t, FinishSmartProbe(17, "m-a", true, ""), "one probe must not release an L2 channel")
-	assert.True(t, FinishSmartProbe(17, "m-b", true, ""), "only the last verified model may release the channel")
-}
-
-func TestRestoreSmartDownFromLegacyReasonUsesConfiguredModels(t *testing.T) {
-	resetSmartState()
-	ch := &model.Channel{Id: 18, Name: "l2-legacy", Models: "m-a,m-b,m-c"}
-	ch.SetOtherInfo(map[string]interface{}{
-		"status_reason": "该渠道全部模型均已被智能下线（最后一个：m-c）",
-	})
-
-	assert.True(t, restoreSmartDownForChannel(ch))
-	assert.True(t, IsSmartDown(18, "m-a"))
-	assert.True(t, IsSmartDown(18, "m-b"))
-	assert.True(t, IsSmartDown(18, "m-c"))
-	assert.False(t, FinishSmartProbe(18, "m-c", true, ""), "legacy restore must not trust only the last model")
-}
-
-func TestQuarantineNotTriggeredWhenOneModelSucceeds(t *testing.T) {
-	resetSmartState()
-	// m-a 连败 15 次，但中间夹着 m-b 的成功 → 渠道计数被清零，不触发隔离
 	for i := 0; i < 15; i++ {
 		RecordRelayFailure(7, "m-a")
 		if i%3 == 0 {
 			RecordRelaySuccess(7, "m-b")
 		}
 	}
-	assert.Less(t, RelayChannelConsecutiveFailures(7), smartChannelFastQuarantineStreak)
-}
-
-func TestDueSmartProbesReclaimsStaleProbing(t *testing.T) {
-	resetSmartState()
-	RegisterSmartDown(7, "ch7", "gpt-test", SmartDownModel, "boom")
-	now := time.Now().Unix()
-
-	// 在途且未超时：不可认领
-	smartDownMu.Lock()
-	st := smartDown[smartDownKey(7, "gpt-test")]
-	st.Probing = true
-	st.ProbeStartedAt = now - 10
-	smartDownMu.Unlock()
-	assert.Empty(t, DueSmartProbes(5))
-
-	// 在途但已超过 smartProbeStaleSeconds：必须重新认领，不能永久卡死
-	smartDownMu.Lock()
-	st.ProbeStartedAt = now - smartProbeStaleSeconds - 10
-	smartDownMu.Unlock()
-	due := DueSmartProbes(5)
-	assert.Len(t, due, 1)
-	assert.Equal(t, int64(now), due[0].ProbeStartedAt)
+	assert.Less(t, RelayChannelConsecutiveFailures(7), 15)
 }
 
 func TestPruneRelayStatsForChannel(t *testing.T) {
@@ -445,7 +278,7 @@ func TestPruneRelayStatsForChannel(t *testing.T) {
 	assert.Equal(t, 1, s8)
 }
 
-func TestDisableChannelSmartModeDoesNotPersistSingleKeyDisable(t *testing.T) {
+func TestApplyDisablePolicyRespectsAutoBanWithoutPersistingSingleKeyDisable(t *testing.T) {
 	previousSmart := common.SmartAutoDisableEnabled
 	previousAutomatic := common.AutomaticDisableChannelEnabled
 	common.SmartAutoDisableEnabled = true
@@ -455,13 +288,96 @@ func TestDisableChannelSmartModeDoesNotPersistSingleKeyDisable(t *testing.T) {
 		common.AutomaticDisableChannelEnabled = previousAutomatic
 	})
 
-	usedKey := "key-a"
 	channelError := types.ChannelError{
 		ChannelId: 77, ChannelName: "multi", IsMultiKey: true,
-		UsingKey: usedKey, AutoBan: false,
+		UsingKey: "key-a", AutoBan: false,
 	}
-	// AutoBan=false means no DB is needed; this verifies smart-mode key stripping
-	// at the visible channel disable entry point without side effects.
-	DisableChannel(channelError, "invalid key")
+	err := types.NewErrorWithStatusCode(errors.New("invalid key"), types.ErrorCodeDoRequestFailed, http.StatusUnauthorized)
+	action, handled := ApplyDisablePolicy(channelError, "model-a", err)
+	assert.True(t, handled)
+	assert.Equal(t, ActionNone, action)
 	assert.Equal(t, "key-a", channelError.UsingKey, "input value remains immutable")
+}
+
+func createDurablePolicyChannel(t *testing.T, id int, models ...string) model.Channel {
+	t.Helper()
+	setupManualRecoverTest(t)
+	ch := model.Channel{Id: id, Name: "relay", Key: "key", Models: strings.Join(models, ","), Status: common.ChannelStatusEnabled}
+	require.NoError(t, model.DB.Create(&ch).Error)
+	for _, mdl := range models {
+		require.NoError(t, model.DB.Create(&model.Ability{Group: "default", Model: mdl, ChannelId: ch.Id, Enabled: true}).Error)
+	}
+	oldFetcher := smartChannelModelsFetcher
+	smartChannelModelsFetcher = func(channelID int) ([]string, error) {
+		if channelID != ch.Id {
+			return nil, fmt.Errorf("unexpected channel %d", channelID)
+		}
+		return models, nil
+	}
+	t.Cleanup(func() { smartChannelModelsFetcher = oldFetcher })
+	return ch
+}
+
+func TestCanaryModelVetoesWholeChannelDisable(t *testing.T) {
+	resetSmartState()
+	ch := createDurablePolicyChannel(t, 71, "a", "b")
+	now := time.Now()
+	_, err := model.QuarantineChannelModel(ch.Id, ch.Name, "a", "isolated", `{}`, []string{"a", "b"}, now)
+	require.NoError(t, err)
+	claims, err := model.ClaimDueRecoveryStates("test", 1, now, time.Minute)
+	require.NoError(t, err)
+	require.Len(t, claims, 1)
+	_, err = model.FinishRecoveryProbeSuccess(claims[0], canaryPercents[1], now.Add(time.Second))
+	require.NoError(t, err)
+	row, err := model.GetChannelModelRecoveryState(ch.Id, "a")
+	require.NoError(t, err)
+	cacheRecoveryRow(row)
+	assert.False(t, IsSmartDown(ch.Id, "a"), "a successful canary is not down")
+
+	action := disableModelOnChannel(types.ChannelError{ChannelId: ch.Id, ChannelName: ch.Name, AutoBan: true}, "b", "failed", types.NewErrorWithStatusCode(errors.New("boom"), types.ErrorCodeDoRequestFailed, http.StatusBadGateway))
+	assert.Equal(t, ActionDisableModel, action)
+	var stored model.Channel
+	require.NoError(t, model.DB.First(&stored, ch.Id).Error)
+	assert.Equal(t, common.ChannelStatusEnabled, stored.Status, "one recovered canary must veto whole-channel L2")
+}
+
+func TestAllModelsMissingEscalatesThroughSharedL2Policy(t *testing.T) {
+	resetSmartState()
+	chModel := createDurablePolicyChannel(t, 72, "a", "b")
+	ch := types.ChannelError{ChannelId: chModel.Id, ChannelName: chModel.Name, AutoBan: true}
+	missing := types.NewErrorWithStatusCode(errors.New("model not found"), types.ErrorCodeBadResponse, http.StatusNotFound)
+	for i := 0; i < smartMissingStreak; i++ {
+		checkModelMissing(ch, "a", missing)
+	}
+	assert.True(t, IsSmartDown(ch.ChannelId, "a"))
+	var stored model.Channel
+	require.NoError(t, model.DB.First(&stored, ch.ChannelId).Error)
+	assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+	for i := 0; i < smartMissingStreak; i++ {
+		checkModelMissing(ch, "b", missing)
+	}
+	assert.True(t, IsSmartDown(ch.ChannelId, "b"))
+	require.NoError(t, model.DB.First(&stored, ch.ChannelId).Error)
+	assert.Equal(t, common.ChannelStatusAutoDisabled, stored.Status, "the last independently missing model must enter shared L2")
+}
+
+func TestSmartRouteFailsClosedUntilDurableStateLoaded(t *testing.T) {
+	resetSmartState()
+	oldSmart := common.SmartAutoDisableEnabled
+	oldAutomatic := common.AutomaticDisableChannelEnabled
+	common.SmartAutoDisableEnabled = true
+	common.AutomaticDisableChannelEnabled = true
+	t.Cleanup(func() {
+		common.SmartAutoDisableEnabled = oldSmart
+		common.AutomaticDisableChannelEnabled = oldAutomatic
+		recoveryCacheReady.Store(true)
+	})
+
+	recoveryCacheReady.Store(false)
+	assert.True(t, SmartRouteBlocked(99, "gpt"), "unverified durable state must fail closed")
+	assert.True(t, IsSmartDown(99, "gpt"))
+
+	recoveryCacheReady.Store(true)
+	assert.False(t, SmartRouteBlocked(99, "gpt"), "verified empty state may route")
+	assert.False(t, IsSmartDown(99, "gpt"))
 }

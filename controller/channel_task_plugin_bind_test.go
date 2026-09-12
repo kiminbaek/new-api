@@ -31,7 +31,7 @@ func setupTaskPluginBindChannelTest(t *testing.T) {
 	sqlDB, err := database.DB()
 	require.NoError(t, err)
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, database.AutoMigrate(&model.Channel{}, &model.Ability{}, &model.CasbinRule{}, &model.AuthzRole{}, &model.Log{}, &model.User{}))
+	require.NoError(t, database.AutoMigrate(&model.Channel{}, &model.Ability{}, &model.ChannelModelRecoveryState{}, &model.TaskPlugin{}, &model.CasbinRule{}, &model.AuthzRole{}, &model.Log{}, &model.User{}))
 	model.DB = database
 	model.LOG_DB = database
 	require.NoError(t, authz.Init(database))
@@ -128,4 +128,98 @@ export function parseTaskResult() { return {}; }
 	UpdateChannel(context)
 	assert.Contains(t, recorder.Body.String(), "task plugin channels require the task_plugin.bind permission")
 	assert.Contains(t, recorder.Body.String(), `"success":false`)
+}
+
+func TestDisabledTaskPluginCannotBindNewChannel(t *testing.T) {
+	setupTaskPluginBindChannelTest(t)
+	const key = "disabled-channel-bind"
+	source := `
+export const meta = {apiVersion: 1, key: "disabled-channel-bind", name: "Disabled", version: "1.0.0", author: {name: "Test"}, models: ["doc"], fetchMode: "per_task"};
+export function buildSubmitRequest() { return {}; }
+export function parseSubmitResponse() { return {}; }
+export function buildQueryRequest() { return {}; }
+export function parseTaskResult() { return {}; }
+`
+	_, err := jsplugin.DefaultRegistry.Register(source, jsplugin.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { jsplugin.DefaultRegistry.Unregister(key) })
+	require.NoError(t, model.DB.Create(&model.TaskPlugin{Key: key, APIVersion: 1, Version: "1.0.0", Source: source, SourceHash: "hash", Enabled: false, Active: true}).Error)
+
+	body := `{"mode":"single","channel":{"type":61,"name":"disabled-plugin-channel","key":"sk","models":"doc","group":"default","base_url":"https://example.com","setting":"{\"task_plugin_key\":\"disabled-channel-bind\"}"}}`
+	response := postAddChannel(t, 1, common.RoleRootUser, body)
+	assert.Contains(t, response.Body.String(), `"success":false`)
+	assert.Contains(t, response.Body.String(), `task plugin \"disabled-channel-bind\" is disabled`)
+	var count int64
+	require.NoError(t, model.DB.Model(&model.Channel{}).Where("name = ?", "disabled-plugin-channel").Count(&count).Error)
+	assert.Zero(t, count)
+}
+
+func TestPatchWithoutTypeCannotRebindToDisabledTaskPlugin(t *testing.T) {
+	setupTaskPluginBindChannelTest(t)
+	for _, key := range []string{"patch-origin", "patch-disabled"} {
+		source := fmt.Sprintf(`
+export const meta = {apiVersion: 1, key: %q, name: "Patch", version: "1.0.0", author: {name: "Test"}, models: ["doc"], fetchMode: "per_task"};
+export function buildSubmitRequest() { return {}; }
+export function parseSubmitResponse() { return {}; }
+export function buildQueryRequest() { return {}; }
+export function parseTaskResult() { return {}; }
+`, key)
+		_, err := jsplugin.DefaultRegistry.Register(source, jsplugin.Options{})
+		require.NoError(t, err)
+		t.Cleanup(func() { jsplugin.DefaultRegistry.Unregister(key) })
+		require.NoError(t, model.DB.Create(&model.TaskPlugin{Key: key, APIVersion: 1, Version: "1.0.0", Source: source, SourceHash: key, Enabled: key == "patch-origin", Active: true}).Error)
+	}
+	baseURL := "https://example.com"
+	originalSetting := `{"task_plugin_key":"patch-origin"}`
+	channel := model.Channel{Type: constant.ChannelTypeTaskPlugin, Status: common.ChannelStatusEnabled, Name: "patch-channel", Models: "doc", Group: "default", Key: "sk", BaseURL: &baseURL, Setting: &originalSetting}
+	require.NoError(t, channel.Insert())
+
+	payload := fmt.Sprintf(`{"id":%d,"setting":"{\"task_plugin_key\":\"patch-disabled\"}"}`, channel.Id)
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Set("id", 1)
+	context.Set("role", common.RoleRootUser)
+	context.Request = httptest.NewRequest(http.MethodPut, "/api/channel", strings.NewReader(payload))
+	context.Request.Header.Set("Content-Type", "application/json")
+	UpdateChannel(context)
+	assert.Contains(t, recorder.Body.String(), `"success":false`)
+	assert.Contains(t, recorder.Body.String(), `task plugin \"patch-disabled\" is disabled`)
+	var stored model.Channel
+	require.NoError(t, model.DB.First(&stored, channel.Id).Error)
+	assert.Equal(t, "patch-origin", stored.GetSetting().TaskPluginKey)
+}
+
+func TestPatchWithoutTypeStillRequiresTaskPluginBindPermission(t *testing.T) {
+	setupTaskPluginBindChannelTest(t)
+	const key = "patch-permission"
+	source := `
+export const meta = {apiVersion: 1, key: "patch-permission", name: "Patch Permission", version: "1.0.0", author: {name: "Test"}, models: ["doc"], fetchMode: "per_task"};
+export function buildSubmitRequest() { return {}; }
+export function parseSubmitResponse() { return {}; }
+export function buildQueryRequest() { return {}; }
+export function parseTaskResult() { return {}; }
+`
+	_, err := jsplugin.DefaultRegistry.Register(source, jsplugin.Options{})
+	require.NoError(t, err)
+	t.Cleanup(func() { jsplugin.DefaultRegistry.Unregister(key) })
+	baseURL := "https://example.com"
+	originalSetting := `{"task_plugin_key":"patch-permission"}`
+	channel := model.Channel{Type: constant.ChannelTypeTaskPlugin, Status: common.ChannelStatusEnabled, Name: "patch-permission-channel", Models: "doc", Group: "default", Key: "sk", BaseURL: &baseURL, Setting: &originalSetting}
+	require.NoError(t, channel.Insert())
+
+	payload := fmt.Sprintf(`{"id":%d,"name":"forbidden-rename"}`, channel.Id)
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Set("id", 2)
+	context.Set("role", common.RoleAdminUser)
+	context.Request = httptest.NewRequest(http.MethodPut, "/api/channel", strings.NewReader(payload))
+	context.Request.Header.Set("Content-Type", "application/json")
+	UpdateChannel(context)
+	assert.Contains(t, recorder.Body.String(), `"success":false`)
+	assert.Contains(t, recorder.Body.String(), "task plugin channels require the task_plugin.bind permission")
+	var stored model.Channel
+	require.NoError(t, model.DB.First(&stored, channel.Id).Error)
+	assert.Equal(t, "patch-permission-channel", stored.Name)
 }

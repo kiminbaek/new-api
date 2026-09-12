@@ -43,7 +43,6 @@ function routingReliabilityDefaults(settings: ModelSettings) {
     RetryTimes: settings.RetryTimes,
     ChannelDisableThreshold: settings.ChannelDisableThreshold,
     AutomaticDisableChannelEnabled: settings.AutomaticDisableChannelEnabled,
-    AutomaticEnableChannelEnabled: settings.AutomaticEnableChannelEnabled,
     AutomaticDisableKeywords: settings.AutomaticDisableKeywords,
     AutomaticDisableStatusCodes: settings.AutomaticDisableStatusCodes,
     AutomaticRetryStatusCodes: settings.AutomaticRetryStatusCodes,

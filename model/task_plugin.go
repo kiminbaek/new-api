@@ -180,15 +180,31 @@ func ActivateTaskPlugin(key, version string) error {
 	})
 }
 
+func setTaskPluginEnabledWithDB(db *gorm.DB, key string, enabled bool) error {
+	var plugin TaskPlugin
+	if err := lockForUpdate(db).Where(&TaskPlugin{Key: key, Active: true}).First(&plugin).Error; err != nil {
+		return err
+	}
+	if plugin.Enabled == enabled {
+		return nil
+	}
+	return db.Model(&TaskPlugin{}).Where("id = ?", plugin.Id).Update("enabled", enabled).Error
+}
+
 func SetTaskPluginEnabled(key string, enabled bool) error {
-	result := DB.Model(&TaskPlugin{}).Where(&TaskPlugin{Key: key, Active: true}).Update("enabled", enabled)
-	if result.Error != nil {
-		return result.Error
+	return setTaskPluginEnabledWithDB(DB, key, enabled)
+}
+
+func SetTaskPluginEnabledWithChannels(key string, enabled bool, channelIDs []int) (int, error) {
+	status := common.ChannelStatusEnabled
+	reason := "task plugin enabled"
+	if !enabled {
+		status = common.ChannelStatusManuallyDisabled
+		reason = "task plugin disabled"
 	}
-	if result.RowsAffected == 0 {
-		return gorm.ErrRecordNotFound
-	}
-	return nil
+	return updateChannelStatusesWithMutation(channelIDs, status, reason, func(tx *gorm.DB) error {
+		return setTaskPluginEnabledWithDB(tx, key, enabled)
+	})
 }
 
 func CountTaskPluginVersionReferences(key, version string) (int64, error) {

@@ -52,7 +52,6 @@ func InitOptionMap() {
 	common.OptionMap["TurnstileCheckEnabled"] = strconv.FormatBool(common.TurnstileCheckEnabled)
 	common.OptionMap["RegisterEnabled"] = strconv.FormatBool(common.RegisterEnabled)
 	common.OptionMap["AutomaticDisableChannelEnabled"] = strconv.FormatBool(common.AutomaticDisableChannelEnabled)
-	common.OptionMap["AutomaticEnableChannelEnabled"] = strconv.FormatBool(common.AutomaticEnableChannelEnabled)
 	// [CUSTOM] 智能自动禁用总开关（分级惩罚 + 探测驱动恢复）
 	common.OptionMap["SmartAutoDisableEnabled"] = strconv.FormatBool(common.SmartAutoDisableEnabled)
 	common.OptionMap["LogConsumeEnabled"] = strconv.FormatBool(common.LogConsumeEnabled)
@@ -251,29 +250,43 @@ func validateOptionValue(key string, value string) error {
 	return nil
 }
 
+func upsertOptionWithDB(db *gorm.DB, key string, value string) error {
+	option := Option{Key: key}
+	if err := db.FirstOrCreate(&option, Option{Key: key}).Error; err != nil {
+		return err
+	}
+	option.Value = value
+	return db.Save(&option).Error
+}
+
 func UpdateOption(key string, value string) error {
 	optionBulkUpdateMu.Lock()
 	defer optionBulkUpdateMu.Unlock()
 	if err := validateOptionValue(key, value); err != nil {
 		return err
 	}
-	// Save to database first
-	option := Option{
-		Key: key,
-	}
-	// https://gorm.io/docs/update.html#Save-All-Fields
-	if err := DB.FirstOrCreate(&option, Option{Key: key}).Error; err != nil {
+	if err := upsertOptionWithDB(DB, key, value); err != nil {
 		return err
 	}
-	option.Value = value
-	// Save is a combination function.
-	// If save value does not contain primary key, it will execute Create,
-	// otherwise it will execute Update (with all fields).
-	if err := DB.Save(&option).Error; err != nil {
-		return err
-	}
-	// Update OptionMap
 	return updateOptionMap(key, value)
+}
+
+func UpdateOptionWithChannelStatuses(key string, value string, channelIDs []int, status int, reason string) (int, error) {
+	optionBulkUpdateMu.Lock()
+	defer optionBulkUpdateMu.Unlock()
+	if err := validateOptionValue(key, value); err != nil {
+		return 0, err
+	}
+	changed, err := updateChannelStatusesWithMutation(channelIDs, status, reason, func(tx *gorm.DB) error {
+		return upsertOptionWithDB(tx, key, value)
+	})
+	if err != nil {
+		return 0, err
+	}
+	if err := updateOptionMap(key, value); err != nil {
+		return changed, err
+	}
+	return changed, nil
 }
 
 // UpdateOptionsBulk persists multiple key/value pairs in a single database
@@ -387,8 +400,6 @@ func updateOptionMap(key string, value string) (err error) {
 			common.EmailAliasRestrictionEnabled = boolValue
 		case "AutomaticDisableChannelEnabled":
 			common.AutomaticDisableChannelEnabled = boolValue
-		case "AutomaticEnableChannelEnabled":
-			common.AutomaticEnableChannelEnabled = boolValue
 		case "SmartAutoDisableEnabled": // [CUSTOM] 智能自动禁用总开关（热更，过滤钩子每次调用重读）
 			common.SmartAutoDisableEnabled = boolValue
 		case "LogConsumeEnabled":

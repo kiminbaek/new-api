@@ -585,11 +585,12 @@ func updateAllChannelsBalance() error {
 		result, err := updateChannelBalance(channel)
 		if err != nil {
 			continue
-		} else if result.RawResponse == "" {
-			// err is nil & balance <= 0 means quota is used up
-			if result.Balance <= 0 {
-				service.DisableChannel(*types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, "", channel.GetAutoBan()), "余额不足")
-			}
+		} else if result.RawResponse == "" && result.Balance <= 0 {
+			// A public balance endpoint cannot prove that every model/key pool behind
+			// a relay is unusable. Keep the observed balance for operators, but never
+			// turn it into whole-channel downtime; real model traffic/probes provide
+			// the model-scoped evidence used by the smart policy.
+			common.SysLog(fmt.Sprintf("[CUSTOM] 通道余额观察：通道「%s」（#%d）余额 %.4f，不自动禁用整渠道", channel.Name, channel.Id, result.Balance))
 		}
 		time.Sleep(common.RequestInterval)
 	}

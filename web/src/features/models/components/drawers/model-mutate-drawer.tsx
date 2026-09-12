@@ -348,7 +348,6 @@ export function ModelMutateDrawer({
       AutoPriorityMaxDelta: 200,
       SmartAutoDisableEnabled: true,
       AutomaticDisableChannelEnabled: false,
-      AutomaticEnableChannelEnabled: false,
       AutomaticDisableKeywords: '',
       AutomaticDisableStatusCodes: '401',
       AutomaticRetryStatusCodes:

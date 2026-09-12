@@ -3,10 +3,12 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -20,6 +22,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
+	"github.com/QuantumNous/new-api/setting"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -471,6 +474,42 @@ func validateTwoFactorAuth(twoFA *model.TwoFA, code string) bool {
 	return false
 }
 
+var taskPluginBindingMu sync.Mutex
+
+func validateTaskPluginBindingLocked(channel *model.Channel) error {
+	if channel == nil || channel.Type != constant.ChannelTypeTaskPlugin {
+		return nil
+	}
+	key := strings.TrimSpace(channel.GetSetting().TaskPluginKey)
+	if plugin, err := model.GetTaskPluginVersion(key, ""); err == nil {
+		if !plugin.Enabled {
+			return fmt.Errorf("task plugin %q is disabled", key)
+		}
+		return nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	if _, registered := jsplugin.DefaultRegistry.Get(key); registered {
+		if taskPluginHasFactory(key) && setting.IsTaskPluginFactoryDisabled(key) {
+			return fmt.Errorf("task plugin %q is disabled", key)
+		}
+		return nil
+	}
+	return fmt.Errorf("task plugin %q is disabled or unavailable", key)
+}
+
+func lockAndValidateTaskPluginBinding(channel *model.Channel) (func(), error) {
+	if channel == nil || channel.Type != constant.ChannelTypeTaskPlugin {
+		return func() {}, nil
+	}
+	taskPluginBindingMu.Lock()
+	if err := validateTaskPluginBindingLocked(channel); err != nil {
+		taskPluginBindingMu.Unlock()
+		return func() {}, err
+	}
+	return func() { taskPluginBindingMu.Unlock() }, nil
+}
+
 // validateChannel 通用的渠道校验函数
 func validateChannel(channel *model.Channel, isAdd bool) error {
 	if channel == nil {
@@ -642,6 +681,13 @@ func AddChannel(c *gin.Context) {
 		return
 	}
 
+	unlockTaskPlugin, err := lockAndValidateTaskPluginBinding(addChannelRequest.Channel)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	defer unlockTaskPlugin()
+
 	// 使用统一的校验函数
 	if err := validateChannel(addChannelRequest.Channel, true); err != nil {
 		c.JSON(http.StatusOK, gin.H{
@@ -756,8 +802,10 @@ func DeleteChannel(c *gin.Context) {
 		return
 	}
 	model.InitChannelCache()
-	// [CUSTOM] 渠道已删除：清掉其智能下线记录与统计残留，避免看板幽灵条目与内存泄漏
-	service.ClearSmartDownByChannel(id)
+	if err := service.ReloadSmartDownCache(); err != nil {
+		common.ApiErrorMsg(c, "渠道已删除，但智能隔离缓存加载失败，当前保持安全阻断: "+common.LocalLogPreview(err.Error()))
+		return
+	}
 	service.PruneRelayStatsForChannel(id)
 	// [CUSTOM] 清理幽灵模型性能桶 + 概览成功率立即重算（对齐 uptime-kuma 删除级联语义）
 	if n, perr := model.DeleteOrphanPerfMetrics(); perr == nil && n > 0 {
@@ -787,6 +835,10 @@ func DeleteDisabledChannel(c *gin.Context) {
 		return
 	}
 	model.InitChannelCache()
+	if err := service.ReloadSmartDownCache(); err != nil {
+		common.ApiErrorMsg(c, "禁用渠道已删除，但智能隔离缓存加载失败，当前保持安全阻断: "+common.LocalLogPreview(err.Error()))
+		return
+	}
 	if rows > 0 {
 		service.ResetProxyClientCache()
 	}
@@ -830,12 +882,18 @@ func DisableTagChannels(c *gin.Context) {
 		})
 		return
 	}
+	taskPluginBindingMu.Lock()
+	defer taskPluginBindingMu.Unlock()
 	err = model.DisableChannelByTag(channelTag.Tag)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
 	model.InitChannelCache()
+	if err := service.ReloadSmartDownCache(); err != nil {
+		common.ApiErrorMsg(c, "标签渠道已禁用，但智能隔离缓存加载失败，当前保持安全阻断: "+common.LocalLogPreview(err.Error()))
+		return
+	}
 	recordManageAudit(c, "channel.tag_disable", map[string]interface{}{
 		"tag": channelTag.Tag,
 	})
@@ -856,12 +914,29 @@ func EnableTagChannels(c *gin.Context) {
 		})
 		return
 	}
+	taskPluginBindingMu.Lock()
+	defer taskPluginBindingMu.Unlock()
+	channels, loadErr := model.GetChannelsByTag(channelTag.Tag, true, true)
+	if loadErr != nil {
+		common.ApiError(c, loadErr)
+		return
+	}
+	for _, channel := range channels {
+		if err := validateTaskPluginBindingLocked(channel); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
 	err = model.EnableChannelByTag(channelTag.Tag)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
 	model.InitChannelCache()
+	if err := service.ReloadSmartDownCache(); err != nil {
+		common.ApiErrorMsg(c, "标签渠道已启用，但智能隔离缓存加载失败，当前保持安全阻断: "+common.LocalLogPreview(err.Error()))
+		return
+	}
 	recordManageAudit(c, "channel.tag_enable", map[string]interface{}{
 		"tag": channelTag.Tag,
 	})
@@ -916,12 +991,18 @@ func EditTagChannels(c *gin.Context) {
 		}
 		channelTag.HeaderOverride = common.GetPointer[string](trimmed)
 	}
+	taskPluginBindingMu.Lock()
+	defer taskPluginBindingMu.Unlock()
 	err = model.EditChannelByTag(channelTag.Tag, channelTag.NewTag, channelTag.ModelMapping, channelTag.Models, channelTag.Groups, channelTag.Priority, channelTag.Weight, channelTag.ParamOverride, channelTag.HeaderOverride)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
 	model.InitChannelCache()
+	if err := service.ReloadSmartDownCache(); err != nil {
+		common.ApiErrorMsg(c, "标签渠道已编辑，但智能隔离缓存加载失败，当前保持安全阻断: "+common.LocalLogPreview(err.Error()))
+		return
+	}
 	recordManageAudit(c, "channel.tag_edit", map[string]interface{}{
 		"tag": channelTag.Tag,
 	})
@@ -953,6 +1034,10 @@ func DeleteChannelBatch(c *gin.Context) {
 		return
 	}
 	model.InitChannelCache()
+	if err := service.ReloadSmartDownCache(); err != nil {
+		common.ApiErrorMsg(c, "渠道已批量删除，但智能隔离缓存加载失败，当前保持安全阻断: "+common.LocalLogPreview(err.Error()))
+		return
+	}
 	if deletedCount > 0 {
 		service.ResetProxyClientCache()
 		// [CUSTOM] 批量删渠道：清理幽灵桶 + 概览缓存失效
@@ -1009,7 +1094,29 @@ func UpdateChannel(c *gin.Context) {
 	}
 	clearChannelReadOnlyFields(&channel, requestData)
 
-	if channel.Type == constant.ChannelTypeTaskPlugin &&
+	// Load the durable channel before authorization and plugin binding checks.
+	// PATCH fields omitted by the client must inherit their persisted values;
+	// otherwise a missing `type` (zero value) could bypass task-plugin guards.
+	originChannel, err := model.GetChannelById(channel.Id, true)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": err.Error(),
+		})
+		return
+	}
+	bindingCandidate := *originChannel
+	if _, provided := requestData["type"]; provided {
+		bindingCandidate.Type = channel.Type
+	}
+	if _, provided := requestData["setting"]; provided {
+		bindingCandidate.Setting = channel.Setting
+	}
+	if _, provided := requestData["base_url"]; provided {
+		bindingCandidate.BaseURL = channel.BaseURL
+	}
+
+	if bindingCandidate.Type == constant.ChannelTypeTaskPlugin &&
 		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.TaskPluginBind) {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
@@ -1018,17 +1125,15 @@ func UpdateChannel(c *gin.Context) {
 		return
 	}
 
-	// 使用统一的校验函数
-	if err := validateChannel(&channel.Channel, false); err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": err.Error(),
-		})
+	unlockTaskPlugin, err := lockAndValidateTaskPluginBinding(&bindingCandidate)
+	if err != nil {
+		common.ApiError(c, err)
 		return
 	}
-	// Preserve existing ChannelInfo to ensure multi-key channels keep correct state even if the client does not send ChannelInfo in the request.
-	originChannel, err := model.GetChannelById(channel.Id, true)
-	if err != nil {
+	defer unlockTaskPlugin()
+
+	// 使用统一的校验函数
+	if err := validateChannel(&channel.Channel, false); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": err.Error(),
@@ -1145,7 +1250,10 @@ func UpdateChannel(c *gin.Context) {
 	model.InitChannelCache()
 	// [CUSTOM] 渠道配置已改（可能换 key / 改模型列表 / 改地址）：旧的智能下线判断不再可信。
 	// L2 禁用态渠道要原地重建探测记录，否则改完配置就没人恢复它了。
-	service.RefreshSmartDownAfterChannelEdit(channel.Id)
+	if err := service.ReloadSmartDownCache(); err != nil {
+		common.ApiErrorMsg(c, "渠道已原子保存，但智能隔离缓存加载失败，当前保持安全阻断: "+common.LocalLogPreview(err.Error()))
+		return
+	}
 	if proxyChanged {
 		service.InvalidateProxyClient(originProxy)
 	}
@@ -1192,12 +1300,31 @@ func UpdateChannelStatus(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
 	}
-	changed := model.UpdateChannelStatus(id, "", req.Status, "manual operation")
+	taskPluginBindingMu.Lock()
+	defer taskPluginBindingMu.Unlock()
+	if req.Status == common.ChannelStatusEnabled {
+		channel, loadErr := model.GetChannelById(id, false)
+		if loadErr != nil {
+			common.ApiError(c, loadErr)
+			return
+		}
+		if err := validateTaskPluginBindingLocked(channel); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
+	changed, err := model.UpdateChannelStatus(id, "", req.Status, "manual operation")
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	if changed {
 		model.InitChannelCache()
+		if err := service.ReloadSmartDownCache(); err != nil {
+			common.ApiErrorMsg(c, "渠道状态已提交，但智能隔离缓存加载失败，当前保持安全阻断: "+common.LocalLogPreview(err.Error()))
+			return
+		}
 	}
-	// [CUSTOM] 手动改状态即人工接管：清掉智能下线记录，避免自动机制与人工意图冲突
-	service.ClearSmartDownByChannel(id)
 	recordManageAudit(c, "channel.status_update", map[string]interface{}{
 		"id":      id,
 		"status":  req.Status,
@@ -1216,16 +1343,32 @@ func BatchUpdateChannelStatus(c *gin.Context) {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
 		return
 	}
-	changedCount := 0
-	for _, id := range req.Ids {
-		if model.UpdateChannelStatus(id, "", req.Status, "manual batch operation") {
-			changedCount++
+	taskPluginBindingMu.Lock()
+	defer taskPluginBindingMu.Unlock()
+	if req.Status == common.ChannelStatusEnabled {
+		for _, id := range req.Ids {
+			channel, loadErr := model.GetChannelById(id, false)
+			if loadErr != nil {
+				common.ApiError(c, loadErr)
+				return
+			}
+			if err := validateTaskPluginBindingLocked(channel); err != nil {
+				common.ApiError(c, err)
+				return
+			}
 		}
-		// [CUSTOM] 手动改状态即人工接管：清掉智能下线记录
-		service.ClearSmartDownByChannel(id)
+	}
+	changedCount, err := model.UpdateChannelStatuses(req.Ids, req.Status, "manual batch operation")
+	if err != nil {
+		common.ApiError(c, err)
+		return
 	}
 	if changedCount > 0 {
 		model.InitChannelCache()
+		if err := service.ReloadSmartDownCache(); err != nil {
+			common.ApiErrorMsg(c, "批量渠道状态已提交，但智能隔离缓存加载失败，当前保持安全阻断: "+common.LocalLogPreview(err.Error()))
+			return
+		}
 	}
 	recordManageAudit(c, "channel.status_update_batch", map[string]interface{}{
 		"count":  changedCount,
@@ -1490,6 +1633,13 @@ func CopyChannel(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "task plugin channels require the task_plugin.bind permission"})
 		return
 	}
+
+	unlockTaskPlugin, err := lockAndValidateTaskPluginBinding(origin)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	defer unlockTaskPlugin()
 
 	// clone channel
 	clone := *origin // shallow copy is sufficient as we will overwrite primitives

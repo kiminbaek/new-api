@@ -3,6 +3,7 @@ package relay
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -19,6 +20,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
@@ -571,19 +573,33 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 		ChannelId:   c.GetInt("channel_id"),
 	}
 	if midjResponse.Code == 3 {
-		//无实例账号自动禁用渠道（No available account instance）
-		channel, err := model.GetChannelById(midjourneyTask.ChannelId, true)
-		if err != nil {
-			common.SysLog("get_channel_null: " + err.Error())
-		}
-		if channel.GetAutoBan() && common.AutomaticDisableChannelEnabled {
-			model.UpdateChannelStatus(midjourneyTask.ChannelId, "", 2, "No available account instance")
+		// “No available account instance” may be scoped to the selected model's
+		// account pool. Feed it into the shared channel-model policy; never write
+		// a manual-disabled status or disable the whole channel from one result.
+		channel, channelErr := model.GetChannelById(midjourneyTask.ChannelId, true)
+		if channelErr != nil || channel == nil {
+			common.SysLog(fmt.Sprintf("midjourney smart-disable lookup channel %d failed: %v", midjourneyTask.ChannelId, channelErr))
+		} else if channel.GetAutoBan() && service.SmartDisableEnabled() {
+			policyErr := types.NewErrorWithStatusCode(
+				errors.New("No available account instance"),
+				types.ErrorCodeDoRequestFailed,
+				http.StatusServiceUnavailable,
+			)
+			chErr := types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, "", channel.GetAutoBan())
+			if _, outcomeErr := service.RecordRealTrafficOutcome(channel.Id, modelName, false); outcomeErr != nil {
+				common.SysLog(fmt.Sprintf("midjourney canary failure persistence failed: channel %d model %s: %s", channel.Id, modelName, common.LocalLogPreview(outcomeErr.Error())))
+			}
+			service.ApplyDisablePolicy(*chErr, modelName, policyErr)
 		}
 	}
 	if midjResponse.Code != 1 && midjResponse.Code != 21 && midjResponse.Code != 22 {
 		//非1-提交成功,21-任务已存在和22-排队中，则记录错误原因
 		midjourneyTask.FailReason = midjResponse.Description
 		consumeQuota = false
+	} else {
+		if _, outcomeErr := service.RecordRealTrafficOutcome(midjourneyTask.ChannelId, modelName, true); outcomeErr != nil {
+			common.SysLog(fmt.Sprintf("midjourney canary success persistence failed: channel %d model %s: %s", midjourneyTask.ChannelId, modelName, common.LocalLogPreview(outcomeErr.Error())))
+		}
 	}
 
 	if midjResponse.Code == 21 { //21-任务已存在（处理中或者有结果了）

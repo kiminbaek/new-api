@@ -1,53 +1,13 @@
 package service
 
 import (
-	"errors"
 	"testing"
 	"time"
 
+	"github.com/QuantumNous/new-api/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestFinishSmartProbeWithChannelRecoverySuccessKeepsCanaries(t *testing.T) {
-	resetSmartState()
-	RegisterSmartDown(7, "ch7", "a", SmartDownModel, "L2")
-	RegisterSmartDown(7, "ch7", "b", SmartDownModel, "L2")
-	require.False(t, FinishSmartProbe(7, "a", true, ""))
-	old := enableChannelForSmartRecovery
-	enableChannelForSmartRecovery = func(int) error { return nil }
-	t.Cleanup(func() { enableChannelForSmartRecovery = old })
-	reopened, err := FinishSmartProbeWithChannelRecovery(7, "b")
-	require.NoError(t, err)
-	assert.True(t, reopened)
-	states := ListSmartDown()
-	require.Len(t, states, 2)
-	for _, st := range states {
-		assert.Equal(t, 1, st.CanaryStage)
-		assert.Equal(t, 1, st.CanaryPercent)
-	}
-}
-
-func TestFinishSmartProbeWithChannelRecoveryDBFailurePreservesState(t *testing.T) {
-	resetSmartState()
-	RegisterSmartDown(7, "ch7", "a", SmartDownModel, "L2")
-	RegisterSmartDown(7, "ch7", "b", SmartDownModel, "L2")
-	require.False(t, FinishSmartProbe(7, "a", true, ""))
-	old := enableChannelForSmartRecovery
-	enableChannelForSmartRecovery = func(int) error { return errors.New("db down") }
-	t.Cleanup(func() { enableChannelForSmartRecovery = old })
-	reopened, err := FinishSmartProbeWithChannelRecovery(7, "b")
-	require.Error(t, err)
-	assert.False(t, reopened)
-	states := map[string]SmartDownState{}
-	for _, st := range ListSmartDown() {
-		states[st.Model] = st
-	}
-	assert.Equal(t, 1, states["a"].CanaryStage)
-	assert.Zero(t, states["b"].CanaryStage)
-	assert.Contains(t, states["b"].LastError, "db down")
-	assert.Greater(t, states["b"].NextProbeAt, int64(0))
-}
 
 func TestRetryParamUseMemberKeepsExclusionsPerMember(t *testing.T) {
 	p := &RetryParam{}
@@ -69,37 +29,53 @@ func TestPrioritizeVirtualMembersUsesRequestGroupsWithoutDeletingMembers(t *test
 	assert.Equal(t, []string{"request-live", "global-only", "dead"}, got)
 }
 
-func TestApplyScheduledProbeObservationKeepsStateAndStatsAligned(t *testing.T) {
+func TestApplyScheduledProbeObservationKeepsStateStatsAndAbilityAligned(t *testing.T) {
 	resetSmartState()
-	RegisterSmartDown(23, "ch23", "alpha", SmartDownModel, "isolated")
-	before, _, _ := RelayStatSample(23, "alpha")
+	ch := createDurablePolicyChannel(t, 23, "alpha")
+	now := time.Now()
+	_, err := model.QuarantineChannelModel(ch.Id, ch.Name, "alpha", "isolated", `{}`, []string{"alpha"}, now)
+	require.NoError(t, err)
+	before, _, _ := RelayStatSample(ch.Id, "alpha")
 
-	reconciled, err := ApplyScheduledProbeObservation(23, "alpha", true, false, "timeout")
+	reconciled, err := ApplyScheduledProbeObservation(ch.Id, "alpha", false, false, "timeout")
 	require.NoError(t, err)
 	assert.True(t, reconciled)
-	assert.True(t, IsSmartDown(23, "alpha"))
-	afterFailure, successFailure, _ := RelayStatSample(23, "alpha")
+	assert.True(t, IsSmartDown(ch.Id, "alpha"))
+	afterFailure, successFailure, _ := RelayStatSample(ch.Id, "alpha")
 	assert.Equal(t, before+1, afterFailure)
 	assert.Equal(t, 0, successFailure)
 
-	reconciled, err = ApplyScheduledProbeObservation(23, "alpha", true, true, "")
+	// Failure backoff is not immediately due; move it forward explicitly to
+	// represent the next scheduled probe cycle.
+	require.NoError(t, model.DB.Model(&model.ChannelModelRecoveryState{}).
+		Where("channel_id = ? AND model = ?", ch.Id, "alpha").Update("next_probe_at", time.Now().Add(-time.Second).UnixMilli()).Error)
+	reconciled, err = ApplyScheduledProbeObservation(ch.Id, "alpha", false, true, "")
 	require.NoError(t, err)
 	assert.True(t, reconciled)
-	assert.False(t, IsSmartDown(23, "alpha"))
-	afterSuccess, successes, _ := RelayStatSample(23, "alpha")
+	assert.False(t, IsSmartDown(ch.Id, "alpha"), "successful probe enters canary, not quarantine")
+	var ability model.Ability
+	require.NoError(t, model.DB.Where("channel_id = ? AND model = ?", ch.Id, "alpha").First(&ability).Error)
+	assert.True(t, ability.Enabled)
+	afterSuccess, successes, _ := RelayStatSample(ch.Id, "alpha")
 	assert.Equal(t, afterFailure+1, afterSuccess)
 	assert.Equal(t, 1, successes)
 }
 
 func TestApplyScheduledProbeObservationDoesNotRaceClaimedRecovery(t *testing.T) {
 	resetSmartState()
-	RegisterSmartDown(24, "ch24", "alpha", SmartDownModel, "isolated")
-	smartDownMu.Lock()
-	smartDown[smartDownKey(24, "alpha")].Probing = true
-	smartDown[smartDownKey(24, "alpha")].ProbeStartedAt = time.Now().Unix()
-	smartDownMu.Unlock()
-	reconciled, err := ApplyScheduledProbeObservation(24, "alpha", true, true, "")
+	ch := createDurablePolicyChannel(t, 24, "alpha")
+	now := time.Now()
+	_, err := model.QuarantineChannelModel(ch.Id, ch.Name, "alpha", "isolated", `{}`, []string{"alpha"}, now)
+	require.NoError(t, err)
+	claims, err := model.ClaimDueRecoveryStates("dedicated-worker", 1, now, time.Minute)
+	require.NoError(t, err)
+	require.Len(t, claims, 1)
+
+	reconciled, err := ApplyScheduledProbeObservation(ch.Id, "alpha", false, true, "")
 	require.NoError(t, err)
 	assert.False(t, reconciled)
-	assert.True(t, IsSmartDown(24, "alpha"))
+	row, err := model.GetChannelModelRecoveryState(ch.Id, "alpha")
+	require.NoError(t, err)
+	assert.Equal(t, model.RecoveryStateProbing, row.State)
+	assert.Equal(t, "dedicated-worker", row.LeaseOwner)
 }

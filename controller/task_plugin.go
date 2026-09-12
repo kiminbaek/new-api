@@ -20,6 +20,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/plugins"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -474,7 +475,10 @@ func SetTaskPluginStatus(c *gin.Context) {
 		return
 	}
 	key := c.Param("key")
+	taskPluginBindingMu.Lock()
+	defer taskPluginBindingMu.Unlock()
 	disabledChannels := 0
+	channelIDs := make([]int, 0)
 	if !*request.Enabled {
 		channels, inFlight, usageErr := model.GetTaskPluginUsage(key)
 		if usageErr != nil {
@@ -487,10 +491,9 @@ func SetTaskPluginStatus(c *gin.Context) {
 			return
 		}
 		if cascade {
+			channelIDs = make([]int, 0, len(channels))
 			for _, channel := range channels {
-				if model.UpdateChannelStatus(channel.Id, "", common.ChannelStatusManuallyDisabled, "task plugin disabled") {
-					disabledChannels++
-				}
+				channelIDs = append(channelIDs, channel.Id)
 			}
 		}
 	}
@@ -513,27 +516,57 @@ func SetTaskPluginStatus(c *gin.Context) {
 			}
 			keys = next
 		} else {
-			keys = append(append([]string{}, keys...), key)
+			found := false
+			for _, item := range keys {
+				if item == key {
+					found = true
+					break
+				}
+			}
+			if !found {
+				keys = append(keys, key)
+			}
 		}
-		if err := setting.SetTaskPluginDisabledFactoryKeysOption(keys); err != nil {
-			common.ApiError(c, err)
-			return
-		}
-		encoded, err := common.Marshal(setting.GetTaskPluginDisabledFactoryKeys())
+		sort.Strings(keys)
+		encoded, err := common.Marshal(keys)
 		if err != nil {
 			common.ApiError(c, err)
 			return
 		}
-		if err = model.UpdateOption(setting.TaskPluginDisabledFactoryKeysKey, string(encoded)); err != nil {
-			common.ApiError(c, err)
+		status := common.ChannelStatusEnabled
+		reason := "task plugin enabled"
+		if !*request.Enabled {
+			status = common.ChannelStatusManuallyDisabled
+			reason = "task plugin disabled"
+		}
+		changedCount, updateErr := model.UpdateOptionWithChannelStatuses(setting.TaskPluginDisabledFactoryKeysKey, string(encoded), channelIDs, status, reason)
+		if updateErr != nil {
+			common.ApiError(c, updateErr)
 			return
+		}
+		disabledChannels = changedCount
+		if disabledChannels > 0 {
+			model.InitChannelCache()
+			if err := service.ReloadSmartDownCache(); err != nil {
+				common.ApiErrorMsg(c, fmt.Sprintf("已禁用 %d 个渠道，但智能隔离缓存加载失败，当前保持安全阻断: %s", disabledChannels, common.LocalLogPreview(err.Error())))
+				return
+			}
 		}
 		common.ApiSuccess(c, gin.H{"plugin_enabled": *request.Enabled, "disabled_channels": disabledChannels})
 		return
 	}
-	if err := model.SetTaskPluginEnabled(key, *request.Enabled); err != nil {
-		common.ApiError(c, err)
+	changedCount, updateErr := model.SetTaskPluginEnabledWithChannels(key, *request.Enabled, channelIDs)
+	if updateErr != nil {
+		common.ApiError(c, updateErr)
 		return
+	}
+	disabledChannels = changedCount
+	if disabledChannels > 0 {
+		model.InitChannelCache()
+		if err := service.ReloadSmartDownCache(); err != nil {
+			common.ApiErrorMsg(c, fmt.Sprintf("已禁用 %d 个渠道，但智能隔离缓存加载失败，当前保持安全阻断: %s", disabledChannels, common.LocalLogPreview(err.Error())))
+			return
+		}
 	}
 	completeTaskPluginMutation(
 		c,

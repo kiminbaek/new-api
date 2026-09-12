@@ -996,10 +996,10 @@ func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, test
 
 	summary.Tested++
 
-	shouldBanChannel := false
 	newAPIError := result.newAPIError
-	if newAPIError != nil {
-		shouldBanChannel = service.ShouldDisableChannel(result.newAPIError)
+	if common.AutomaticDisableChannelEnabled && newAPIError == nil && milliseconds > disableThreshold {
+		err := fmt.Errorf("响应时间 %.2fs 超过阈值 %.2fs", float64(milliseconds)/1000.0, float64(disableThreshold)/1000.0)
+		newAPIError = types.NewOpenAIError(err, types.ErrorCodeChannelResponseTimeExceeded, http.StatusRequestTimeout)
 	}
 
 	// [CUSTOM] 智能自动禁用：健康检测结果也计入渠道×模型滚动统计，
@@ -1009,18 +1009,14 @@ func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, test
 	if service.SmartDisableEnabled() && result.context != nil {
 		if probedModel := result.context.GetString("original_model"); probedModel != "" {
 			if newAPIError == nil {
-				service.RecordRelaySuccess(channel.Id, probedModel)
+				if _, err := service.RecordRealTrafficOutcome(channel.Id, probedModel, true); err != nil {
+					common.SysLog(fmt.Sprintf("[CUSTOM] health-check canary success persistence failed: channel #%d model %s: %s", channel.Id, probedModel, common.LocalLogPreview(err.Error())))
+				}
 			} else if service.ShouldRecordRelayHealthFailure(newAPIError, false, false) {
-				service.RecordRelayFailure(channel.Id, probedModel)
+				if _, err := service.RecordRealTrafficOutcome(channel.Id, probedModel, false); err != nil {
+					common.SysLog(fmt.Sprintf("[CUSTOM] health-check canary failure persistence failed: channel #%d model %s: %s", channel.Id, probedModel, common.LocalLogPreview(err.Error())))
+				}
 			}
-		}
-	}
-
-	if common.AutomaticDisableChannelEnabled && !shouldBanChannel {
-		if milliseconds > disableThreshold {
-			err := fmt.Errorf("响应时间 %.2fs 超过阈值 %.2fs", float64(milliseconds)/1000.0, float64(disableThreshold)/1000.0)
-			newAPIError = types.NewOpenAIError(err, types.ErrorCodeChannelResponseTimeExceeded, http.StatusRequestTimeout)
-			shouldBanChannel = true
 		}
 	}
 
@@ -1045,16 +1041,10 @@ func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, test
 				summary.Disabled++
 			}
 		}
-	} else if allowDisableFn(channel) && isChannelEnabled && shouldBanChannel && channel.GetAutoBan() {
-		processChannelError(result.context, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, nil)
-
-		summary.Disabled++
 	}
 
-	if result.localErr == nil && !isChannelEnabled && service.ShouldEnableChannel(newAPIError, channel.Status) {
-		service.EnableChannel(channel.Id, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.Name)
-		summary.Enabled++
-	}
+	// 自动禁用渠道的恢复只能走逐模型 SmartDown 状态机。旧逻辑在任意一次
+	// 渠道测试成功后会启用全部 ability，等价于绕过模型级隔离，已删除。
 
 	channel.UpdateResponseTime(milliseconds)
 	return summary
@@ -1285,9 +1275,17 @@ func runSequentialModelProbes(ctx context.Context, channels []*model.Channel, te
 		}
 		if !reconciled {
 			if item.Success {
-				service.RecordRelaySuccess(probe.channel.Id, probe.model)
+				if _, outcomeErr := service.RecordRealTrafficOutcome(probe.channel.Id, probe.model, true); outcomeErr != nil {
+					item.Success = false
+					item.Reason = "模型响应正常，但 Canary 状态保存失败"
+					item.ErrorCategory = "recovery_error"
+					item.Action = "observe"
+				}
 			} else if result.newAPIError != nil && service.ShouldRecordRelayHealthFailure(result.newAPIError, false, false) {
-				service.RecordRelayFailure(probe.channel.Id, probe.model)
+				if _, outcomeErr := service.RecordRealTrafficOutcome(probe.channel.Id, probe.model, false); outcomeErr != nil {
+					item.ErrorCategory = "recovery_error"
+					item.Action = "observe"
+				}
 				// Scheduled per-model probes must feed the same semantic policy as
 				// real traffic. Otherwise monitoring can know a route is broken while
 				// the selector keeps sending users to it until live traffic accumulates

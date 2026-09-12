@@ -81,7 +81,6 @@ const defaultModelSettings: ModelSettings = {
   AutoPriorityMaxDelta: 200, // [CUSTOM]
   SmartAutoDisableEnabled: true, // [CUSTOM] 智能自动禁用（默认开）
   AutomaticDisableChannelEnabled: false,
-  AutomaticEnableChannelEnabled: false,
   AutomaticDisableKeywords: '',
   AutomaticDisableStatusCodes: '401',
   AutomaticRetryStatusCodes:

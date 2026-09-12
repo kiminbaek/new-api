@@ -343,6 +343,7 @@ func migrateDB() error {
 		&ModelQualityProbeRun{},
 		&ModelQualityProbeResult{},
 		&ChannelModelProbeResult{},
+		&ChannelModelRecoveryState{},
 		&CasbinRule{},
 		&AuthzRole{},
 	)

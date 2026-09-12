@@ -21,17 +21,23 @@ package service
 // 探测（1→2→4→8→16→30min 封顶），实测通过才恢复上线。
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"gorm.io/gorm"
 )
 
 // DisableAction 分级动作。
@@ -71,11 +77,6 @@ const (
 	smartProbeMaxInterval  = 30 * time.Minute
 	// 在途探测超过该秒数视为陈旧（探测方 panic/中断未回滚标记），允许重新认领。
 	smartProbeStaleSeconds = 600
-
-	// 渠道级连续失败达到该值 → 整渠道快速隔离（全部模型一次性下线，触发 L2 升级）。
-	// 取 per-model 硬阈值(8)的 2 倍：更保守，因为爆炸半径是整个渠道。
-	// 多模型渠道只要任一模型成功就会归零，不会误伤「部分模型挂」的渠道。
-	smartChannelFastQuarantineStreak = smartHardFailStreak * 2
 )
 
 // ===== 错误分类关键词 =====
@@ -155,6 +156,10 @@ func SmartDisableEnabled() bool {
 	return common.SmartAutoDisableEnabled && common.AutomaticDisableChannelEnabled
 }
 
+func RecoveryCacheReady() bool {
+	return recoveryCacheReady.Load()
+}
+
 // ClassifyChannelError 判定该错误应该走哪一级动作。
 // 只做「性质分类」，不做「够不够格下线」——后者由 ShouldDisableModelNow 把关。
 func ClassifyChannelError(err *types.NewAPIError, _ bool) DisableAction {
@@ -171,12 +176,10 @@ func ClassifyChannelError(err *types.NewAPIError, _ bool) DisableAction {
 	switch attribution.Category {
 	case "account_quota":
 		return ActionDisableModel
-	case "account_disabled", "authentication":
-		return ActionDisableChannel
-	case "upstream_capacity":
-		if err.GetErrorCode() == types.ErrorCodeChannelNoAvailableKey {
-			return ActionDisableChannel
-		}
+	case "account_disabled", "authentication", "upstream_capacity":
+		// Even credential/account failures may belong to one model-specific key
+		// pool behind a relay. They must start at (channel, model); only all
+		// configured models independently reaching L1 may escalate to L2.
 		return ActionDisableModel
 	case "model_missing":
 		// Preserve the dedicated 404 streak guard below; explicit 400/410 model
@@ -186,9 +189,8 @@ func ClassifyChannelError(err *types.NewAPIError, _ bool) DisableAction {
 		}
 	}
 
-	// [CUSTOM] 堵住上游暗门：response_time_exceeded 由健康检测自造，带 "channel:"
-	// 前缀会被原 ShouldDisableChannel 的 IsChannelError 无条件放行，直接整渠道枪毙，
-	// 完全绕过用户配置的状态码范围与关键词黑名单。超时降级为模型级。
+	// [CUSTOM] response_time_exceeded 由健康检测生成，只能作为当前模型的失败证据。
+	// 禁止重新接入旧版 ShouldDisableChannel 整渠道路径；超时始终按模型级处理。
 	if err.GetErrorCode() == types.ErrorCodeChannelResponseTimeExceeded {
 		return ActionDisableModel
 	}
@@ -302,11 +304,9 @@ func checkModelMissing(channelError types.ChannelError, modelName string, err *t
 	}
 	ResetModelMissing(channelError.ChannelId, modelName)
 	if !IsSmartDown(channelError.ChannelId, modelName) {
-		reason := fmt.Sprintf("疑似下架：连续 %d 次 404，已临时下线等待探测确认", streak)
-		RegisterSmartDownAttributed(channelError.ChannelId, channelError.ChannelName, modelName, SmartDownModel, reason, AttributeChannelError(err))
+		why := fmt.Sprintf("疑似下架：连续 %d 次 404，已临时下线等待探测确认", streak)
+		disableModelOnChannel(channelError, modelName, why, err)
 		NotifyModelMissing(channelError.ChannelId, channelError.ChannelName, modelName, streak)
-		common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用 MISSING：通道「%s」（#%d）模型 %s %s",
-			channelError.ChannelName, channelError.ChannelId, modelName, reason))
 	}
 }
 
@@ -320,7 +320,7 @@ const (
 	SmartDownChannel SmartDownLevel = "channel"
 )
 
-// SmartDownState 一条下线记录（内存态；ability.enabled / channel.status 是持久面）。
+// SmartDownState is the API/hot-cache projection of the durable recovery row.
 type SmartDownState struct {
 	ChannelId   int            `json:"channel_id"`
 	ChannelName string         `json:"channel_name"`
@@ -348,48 +348,52 @@ type SmartDownState struct {
 	CanarySuccess int              `json:"canary_success"`
 	CanaryFailure int              `json:"canary_failure"`
 	CanarySeen    uint64           `json:"-"`
+	Generation    uint64           `json:"-"`
+}
+
+type DurableSmartProbe struct {
+	State SmartDownState
+	Claim model.ProbeClaim
+}
+
+func recoveryRowToSmartState(row model.ChannelModelRecoveryState) SmartDownState {
+	attribution := FaultAttribution{Category: "unknown", Action: "observe", Summary: "等待更多故障信息"}
+	_ = json.Unmarshal([]byte(row.AttributionJSON), &attribution)
+	return SmartDownState{
+		ChannelId: row.ChannelID, ChannelName: row.ChannelName, Model: row.Model, Level: SmartDownModel,
+		Reason: row.Reason, DisabledAt: row.CreatedAt / 1000, NextProbeAt: row.NextProbeAt / 1000,
+		Attempts: row.Attempts, LastError: row.LastError, Probing: row.State == model.RecoveryStateProbing,
+		Attribution: attribution, CanaryStage: row.CanaryStage, CanaryPercent: row.CanaryPercent,
+		CanarySuccess: row.CanarySuccess, CanaryFailure: row.CanaryFailure, CanarySeen: row.CanarySeen,
+		Generation: row.Generation,
+	}
+}
+
+func cacheRecoveryRow(row model.ChannelModelRecoveryState) {
+	state := recoveryRowToSmartState(row)
+	key := smartDownKey(row.ChannelID, row.Model)
+	smartDownMu.Lock()
+	defer smartDownMu.Unlock()
+	if row.State == model.RecoveryStateHealthy || row.State == model.RecoveryStateRetired || row.State == model.RecoveryStateManual {
+		delete(smartDown, key)
+		return
+	}
+	smartDown[key] = &state
 }
 
 var (
-	smartDownMu sync.RWMutex
-	smartDown   = map[string]*SmartDownState{}
-
-	quotaEvidenceMu sync.Mutex
-	quotaEvidence   = map[int]map[string]int64{}
+	smartDownMu        sync.RWMutex
+	smartDown          = map[string]*SmartDownState{}
+	recoveryCacheReady atomic.Bool
+	probeOwner         = newProbeOwner()
 )
 
-const quotaCrossModelWindow = 15 * time.Minute
-
-// RecordQuotaModelFailure records model-scoped quota evidence. A relay channel
-// is only considered account-wide exhausted when at least two distinct models
-// report quota faults inside a short window.
-func RecordQuotaModelFailure(channelID int, modelName string) int {
-	modelName = strings.TrimSpace(modelName)
-	if channelID <= 0 || modelName == "" {
-		return 0
+func newProbeOwner() string {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err == nil {
+		return "probe-" + hex.EncodeToString(buf)
 	}
-	now := time.Now().Unix()
-	cutoff := now - int64(quotaCrossModelWindow/time.Second)
-	quotaEvidenceMu.Lock()
-	defer quotaEvidenceMu.Unlock()
-	models := quotaEvidence[channelID]
-	if models == nil {
-		models = map[string]int64{}
-		quotaEvidence[channelID] = models
-	}
-	for model, seenAt := range models {
-		if seenAt < cutoff {
-			delete(models, model)
-		}
-	}
-	models[modelName] = now
-	return len(models)
-}
-
-func ClearQuotaFailureEvidence(channelID int) {
-	quotaEvidenceMu.Lock()
-	delete(quotaEvidence, channelID)
-	quotaEvidenceMu.Unlock()
+	return fmt.Sprintf("probe-%d-%d", os.Getpid(), time.Now().UnixNano())
 }
 
 func smartDownKey(chId int, mdl string) string {
@@ -452,22 +456,22 @@ func ClearSmartDownByChannel(chId int) {
 // When only one model is recovered, sibling model gates remain in memory and
 // continue to block routing after the channel itself is reopened.
 func ManualRecoverSmartDown(chId int, mdl string) error {
-	ch, err := model.GetChannelById(chId, false)
-	if err != nil || ch == nil {
-		return fmt.Errorf("channel %d not found: %w", chId, err)
+	mdl = strings.TrimSpace(mdl)
+	var err error
+	if mdl == "" {
+		err = model.EnableChannelForManualRecovery(chId)
+	} else {
+		err = model.EnableChannelModelForManualRecovery(chId, mdl)
 	}
-	info := ch.GetOtherInfo()
-	reason, _ := info["status_reason"].(string)
-	if ch.Status == common.ChannelStatusAutoDisabled && strings.Contains(reason, smartL2Marker) {
-		if !model.UpdateChannelStatus(chId, "", common.ChannelStatusEnabled, "") {
-			return fmt.Errorf("failed to enable L2-disabled channel %d", chId)
-		}
+	if err != nil {
+		return err
 	}
 	if mdl == "" {
 		ClearSmartDownByChannel(chId)
 	} else {
 		ClearSmartDown(chId, mdl)
 	}
+	model.InitChannelCache()
 	return nil
 }
 
@@ -482,49 +486,41 @@ func InitSmartDisable() {
 	common.SysLog("[CUSTOM] smart auto-disable filter hook installed")
 }
 
-// RestoreSmartDownFromDB 启动时从数据库重建探测队列。
-//
-// L2 升级禁用会落库（channel.status=3 + status_reason 带「智能下线」标记），
-// 但探测队列是内存态——进程重启后记录清零，被 L2 禁掉的渠道就没人管了。
-// 新格式持久化完整模型列表；旧格式只有「最后一个」时按渠道当前模型列表保守
-// 重建，确保每个模型都经过探测，绝不因单模型成功误放开整个渠道。
-func RestoreSmartDownFromDB() {
+// RestoreSmartDownFromDB rebuilds the routing cache from durable recovery rows.
+// Any query or compatibility-migration failure leaves the cache not-ready so
+// routing fails closed while smart isolation is enabled.
+func RestoreSmartDownFromDB() error {
+	recoveryCacheReady.Store(false)
 	if !common.SmartAutoDisableEnabled {
-		return
+		return nil
 	}
-	var channels []*model.Channel
-	err := model.DB.Where("status = ?", common.ChannelStatusAutoDisabled).Find(&channels).Error
-	if err != nil {
-		common.SysLog("[CUSTOM] smart disable restore: query failed " + err.Error())
-		return
+	var legacyChannels []*model.Channel
+	if err := model.DB.Where("status = ?", common.ChannelStatusAutoDisabled).Find(&legacyChannels).Error; err != nil {
+		common.SysLog("[CUSTOM] smart disable restore: legacy channel query failed " + err.Error())
+		return err
 	}
-	restored := 0
-	for _, ch := range channels {
-		if restoreSmartDownForChannel(ch) {
-			restored++
+	for _, ch := range legacyChannels {
+		if err := model.BackfillLegacyAutoDisabledRecovery(ch.Id, time.Now()); err != nil {
+			common.SysLog(fmt.Sprintf("[CUSTOM] smart disable restore: legacy channel #%d backfill failed: %s", ch.Id, common.LocalLogPreview(err.Error())))
+			return err
 		}
 	}
-	if restored > 0 {
-		common.SysLog(fmt.Sprintf("[CUSTOM] smart disable restore: %d 个智能 L2 下线的渠道×模型已重新进入探测队列", restored))
+	states, err := model.LoadActiveRecoveryStates()
+	if err != nil {
+		common.SysLog("[CUSTOM] smart disable restore: recovery state query failed " + err.Error())
+		return err
 	}
-}
-
-// restoreSmartDownForChannel 把一条处于智能 L2 禁用态的渠道重新登记进探测队列。
-// 返回是否成功登记。人工禁用 / 账号级禁用不带标记，不会被误捞。
-func restoreSmartDownForChannel(ch *model.Channel) bool {
-	info := ch.GetOtherInfo()
-	reason, _ := info["status_reason"].(string)
-	if !strings.Contains(reason, smartL2Marker) {
-		return false
+	smartDownMu.Lock()
+	smartDown = map[string]*SmartDownState{}
+	smartDownMu.Unlock()
+	for _, row := range states {
+		cacheRecoveryRow(row)
 	}
-	models := parseSmartL2Models(ch, reason)
-	if len(models) == 0 {
-		return false
+	recoveryCacheReady.Store(true)
+	if len(states) > 0 {
+		common.SysLog(fmt.Sprintf("[CUSTOM] smart disable restore: loaded %d durable channel-model recovery states", len(states)))
 	}
-	for _, mdl := range models {
-		RegisterSmartDown(ch.Id, ch.Name, mdl, SmartDownModel, reason)
-	}
-	return true
+	return nil
 }
 
 func normalizeSmartL2Models(models []string) []string {
@@ -544,16 +540,12 @@ func normalizeSmartL2Models(models []string) []string {
 	return out
 }
 
-func formatSmartL2Reason(base string, models []string) string {
-	models = normalizeSmartL2Models(models)
-	payload, err := json.Marshal(models)
-	if err != nil || len(models) == 0 {
-		return base
-	}
-	return fmt.Sprintf("%s（%s%s）", base, smartL2ModelsPrefix, payload)
-}
-
 func parseSmartL2Models(ch *model.Channel, reason string) []string {
+	// 当前渠道配置是唯一权威：管理员编辑过模型列表后，旧 reason 中的模型
+	// 已过期，不能继续探测或恢复。reason 只在当前列表为空时做历史兜底。
+	if models := normalizeSmartL2Models(ch.GetModels()); len(models) > 0 {
+		return models
+	}
 	if idx := strings.LastIndex(reason, smartL2ModelsPrefix); idx >= 0 {
 		raw := strings.TrimSpace(strings.TrimSuffix(reason[idx+len(smartL2ModelsPrefix):], "）"))
 		var models []string
@@ -563,11 +555,7 @@ func parseSmartL2Models(ch *model.Channel, reason string) []string {
 			}
 		}
 	}
-	// 兼容 mp11 旧记录：L2 的语义就是全模型均已下线，因此优先恢复渠道
-	// 当前配置的完整模型列表，而不是只信任旧 reason 中的「最后一个」。
-	if models := normalizeSmartL2Models(ch.GetModels()); len(models) > 0 {
-		return models
-	}
+	// 兼容 mp11 旧记录：当前配置为空时才退回旧「最后一个」提示。
 	if idx := strings.LastIndex(reason, smartL2LastModelPrefix); idx >= 0 {
 		mdl := strings.TrimSpace(strings.TrimSuffix(reason[idx+len(smartL2LastModelPrefix):], "）"))
 		return normalizeSmartL2Models([]string{mdl})
@@ -575,22 +563,59 @@ func parseSmartL2Models(ch *model.Channel, reason string) []string {
 	return nil
 }
 
-// RefreshSmartDownAfterChannelEdit 渠道配置被编辑后的下线记录处理。
+func ReloadSmartDownCache() error {
+	recoveryCacheReady.Store(false)
+	states, err := model.LoadActiveRecoveryStates()
+	if err != nil {
+		return err
+	}
+	smartDownMu.Lock()
+	smartDown = map[string]*SmartDownState{}
+	smartDownMu.Unlock()
+	for _, row := range states {
+		cacheRecoveryRow(row)
+	}
+	recoveryCacheReady.Store(true)
+	return nil
+}
+
+// RefreshSmartDownAfterChannelEdit reconciles an out-of-band channel/status
+// mutation, then rebuilds the hot cache. Channel.Update already reconciles in
+// its own transaction and should call ReloadSmartDownCache instead.
 //
 // 配置变了（换 key / 改地址 / 改模型列表），旧的失败判断不再可信——正常应
 // 清零重学；但渠道若正处于智能 L2 整渠道禁用态，把记录清了就没有人再去
 // 探测恢复它（选路过滤靠记录、探测也靠记录）。所以先清，再按 DB 最新状态
 // 原地重建该记录，探测下一轮自然打到新配置上。
-func RefreshSmartDownAfterChannelEdit(chId int) {
+func RefreshSmartDownAfterChannelEdit(chId int) error {
+	recoveryCacheReady.Store(false)
 	ClearSmartDownByChannel(chId)
 	if !common.SmartAutoDisableEnabled {
-		return
+		return nil
 	}
 	ch, err := model.GetChannelById(chId, false)
-	if err != nil || ch == nil {
-		return
+	if err != nil {
+		return err
 	}
-	restoreSmartDownForChannel(ch)
+	if ch == nil {
+		return fmt.Errorf("channel %d not found after edit", chId)
+	}
+	if err := model.ReconcileRecoveryModels(ch.Id, ch.GetModels(), ch.Status, time.Now()); err != nil {
+		common.SysLog(fmt.Sprintf("[CUSTOM] smart disable reconcile after channel edit failed: channel #%d: %s", chId, common.LocalLogPreview(err.Error())))
+		return err
+	}
+	states, err := model.LoadActiveRecoveryStates()
+	if err != nil {
+		common.SysLog(fmt.Sprintf("[CUSTOM] smart disable reload after channel edit failed: channel #%d: %s", chId, common.LocalLogPreview(err.Error())))
+		return err
+	}
+	for _, row := range states {
+		if row.ChannelID == chId {
+			cacheRecoveryRow(row)
+		}
+	}
+	recoveryCacheReady.Store(true)
+	return nil
 }
 
 // smartL2Marker 与 disableModelOnChannel 升级文案保持一致；改文案必须同步改这里。
@@ -600,27 +625,25 @@ const (
 	smartL2LastModelPrefix = "最后一个：" // mp11 旧格式兼容
 )
 
-// DueSmartProbes 取出所有到期且可探测的记录，并就地标记 Probing。
-// 调用方必须对每条结果调用 FinishSmartProbe，否则该项会停在 Probing——
-// 但超过 smartProbeStaleSeconds 的在途项会被视为陈旧重新认领，不会永久卡死。
-// 返回按 NextProbeAt 升序（最饿的先探测）。
-func DueSmartProbes(limit int) []SmartDownState {
+func ClaimDurableSmartProbes(limit int) ([]DurableSmartProbe, error) {
 	now := time.Now()
-	nowUnix := now.Unix()
-	candidates := make([]SmartDownState, 0)
-	smartDownMu.Lock()
-	for _, st := range smartDown {
-		if st.CanaryStage > 0 {
+	nowMS := now.UnixMilli()
+	rows, err := model.LoadActiveRecoveryStates()
+	if err != nil {
+		return nil, err
+	}
+	candidates := make([]SmartDownState, 0, len(rows))
+	for _, row := range rows {
+		due := (row.State == model.RecoveryStateQuarantined && row.NextProbeAt <= nowMS) ||
+			(row.State == model.RecoveryStateProbing && row.LeaseUntil <= nowMS)
+		if !due {
 			continue
 		}
-		stale := st.Probing && nowUnix-st.ProbeStartedAt >= smartProbeStaleSeconds
-		if !stale && (st.Probing || st.NextProbeAt > nowUnix) {
-			continue
-		}
-		health := AssessRelayHealth(st.ChannelId, st.Model, now)
-		st.HealthScore = health.Score
-		st.Confidence = health.Confidence
-		candidates = append(candidates, *st)
+		state := recoveryRowToSmartState(row)
+		health := AssessRelayHealth(state.ChannelId, state.Model, now)
+		state.HealthScore = health.Score
+		state.Confidence = health.Confidence
+		candidates = append(candidates, state)
 	}
 	if limit <= 0 {
 		limit = AdaptiveProbeBudget(candidates, now)
@@ -636,157 +659,76 @@ func DueSmartProbes(limit int) []SmartDownState {
 		}
 		return pi > pj
 	})
-	out := make([]SmartDownState, 0, limit)
-	for i := 0; i < limit; i++ {
-		candidate := candidates[i]
-		st := smartDown[smartDownKey(candidate.ChannelId, candidate.Model)]
-		if st == nil || st.CanaryStage > 0 {
+	out := make([]DurableSmartProbe, 0, limit)
+	for _, candidate := range candidates {
+		if len(out) >= limit {
+			break
+		}
+		claim, claimErr := model.ClaimRecoveryState(candidate.ChannelId, candidate.Model, probeOwner, now, smartProbeStaleSeconds*time.Second)
+		if errors.Is(claimErr, model.ErrRecoveryStateConflict) || errors.Is(claimErr, gorm.ErrRecordNotFound) {
 			continue
 		}
-		st.Probing = true
-		st.ProbeStartedAt = nowUnix
-		out = append(out, *st)
+		if claimErr != nil {
+			return nil, claimErr
+		}
+		row, rowErr := model.GetChannelModelRecoveryState(claim.ChannelID, claim.Model)
+		if rowErr != nil {
+			_ = model.FinishRecoveryProbeFailure(claim, "claimed state reload failed: "+rowErr.Error(), now)
+			continue
+		}
+		cacheRecoveryRow(row)
+		out = append(out, DurableSmartProbe{State: recoveryRowToSmartState(row), Claim: claim})
 	}
-	smartDownMu.Unlock()
-	return out
+	return out, nil
 }
 
-var enableChannelForSmartRecovery = model.EnableChannelForSmartRecovery
-var refreshChannelCacheAfterSmartRecovery = model.InitChannelCache
-
-// FinishSmartProbeWithChannelRecovery records a successful L2 model probe and,
-// for the final model, reopens the DB channel without clearing per-model canary
-// state. A DB failure returns the current model to quarantine while preserving
-// sibling canaries.
-func FinishSmartProbeWithChannelRecovery(chId int, mdl string) (bool, error) {
-	key := smartDownKey(chId, mdl)
-	smartDownMu.Lock()
-	st, exists := smartDown[key]
-	if !exists {
-		smartDownMu.Unlock()
-		return false, fmt.Errorf("smart-down state not found for channel %d model %s", chId, mdl)
+func FinishDurableSmartProbe(claim model.ProbeClaim, ok bool, errMsg string) (bool, error) {
+	var err error
+	reopened := false
+	if ok {
+		reopened, err = model.FinishRecoveryProbeSuccess(claim, canaryPercents[1], time.Now())
+	} else {
+		err = model.FinishRecoveryProbeFailure(claim, errMsg, time.Now())
 	}
-	for otherKey, other := range smartDown {
-		if otherKey != key && other.ChannelId == chId && other.Level == SmartDownModel && other.CanaryStage == 0 {
-			startCanaryLocked(st)
-			smartDownMu.Unlock()
-			return false, nil
-		}
-	}
-	smartDownMu.Unlock()
-
-	// Do DB/cache I/O without smartDownMu. Channel selection holds its cache
-	// read lock before calling the SmartDown hook; reversing that order here
-	// would deadlock. The disabled cache still gates traffic during this phase.
-	if err := enableChannelForSmartRecovery(chId); err != nil {
-		smartDownMu.Lock()
-		if current := smartDown[key]; current == st {
-			failProbeLocked(current, "L2 channel enable failed: "+err.Error())
-		}
-		smartDownMu.Unlock()
+	if err != nil {
 		return false, err
 	}
-
-	smartDownMu.Lock()
-	if current := smartDown[key]; current == st {
-		startCanaryLocked(current)
+	row, err := model.GetChannelModelRecoveryState(claim.ChannelID, claim.Model)
+	if err != nil {
+		return false, err
 	}
-	smartDownMu.Unlock()
-	// Publish the DB-enabled channel only after every model has a canary gate.
-	refreshChannelCacheAfterSmartRecovery()
-	return true, nil
-}
-
-func startCanaryLocked(st *SmartDownState) {
-	st.Probing = false
-	st.ProbeStartedAt = 0
-	st.LastError = ""
-	st.CanaryStage = 1
-	st.CanaryPercent = canaryPercents[1]
-	st.CanarySuccess = 0
-	st.CanaryFailure = 0
-	st.NextProbeAt = 0
-}
-
-func failProbeLocked(st *SmartDownState, errMsg string) {
-	st.Probing = false
-	st.ProbeStartedAt = 0
-	st.CanaryStage = 0
-	st.CanaryPercent = 0
-	st.CanarySuccess = 0
-	st.Attempts++
-	st.LastError = common.LocalLogPreview(errMsg)
-	backoff := smartProbeBaseInterval << uint(minInt(st.Attempts, 8))
-	if backoff > smartProbeMaxInterval || backoff <= 0 {
-		backoff = smartProbeMaxInterval
+	cacheRecoveryRow(row)
+	if reopened {
+		refreshChannelCacheAfterSmartRecovery()
 	}
-	st.NextProbeAt = time.Now().Add(backoff).Unix()
+	return reopened, nil
 }
+
+var refreshChannelCacheAfterSmartRecovery = model.InitChannelCache
 
 // ApplyScheduledProbeObservation reconciles a completed scheduled probe with
 // the smart-recovery state. It atomically claims only an idle quarantined item,
 // so it cannot race the dedicated recovery worker. Statistics are recorded only
 // after the state transition succeeds; a DB recovery failure is counted as an
 // operational failure and remains quarantined.
-func ApplyScheduledProbeObservation(chId int, mdl string, channelEnabled bool, ok bool, errMsg string) (bool, error) {
-	key := smartDownKey(chId, mdl)
-	smartDownMu.Lock()
-	st, exists := smartDown[key]
-	if !exists || st.Probing || st.CanaryStage > 0 {
-		smartDownMu.Unlock()
+func ApplyScheduledProbeObservation(chId int, mdl string, _ bool, ok bool, errMsg string) (bool, error) {
+	claim, err := model.ClaimRecoveryState(chId, mdl, probeOwner, time.Now(), smartProbeStaleSeconds*time.Second)
+	if errors.Is(err, model.ErrRecoveryStateConflict) || errors.Is(err, gorm.ErrRecordNotFound) {
 		return false, nil
 	}
-	st.Probing = true
-	st.ProbeStartedAt = time.Now().Unix()
-	smartDownMu.Unlock()
-
-	if !ok {
-		FinishSmartProbe(chId, mdl, false, errMsg)
-		RecordRelayFailure(chId, mdl)
-		return true, nil
-	}
-	if channelEnabled {
-		FinishSmartProbe(chId, mdl, true, "")
-		RecordRelaySuccess(chId, mdl)
-		return true, nil
-	}
-	_, err := FinishSmartProbeWithChannelRecovery(chId, mdl)
 	if err != nil {
+		return false, err
+	}
+	if _, err := FinishDurableSmartProbe(claim, ok, errMsg); err != nil {
 		RecordRelayFailure(chId, mdl)
 		return true, err
 	}
-	RecordRelaySuccess(chId, mdl)
-	return true, nil
-}
-
-// FinishSmartProbe 记录探测结果。ok=true 时进入 1% Canary；ok=false 时退避。
-func FinishSmartProbe(chId int, mdl string, ok bool, errMsg string) (channelFullyRecovered bool) {
-	key := smartDownKey(chId, mdl)
-	smartDownMu.Lock()
-	defer smartDownMu.Unlock()
-	st, exists := smartDown[key]
-	if !exists {
-		return false
-	}
 	if ok {
-		if st.Level == SmartDownChannel || st.Model == "" {
-			delete(smartDown, key)
-			return true
-		}
-		// A successful synthetic probe starts controlled real-traffic recovery;
-		// it does not prove production traffic is healthy yet.
-		startCanaryLocked(st)
-		// Once every model on an L2 channel has reached at least stage 1, the DB
-		// channel may reopen. Per-model canary gates still control real traffic.
-		for _, other := range smartDown {
-			if other.ChannelId == chId && other.Level == SmartDownModel && other.CanaryStage == 0 {
-				return false
-			}
-		}
-		return true
+		RecordRelaySuccess(chId, mdl)
+	} else {
+		RecordRelayFailure(chId, mdl)
 	}
-	failProbeLocked(st, errMsg)
-	return false
+	return true, nil
 }
 
 // ListSmartDown 返回全部下线记录快照（只读看板用）。
@@ -806,7 +748,7 @@ func SmartDownModels(chId int) map[string]bool {
 	defer smartDownMu.RUnlock()
 	out := map[string]bool{}
 	for _, st := range smartDown {
-		if st.ChannelId == chId && st.Level == SmartDownModel && st.Model != "" {
+		if st.ChannelId == chId && st.Level == SmartDownModel && st.Model != "" && st.CanaryStage == 0 {
 			out[st.Model] = true
 		}
 	}
@@ -815,6 +757,11 @@ func SmartDownModels(chId int) map[string]bool {
 
 // IsSmartDown 该 (channel, model) 是否处于下线态。
 func IsSmartDown(chId int, mdl string) bool {
+	// If durable state could not be loaded, isolation cannot be verified. Fail
+	// closed while the feature is enabled instead of silently routing around DB.
+	if SmartDisableEnabled() && !recoveryCacheReady.Load() {
+		return true
+	}
 	// [CUSTOM-fix P1] 选路热路径每请求×每候选都会调用：RWMutex 读锁 + 空表快路径，
 	// 避免与探测 worker 的写锁互相卡。
 	if smartDownLen() == 0 {
@@ -826,9 +773,27 @@ func IsSmartDown(chId int, mdl string) bool {
 	return ok && st.CanaryStage == 0
 }
 
+func HasActiveRecoveryState(chId int, mdl string) bool {
+	// When readiness is unknown, force the durable lookup instead of silently
+	// dropping a Canary outcome. Routing itself remains fail-closed.
+	if !recoveryCacheReady.Load() {
+		return true
+	}
+	if smartDownLen() == 0 {
+		return false
+	}
+	smartDownMu.RLock()
+	defer smartDownMu.RUnlock()
+	_, ok := smartDown[smartDownKey(chId, mdl)]
+	return ok
+}
+
 // SmartRouteBlocked returns whether this candidate is blocked. Quarantined
 // entries are always blocked; canary entries are admitted by a stable window.
 func SmartRouteBlocked(chId int, mdl string) bool {
+	if !recoveryCacheReady.Load() {
+		return true
+	}
 	smartDownMu.Lock()
 	defer smartDownMu.Unlock()
 	st, ok := smartDown[smartDownKey(chId, mdl)]
@@ -854,49 +819,74 @@ type CanaryTransition struct {
 	HealthScore float64
 }
 
-func RecordSmartCanaryOutcome(chId int, mdl string, ok bool) CanaryTransition {
-	smartDownMu.Lock()
-	defer smartDownMu.Unlock()
-	key := smartDownKey(chId, mdl)
-	st, exists := smartDown[key]
-	if !exists || st.CanaryStage == 0 {
-		return CanaryTransition{}
+func RecordRealTrafficOutcome(chId int, mdl string, ok bool) (CanaryTransition, error) {
+	if ok {
+		RecordRelaySuccess(chId, mdl)
+	} else {
+		RecordRelayFailure(chId, mdl)
 	}
-	transition := CanaryTransition{Active: true, Stage: st.CanaryStage, Percent: st.CanaryPercent, DisabledAt: st.DisabledAt, Attempts: st.Attempts}
+	// Healthy routes have no recovery row in the routing cache. Avoid a DB read
+	// on every normal request; only active recovery/Canary traffic needs CAS.
+	if !HasActiveRecoveryState(chId, mdl) {
+		return CanaryTransition{}, nil
+	}
+	transition, err := RecordSmartCanaryOutcome(chId, mdl, ok)
+	if err != nil {
+		// A lost Canary outcome can otherwise leave unsafe stale routing state.
+		// Force all subsequent routing to fail closed until the worker reloads DB.
+		recoveryCacheReady.Store(false)
+	}
+	return transition, err
+}
+
+func RecordSmartCanaryOutcome(chId int, mdl string, ok bool) (CanaryTransition, error) {
+	row, err := model.GetChannelModelRecoveryState(chId, mdl)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return CanaryTransition{}, nil
+		}
+		return CanaryTransition{}, err
+	}
+	if row.State != model.RecoveryStateCanary || row.CanaryStage == 0 {
+		return CanaryTransition{}, nil
+	}
+	transition := CanaryTransition{Active: true, Stage: row.CanaryStage, Percent: row.CanaryPercent, DisabledAt: row.CreatedAt / 1000, Attempts: row.Attempts}
+	now := time.Now()
 	if !ok {
-		st.CanaryStage = 0
-		st.CanaryPercent = 0
-		st.CanarySuccess = 0
-		st.CanaryFailure++
-		st.Attempts++
-		st.LastError = "金丝雀真实流量失败，已退回隔离"
-		st.NextProbeAt = time.Now().Add(smartProbeBaseInterval).Unix()
+		if err := model.RollbackRecoveryCanary(chId, mdl, row.Generation, "金丝雀真实流量失败，已退回隔离", now); err != nil {
+			return CanaryTransition{}, err
+		}
+		updated, err := model.GetChannelModelRecoveryState(chId, mdl)
+		if err != nil {
+			return CanaryTransition{}, err
+		}
+		cacheRecoveryRow(updated)
+		model.InitChannelCache()
 		transition.RolledBack = true
 		transition.Stage = 0
 		transition.Percent = 0
-		return transition
+		return transition, nil
 	}
-	st.CanarySuccess++
-	health := AssessRelayHealth(chId, mdl, time.Now())
-	st.HealthScore = health.Score
-	st.Confidence = health.Confidence
+
+	health := AssessRelayHealth(chId, mdl, now)
 	transition.HealthScore = health.Score
-	target := canarySuccessTargets[st.CanaryStage]
-	// Hysteresis: disable at <=28, but promotion requires >=72. A few lucky
-	// requests cannot immediately erase a sustained bad history.
-	if target > 0 && st.CanarySuccess >= target && health.Score >= healthRecoverScore && health.Confidence >= 0.35 {
-		st.CanaryStage++
-		st.CanarySuccess = 0
-		st.CanaryPercent = canaryPercents[st.CanaryStage]
-		transition.Promoted = true
-		transition.Stage = st.CanaryStage
-		transition.Percent = st.CanaryPercent
+	nextStage, nextPercent, graduate := row.CanaryStage, row.CanaryPercent, false
+	target := canarySuccessTargets[row.CanaryStage]
+	if target > 0 && row.CanarySuccess+1 >= target && health.Score >= healthRecoverScore && health.Confidence >= 0.35 {
+		nextStage = row.CanaryStage + 1
+		nextPercent = canaryPercents[nextStage]
+		graduate = nextPercent >= 100
+		transition.Promoted = !graduate
+		transition.Stage = nextStage
+		transition.Percent = nextPercent
+		transition.Recovered = graduate
 	}
-	if st.CanaryPercent >= 100 {
-		delete(smartDown, key)
-		transition.Recovered = true
+	updated, err := model.RecordRecoveryCanarySuccess(chId, mdl, row.Generation, row.CanaryStage, nextStage, nextPercent, graduate, now)
+	if err != nil {
+		return CanaryTransition{}, err
 	}
-	return transition
+	cacheRecoveryRow(updated)
+	return transition, nil
 }
 
 // smartDownLen 无锁近似：仅用于空表快路径判断（0 或非 0 都安全）。
@@ -906,53 +896,15 @@ func smartDownLen() int {
 	return len(smartDown)
 }
 
-// ===== 渠道级快速隔离（智能化增强：死渠道几十次请求内退出调度） =====
-
 // smartChannelModelsFetcher 可注入的渠道模型列表获取（单测替换，避免依赖 DB）。
+// 仅用于核对是否每个配置模型都已经独立进入模型级下线态；严禁据此一次性
+// 伪造其他模型的失败记录。
 var smartChannelModelsFetcher = func(chId int) ([]string, error) {
 	ch, err := model.GetChannelById(chId, false)
 	if err != nil || ch == nil {
 		return nil, fmt.Errorf("channel %d not found", chId)
 	}
 	return ch.GetModels(), nil
-}
-
-// smartDisableChannelImpl 可注入的整渠道禁用实现（单测替换，避免触碰 DB）。
-var smartDisableChannelImpl = DisableChannel
-
-// quarantineWholeChannel 渠道级快速隔离：把该渠道全部模型登记为 L1 下线，
-// 再按「全模型已下线」语义升级 L2 整渠道禁用。
-//
-// reason 必须同时包含「智能下线」和完整模型列表——那是
-// RestoreSmartDownFromDB 与 probeOne 的跨重启解析协议，改文案必须同步。
-func quarantineWholeChannel(channelError types.ChannelError, streak int, err *types.NewAPIError) bool {
-	models, gerr := smartChannelModelsFetcher(channelError.ChannelId)
-	if gerr != nil || len(models) == 0 {
-		return false
-	}
-	last := ""
-	reason := fmt.Sprintf("渠道级连续失败 %d 次，整渠道快速隔离；最后错误：%s",
-		streak, common.LocalLogPreview(err.Error()))
-	for _, m := range models {
-		m = strings.TrimSpace(m)
-		if m == "" {
-			continue
-		}
-		// 已在下线态的模型不重置退避进度，只补齐漏网的
-		if !IsSmartDown(channelError.ChannelId, m) {
-			RegisterSmartDownAttributed(channelError.ChannelId, channelError.ChannelName, m, SmartDownModel, reason, AttributeChannelError(err))
-		}
-		last = m
-	}
-	if last == "" {
-		return false
-	}
-	common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用 L2 快速隔离：通道「%s」（#%d）渠道级连续失败 %d 次，全部模型一次性下线",
-		channelError.ChannelName, channelError.ChannelId, streak))
-	NotifyChannelDown(channelError.ChannelId, channelError.ChannelName, "L2", "全部模型", fmt.Sprintf("渠道级连续失败 %d 次，快速隔离", streak))
-	disableReason := formatSmartL2Reason(fmt.Sprintf("渠道级连续失败 %d 次，全部模型均已被智能下线", streak), models)
-	smartDisableChannelImpl(channelError, disableReason)
-	return true
 }
 
 // ListSmartDownWithStats 看板专用：下线快照 + 近期滚动统计（成功率依据）。

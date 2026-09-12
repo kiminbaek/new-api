@@ -173,7 +173,9 @@ func main() {
 
 	// [CUSTOM] 智能自动禁用：安装选路过滤钩子 + 重建 L2 探测队列 + 启动探测恢复 worker
 	service.InitSmartDisable()
-	service.RestoreSmartDownFromDB()
+	if err := service.RestoreSmartDownFromDB(); err != nil {
+		common.SysLog("[CUSTOM] smart disable durable restore failed; routing remains fail-closed: " + common.LocalLogPreview(err.Error()))
+	}
 	controller.InitSmartDisableProbe()
 
 	if os.Getenv("ENABLE_PPROF") == "true" {

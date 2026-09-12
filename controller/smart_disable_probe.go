@@ -13,7 +13,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -52,13 +51,23 @@ func InitSmartDisableProbe() {
 }
 
 func runSmartProbeTick() {
-	due := service.DueSmartProbes(0) // adaptive budget: 1..5
+	if !service.RecoveryCacheReady() {
+		if err := service.RestoreSmartDownFromDB(); err != nil {
+			common.SysLog("[CUSTOM] smart-disable cache reload retry failed: " + common.LocalLogPreview(err.Error()))
+			return
+		}
+	}
+	due, err := service.ClaimDurableSmartProbes(5)
+	if err != nil {
+		common.SysLog("[CUSTOM] smart-disable probe claim failed: " + common.LocalLogPreview(err.Error()))
+		return
+	}
 	if len(due) == 0 {
 		return
 	}
 	rootID := smartProbeUserID()
-	for _, st := range due {
-		probeOne(st, rootID)
+	for _, probe := range due {
+		probeOne(probe, rootID)
 	}
 }
 
@@ -74,37 +83,28 @@ func smartProbeUserID() int {
 	return id
 }
 
-func probeOne(st service.SmartDownState, testUserID int) {
+func probeOne(probe service.DurableSmartProbe, testUserID int) {
+	st := probe.State
 	ch, err := model.GetChannelById(st.ChannelId, false)
 	if err != nil || ch == nil {
-		// 渠道已被删除：记录无意义，直接清掉。
-		service.ClearSmartDown(st.ChannelId, st.Model)
+		_, _ = service.FinishDurableSmartProbe(probe.Claim, false, "渠道不存在，等待配置同步清理")
 		return
 	}
 
-	// 渠道已被整体禁用（手动 / 账号级错误 / L2 升级）：
-	//   - 人工禁用或账号级禁用 → 不越权，交给上游的整渠道恢复巡检处理
-	//   - 智能系统 L2 升级（reason 含「智能下线」标记）→ 照常探测该模型，
-	//     探测通过就自动把渠道重新启用，保证全自动恢复不留死角
+	// 自动禁用(status=3)无论来自当前智能逻辑还是历史版本的粗粒度逻辑，
+	// 都按模型逐项探测；首个成功模型即可重开渠道，失败兄弟继续隔离。
+	// 人工禁用(status=2)绝不自动触碰。
 	if ch.Status != common.ChannelStatusEnabled {
-		info := ch.GetOtherInfo()
-		reason, _ := info["status_reason"].(string)
-		if st.Level == service.SmartDownModel && strings.Contains(reason, "智能下线") {
-			common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用探测：通道「%s」（#%d）处于 L2 整渠道禁用，尝试模型级探测恢复", ch.Name, ch.Id))
+		if ch.Status == common.ChannelStatusAutoDisabled && st.Level == service.SmartDownModel {
+			common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用探测：通道「%s」（#%d）处于自动禁用，尝试模型级探测恢复", ch.Name, ch.Id))
 		} else {
-			service.FinishSmartProbe(st.ChannelId, st.Model, false, "渠道被人工/账号级禁用，跳过模型级探测")
+			_, _ = service.FinishDurableSmartProbe(probe.Claim, false, "渠道非自动禁用，跳过模型级探测")
 			return
 		}
 	}
 
-	if st.Level == service.SmartDownChannel {
-		// 整渠道级记录只用于看板展示；渠道状态由上游恢复巡检负责。
-		service.FinishSmartProbe(st.ChannelId, st.Model, false, "整渠道禁用，等待渠道级恢复巡检")
-		return
-	}
-
 	if st.Model == "" {
-		service.ClearSmartDown(st.ChannelId, st.Model)
+		_, _ = service.FinishDurableSmartProbe(probe.Claim, false, "模型名为空，等待配置同步清理")
 		return
 	}
 
@@ -114,20 +114,15 @@ func probeOne(st service.SmartDownState, testUserID int) {
 	result := testChannel(ctx, ch, testUserID, st.Model, "", shouldUseStreamForAutomaticChannelTest(ch))
 
 	if result.newAPIError == nil && result.localErr == nil {
-		channelFullyRecovered := false
-		if ch.Status != common.ChannelStatusEnabled {
-			channelFullyRecovered, err = service.FinishSmartProbeWithChannelRecovery(st.ChannelId, st.Model)
-			if err != nil {
-				common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用恢复失败：通道「%s」（#%d）模型 %s 探测通过但 DB 启用失败，保留隔离态：%s",
-					ch.Name, ch.Id, st.Model, common.LocalLogPreview(err.Error())))
-				return
-			}
-		} else {
-			channelFullyRecovered = service.FinishSmartProbe(st.ChannelId, st.Model, true, "")
+		channelReopened, recoveryErr := service.FinishDurableSmartProbe(probe.Claim, true, "")
+		if recoveryErr != nil {
+			common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用恢复失败：通道「%s」（#%d）模型 %s 探测通过但 DB 启用失败，保留隔离态：%s",
+				ch.Name, ch.Id, st.Model, common.LocalLogPreview(recoveryErr.Error())))
+			return
 		}
 		service.RecordRelaySuccess(st.ChannelId, st.Model)
-		if channelFullyRecovered {
-			common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用恢复：通道「%s」（#%d）全部隔离模型均已实测恢复，L2 整渠道禁用解除并保留 1%% 金丝雀", ch.Name, ch.Id))
+		if channelReopened {
+			common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用恢复：通道「%s」（#%d）已有可用模型通过探测，整渠道禁用解除；失败兄弟继续隔离", ch.Name, ch.Id))
 		}
 		common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用恢复：通道「%s」（#%d）模型 %s 探测通过，进入 1%% 金丝雀（下线时长 %s，探测 %d 次）",
 			ch.Name, ch.Id, st.Model, time.Since(time.Unix(st.DisabledAt, 0)).Truncate(time.Second), st.Attempts+1))
@@ -140,7 +135,10 @@ func probeOne(st service.SmartDownState, testUserID int) {
 	} else if result.localErr != nil {
 		errMsg = result.localErr.Error()
 	}
-	service.FinishSmartProbe(st.ChannelId, st.Model, false, errMsg)
+	if _, finishErr := service.FinishDurableSmartProbe(probe.Claim, false, errMsg); finishErr != nil {
+		common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用探测结果已过期或落库失败：通道「%s」（#%d）模型 %s：%s", ch.Name, ch.Id, st.Model, common.LocalLogPreview(finishErr.Error())))
+		return
+	}
 	common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用探测未通过：通道「%s」（#%d）模型 %s，%s（第 %d 次，退避后重试）",
 		ch.Name, ch.Id, st.Model, common.LocalLogPreview(errMsg), st.Attempts+1))
 }

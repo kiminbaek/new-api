@@ -88,7 +88,6 @@ const createRoutingReliabilitySchema = (
       ChannelDisableThreshold: numericString,
       AutomaticDisableChannelEnabled: z.boolean(),
       SmartAutoDisableEnabled: z.boolean(), // [CUSTOM] 智能自动禁用总开关
-      AutomaticEnableChannelEnabled: z.boolean(),
       AutomaticDisableKeywords: z.string(),
       AutomaticDisableStatusCodes: z.string(),
       AutomaticRetryStatusCodes: z.string(),
@@ -186,7 +185,6 @@ type RoutingReliabilitySectionProps = {
     RetryTimes: number
     ChannelDisableThreshold: string
     AutomaticDisableChannelEnabled: boolean
-    AutomaticEnableChannelEnabled: boolean
     AutomaticDisableKeywords: string
     AutomaticDisableStatusCodes: string
     AutomaticRetryStatusCodes: string
@@ -214,7 +212,6 @@ type NormalizedRoutingReliabilityValues = {
   RetryTimes: number
   ChannelDisableThreshold: string
   AutomaticDisableChannelEnabled: boolean
-  AutomaticEnableChannelEnabled: boolean
   AutomaticDisableKeywords: string
   AutomaticDisableStatusCodes: string
   AutomaticRetryStatusCodes: string
@@ -250,7 +247,6 @@ const buildFormDefaults = (
   RetryTimes: defaults.RetryTimes ?? 0,
   ChannelDisableThreshold: defaults.ChannelDisableThreshold ?? '',
   AutomaticDisableChannelEnabled: defaults.AutomaticDisableChannelEnabled,
-  AutomaticEnableChannelEnabled: defaults.AutomaticEnableChannelEnabled,
   AutomaticDisableKeywords: normalizeLineEndings(
     defaults.AutomaticDisableKeywords ?? ''
   ),
@@ -284,7 +280,6 @@ const normalizeDefaults = (
   RetryTimes: defaults.RetryTimes ?? 0,
   ChannelDisableThreshold: (defaults.ChannelDisableThreshold ?? '').trim(),
   AutomaticDisableChannelEnabled: defaults.AutomaticDisableChannelEnabled,
-  AutomaticEnableChannelEnabled: defaults.AutomaticEnableChannelEnabled,
   AutomaticDisableKeywords: normalizeLineEndings(
     defaults.AutomaticDisableKeywords ?? ''
   ),
@@ -320,7 +315,6 @@ const normalizeFormValues = (
   RetryTimes: values.RetryTimes,
   ChannelDisableThreshold: values.ChannelDisableThreshold.trim(),
   AutomaticDisableChannelEnabled: values.AutomaticDisableChannelEnabled,
-  AutomaticEnableChannelEnabled: values.AutomaticEnableChannelEnabled,
   AutomaticDisableKeywords: normalizeLineEndings(
     values.AutomaticDisableKeywords
   ),
@@ -518,7 +512,7 @@ export function RoutingReliabilitySection({
                     </FormControl>
                     <FormDescription>
                       {t(
-                        'Accepts comma-separated status codes and inclusive ranges.'
+                        'Matching errors feed only the current channel-model health state; they never disable an entire channel by themselves. Accepts comma-separated status codes and inclusive ranges.'
                       )}{' '}
                       {autoRetryParsed.ok &&
                         autoRetryParsed.normalized &&
@@ -681,28 +675,6 @@ export function RoutingReliabilitySection({
                 )}
               />
 
-              <FormField
-                control={form.control}
-                name='AutomaticEnableChannelEnabled'
-                render={({ field }) => (
-                  <SettingsSwitchItem>
-                    <SettingsSwitchContent>
-                      <FormLabel>{t('Re-enable on success')}</FormLabel>
-                      <FormDescription>
-                        {t(
-                          'Bring channels back online after successful checks'
-                        )}
-                      </FormDescription>
-                    </SettingsSwitchContent>
-                    <FormControl>
-                      <Switch
-                        checked={field.value}
-                        onCheckedChange={field.onChange}
-                      />
-                    </FormControl>
-                  </SettingsSwitchItem>
-                )}
-              />
             </div>
           </div>
           </>
@@ -725,7 +697,9 @@ export function RoutingReliabilitySection({
                     <SettingsSwitchContent>
                       <FormLabel>{t('Disable on failure')}</FormLabel>
                       <FormDescription>
-                        {t('Automatically disable channels when tests fail')}
+                        {t(
+                          'Allow adaptive isolation of failing channel-model pairs after enough evidence is collected'
+                        )}
                       </FormDescription>
                     </SettingsSwitchContent>
                     <FormControl>
@@ -747,7 +721,7 @@ export function RoutingReliabilitySection({
                       <FormLabel>{t('Smart auto-disable')}</FormLabel>
                       <FormDescription>
                         {t(
-                          'Grade failures instead of disabling the whole channel: transient errors only lower priority, repeated failures take just that model offline, and only account-level errors (balance, suspension, quota) disable the channel. Recovery is driven by real probe requests, fully automatic.'
+                          'Grade failures per channel-model pair: transient errors only lower priority, repeated failures isolate just that model, and the whole channel is disabled only after every configured model is independently isolated. Recovery is driven by real probe requests, fully automatic.'
                         )}
                       </FormDescription>
                     </SettingsSwitchContent>
@@ -778,7 +752,7 @@ export function RoutingReliabilitySection({
                     </FormControl>
                     <FormDescription>
                       {t(
-                        'Automatically disable channels exceeding this response time'
+                        'Treat responses exceeding this threshold as failure evidence for the current model'
                       )}
                     </FormDescription>
                     <FormMessage />
@@ -791,7 +765,7 @@ export function RoutingReliabilitySection({
                 name='AutomaticDisableStatusCodes'
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t('Auto-disable status codes')}</FormLabel>
+                    <FormLabel>{t('Model failure status codes')}</FormLabel>
                     <FormControl>
                       <Input
                         placeholder={t('e.g. 401, 403, 429, 500-599')}
@@ -801,7 +775,7 @@ export function RoutingReliabilitySection({
                     </FormControl>
                     <FormDescription>
                       {t(
-                        'Accepts comma-separated status codes and inclusive ranges.'
+                        'Matching errors feed only the current channel-model health state; they never disable an entire channel by themselves. Accepts comma-separated status codes and inclusive ranges.'
                       )}{' '}
                       {autoDisableParsed.ok &&
                         autoDisableParsed.normalized &&
@@ -832,7 +806,7 @@ export function RoutingReliabilitySection({
                     </FormControl>
                     <FormDescription>
                       {t(
-                        'If an upstream error contains any of these keywords (case insensitive), the channel will be disabled automatically.'
+                        'Matching upstream errors are attributed to the current model and enter adaptive isolation; they never disable an entire channel by themselves.'
                       )}
                     </FormDescription>
                     <FormMessage />

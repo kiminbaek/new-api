@@ -213,7 +213,7 @@ func GetRandomSatisfiedChannel(
 		channels = kept
 	}
 
-	// [CUSTOM] 智能自动禁用：剔除模型级下线的渠道（全部下线时 fail-open 放行）
+	// [CUSTOM] 智能自动禁用：剔除持久隔离的渠道×模型；全部隔离时 fail-closed，交给备用组/无渠道链处理
 	channels = filterSmartDownChannels(channels, model)
 
 	if len(channels) == 0 {
