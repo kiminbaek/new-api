@@ -929,47 +929,52 @@ type channelTestSummary struct {
 }
 
 type modelProbeResult struct {
-	ChannelID   int    `json:"channel_id"`
-	ChannelName string `json:"channel_name"`
-	Model       string `json:"model"`
-	Success     bool   `json:"success"`
-	ElapsedMS   int64  `json:"elapsed_ms"`
-	Reason      string `json:"reason,omitempty"`
-	Suggestion  string `json:"suggestion,omitempty"`
+	ChannelID     int    `json:"channel_id"`
+	ChannelName   string `json:"channel_name"`
+	Model         string `json:"model"`
+	Success       bool   `json:"success"`
+	ElapsedMS     int64  `json:"elapsed_ms"`
+	Reason        string `json:"reason,omitempty"`
+	Suggestion    string `json:"suggestion,omitempty"`
+	ErrorCategory string `json:"error_category,omitempty"`
+	ErrorCode     string `json:"error_code,omitempty"`
+	HTTPStatus    int    `json:"http_status,omitempty"`
+	Action        string `json:"action,omitempty"`
 }
 
 func probeReason(result testResult) (string, string) {
 	if result.newAPIError == nil && result.localErr == nil {
 		return "检测通过，收到有效模型响应", "无需处理，继续观察响应时间"
 	}
-	err := result.localErr
-	if err == nil && result.newAPIError != nil {
-		err = result.newAPIError
+	// Persist/notify only a bounded semantic classification. Raw upstream
+	// bodies may include provider internals and stay in protected server logs.
+	if result.newAPIError != nil {
+		attribution := service.AttributeChannelError(result.newAPIError)
+		switch attribution.Category {
+		case "account_quota":
+			return "当前模型对应的上游账号池额度不足", "该请求会切换备用渠道；仅隔离此渠道的当前模型，跨模型一致失败后才升级整渠道"
+		case "account_disabled":
+			return "上游账户或组织已被明确停用", "检查上游账户状态；该故障会隔离整个渠道"
+		case "authentication":
+			return "上游认证凭据无效或已被撤销", "检查渠道 API Key 和账号权限；该故障会影响使用相同凭据的整个渠道"
+		case "upstream_capacity":
+			return "当前模型没有可用的上游账号或 Key", "补充该模型的上游账号池，其他模型继续参与路由"
+		case "model_missing":
+			return "上游未找到该模型或模型已下架", "核对模型名称和上游模型列表；仅隔离当前渠道的该模型"
+		case "rate_limit":
+			return "上游限流或瞬时容量不足", "降低请求频率或补充备用 Key，系统会先降权观察"
+		case "timeout":
+			return "上游请求超时", "检查上游延迟、代理和网络，系统会先降权观察"
+		case "upstream_5xx":
+			return "上游服务返回 5xx 错误", "等待上游恢复并观察连续失败次数"
+		case "request_error":
+			return "探测请求参数与该模型不兼容", "调整该模型的测试参数；此类失败不污染渠道健康状态"
+		}
 	}
-	if err == nil {
-		return "检测失败，原因未确定", "稍后重试并查看渠道日志"
+	if result.localErr != nil {
+		return "本地探测请求执行失败", "查看受保护的服务日志并检查网络与协议适配"
 	}
-	// Upstream error bodies may contain request fragments or provider internals.
-	// Persist/notify only a bounded classification; detailed evidence remains in
-	// the protected channel error log.
-	message := "检测失败，原因未确定"
-	lower := strings.ToLower(err.Error())
-	suggestion := "检查渠道日志、模型名称和上游服务状态"
-	switch {
-	case strings.Contains(lower, "401"), strings.Contains(lower, "403"), strings.Contains(lower, "unauthorized"):
-		message = "认证或权限被上游拒绝"
-		suggestion = "检查上游 API Key、账号权限和额度"
-	case strings.Contains(lower, "404"), strings.Contains(lower, "not found"):
-		message = "上游未找到该模型或接口"
-		suggestion = "检查模型名称及上游模型列表，确认模型仍可用"
-	case strings.Contains(lower, "429"), strings.Contains(lower, "rate limit"):
-		message = "上游限流或容量不足"
-		suggestion = "降低请求频率或增加备用 Key，检查上游限流额度"
-	case strings.Contains(lower, "timeout"), strings.Contains(lower, "deadline"):
-		message = "上游请求超时"
-		suggestion = "检查上游延迟、代理和网络，必要时降低该渠道优先级"
-	}
-	return message, suggestion
+	return "检测失败，原因未分类", "查看受保护的服务日志并核对渠道、模型与上游状态"
 }
 
 func testChannelForHealthCheck(ctx context.Context, channel *model.Channel, testUserID int, allowDisableFn func(*model.Channel) bool, disableThreshold int64) channelTestSummary {
@@ -1248,6 +1253,22 @@ func runSequentialModelProbes(ctx context.Context, channels []*model.Channel, te
 		}
 		reason, suggestion := probeReason(result)
 		item := modelProbeResult{ChannelID: probe.channel.Id, ChannelName: probe.channel.Name, Model: probe.model, Success: result.newAPIError == nil && result.localErr == nil, ElapsedMS: time.Since(started).Milliseconds(), Reason: reason, Suggestion: suggestion}
+		if item.Success {
+			item.Action = "pass"
+		} else if result.newAPIError != nil {
+			attribution := service.AttributeChannelError(result.newAPIError)
+			item.ErrorCategory = attribution.Category
+			item.ErrorCode = string(result.newAPIError.GetErrorCode())
+			item.HTTPStatus = result.newAPIError.StatusCode
+			if service.ShouldRecordRelayHealthFailure(result.newAPIError, false, false) {
+				item.Action = "observe"
+			} else {
+				item.Action = "ignored_request_error"
+			}
+		} else {
+			item.ErrorCategory = "local_error"
+			item.Action = "ignored_request_error"
+		}
 		reconciled := false
 		if service.IsSmartDown(probe.channel.Id, probe.model) {
 			var recoveryErr error
@@ -1256,6 +1277,10 @@ func runSequentialModelProbes(ctx context.Context, channels []*model.Channel, te
 				item.Success = false
 				item.Reason = "模型响应正常，但恢复状态保存失败"
 				item.Suggestion = "检查数据库和渠道状态后重试恢复"
+				item.ErrorCategory = "recovery_error"
+				item.Action = "observe"
+			} else if reconciled {
+				item.Action = "recover"
 			}
 		}
 		if !reconciled {
@@ -1275,7 +1300,9 @@ func runSequentialModelProbes(ctx context.Context, channels []*model.Channel, te
 					}
 					channelErr := types.NewChannelError(probe.channel.Id, probe.channel.Type, probe.channel.Name,
 						probe.channel.ChannelInfo.IsMultiKey, usingKey, probe.channel.GetAutoBan())
-					service.ApplyDisablePolicy(*channelErr, probe.model, result.newAPIError)
+					if action, _ := service.ApplyDisablePolicy(*channelErr, probe.model, result.newAPIError); action != service.ActionNone {
+						item.Action = action.String()
+					}
 				}
 			}
 		}
@@ -1360,6 +1387,11 @@ func runChannelTestTask(ctx context.Context, mode string, notify bool, isSchedul
 		}
 		summary, probes := runSequentialModelProbes(ctx, selected, testUserID, report)
 		summary.Probes = probes
+		// Persist completed observations even when the task is cancelled halfway.
+		// Run/channel/model uniqueness keeps a retried system task idempotent.
+		if err := persistChannelModelProbeResults(runIdentity, probes); err != nil {
+			return summary, fmt.Errorf("persist channel model probe history: %w", err)
+		}
 		if err := ctx.Err(); err != nil {
 			return summary, err
 		}
@@ -1498,6 +1530,23 @@ func recordChannelTestRun(channels []*model.Channel) {
 	for _, ch := range channels {
 		channelTestLastRun.Store(ch.Id, now)
 	}
+}
+
+func persistChannelModelProbeResults(runIdentity string, results []modelProbeResult) error {
+	rows := make([]model.ChannelModelProbeResult, 0, len(results))
+	createdAt := time.Now().Unix()
+	for _, item := range results {
+		rows = append(rows, model.ChannelModelProbeResult{
+			RunID: runIdentity, ChannelID: item.ChannelID, ChannelName: item.ChannelName, ModelName: item.Model,
+			Success: item.Success, LatencyMs: item.ElapsedMS, ErrorCategory: item.ErrorCategory,
+			ErrorCode: item.ErrorCode, HTTPStatus: item.HTTPStatus, Reason: item.Reason, Suggestion: item.Suggestion,
+			Action: item.Action, CreatedAt: createdAt,
+		})
+	}
+	if err := model.SaveChannelModelProbeResults(rows); err != nil {
+		return err
+	}
+	return model.DeleteExpiredChannelModelProbeResults(time.Now())
 }
 
 // recordCompletedModelProbeRuns updates scheduling only for channels that

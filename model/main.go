@@ -342,6 +342,7 @@ func migrateDB() error {
 		&SystemTaskLock{},
 		&ModelQualityProbeRun{},
 		&ModelQualityProbeResult{},
+		&ChannelModelProbeResult{},
 		&CasbinRule{},
 		&AuthzRole{},
 	)

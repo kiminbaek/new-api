@@ -71,12 +71,28 @@ func ApplyDisablePolicy(channelError types.ChannelError, modelName string, err *
 			common.SysLog(fmt.Sprintf("[CUSTOM] 智能禁用：通道「%s」（#%d）错误无法归因到模型，仅降权观察", channelError.ChannelName, channelError.ChannelId))
 			return ActionNone, true
 		}
+		// A quota error from a relay-of-relays is model-pool evidence, not proof
+		// that every model on the visible channel shares the same exhausted account.
+		// Escalate only when two distinct models report quota faults in 15 minutes.
+		attribution := AttributeChannelError(err)
+		if attribution.Category == "account_quota" {
+			if affectedModels := RecordQuotaModelFailure(channelError.ChannelId, modelName); affectedModels >= 2 {
+				reason := fmt.Sprintf("15 分钟内 %d 个不同模型均报告上游额度耗尽", affectedModels)
+				smartDisableChannelImpl(channelError, reason+"；最后错误："+err.ErrorWithStatusCode())
+				ClearSmartDownByChannel(channelError.ChannelId)
+				RegisterSmartDownAttributed(channelError.ChannelId, channelError.ChannelName, "", SmartDownChannel, reason, AttributeChannelError(err))
+				return ActionDisableChannel, true
+			}
+		}
+
 		// 渠道级快速隔离：整个渠道连续失败达到硬阈值时，不再等每个模型各自
 		// 攒满 8 连败（巡检随机挑模型会把失败摊薄），直接全部下线 → 自然触发
 		// L2 升级。真死的渠道几十次请求内退出调度；任一模型活着就不会累积。
-		if cs := RelayChannelConsecutiveFailures(channelError.ChannelId); cs >= smartChannelFastQuarantineStreak {
-			if quarantineWholeChannel(channelError, cs, err) {
-				return ActionDisableChannel, true
+		if attribution.Category != "account_quota" {
+			if cs := RelayChannelConsecutiveFailures(channelError.ChannelId); cs >= smartChannelFastQuarantineStreak {
+				if quarantineWholeChannel(channelError, cs, err) {
+					return ActionDisableChannel, true
+				}
 			}
 		}
 		ok, why := ShouldDisableModelNow(channelError.ChannelId, modelName)

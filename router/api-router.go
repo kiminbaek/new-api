@@ -223,6 +223,8 @@ func SetApiRouter(router *gin.Engine) {
 		{
 			performanceRoute.GET("/stats", controller.GetPerformanceStats)
 			performanceRoute.GET("/model-quality", controller.GetModelQualityBoard)
+			performanceRoute.GET("/probe-quality", controller.GetProbeQualityBoard)
+			performanceRoute.GET("/probe-quality/events", controller.GetProbeQualityEvents)
 			performanceRoute.DELETE("/disk_cache", controller.ClearDiskCache)
 			performanceRoute.POST("/reset_stats", controller.ResetPerformanceStats)
 			performanceRoute.POST("/gc", controller.ForceGC)

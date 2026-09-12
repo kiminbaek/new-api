@@ -80,15 +80,13 @@ const (
 
 // ===== 错误分类关键词 =====
 
-// smartAccountLevelKeywords 账号级故障：整渠道确实都废了 → L2。
+// smartAccountLevelKeywords describe quota/account faults reported by the selected
+// upstream route. In multi-upstream relay channels these usually apply only to
+// the current model pool; cross-model evidence is required before escalating to L2.
 var smartAccountLevelKeywords = []string{
 	"credit balance is too low",
-	"organization has been disabled",
 	"exceeded your current quota",
 	"billing hard limit",
-	"account is not authorized",
-	"account has been suspended",
-	"account is suspended",
 	"insufficient balance",
 	"credit insufficient balance",
 	"insufficient_quota",
@@ -98,6 +96,15 @@ var smartAccountLevelKeywords = []string{
 	"payment required",
 	"欠费",
 	"余额不足",
+}
+
+// smartAccountDisabledKeywords are explicit credential/account-wide failures.
+// Unlike a model pool's quota exhaustion, these are safe to isolate at channel scope.
+var smartAccountDisabledKeywords = []string{
+	"organization has been disabled",
+	"account is not authorized",
+	"account has been suspended",
+	"account is suspended",
 	"账户已被禁用",
 }
 
@@ -162,7 +169,9 @@ func ClassifyChannelError(err *types.NewAPIError, _ bool) DisableAction {
 	// 400s as client mistakes leaves a dead channel selected indefinitely.
 	attribution := AttributeChannelError(err)
 	switch attribution.Category {
-	case "account_quota", "authentication":
+	case "account_quota":
+		return ActionDisableModel
+	case "account_disabled", "authentication":
 		return ActionDisableChannel
 	case "upstream_capacity":
 		if err.GetErrorCode() == types.ErrorCodeChannelNoAvailableKey {
@@ -344,7 +353,44 @@ type SmartDownState struct {
 var (
 	smartDownMu sync.RWMutex
 	smartDown   = map[string]*SmartDownState{}
+
+	quotaEvidenceMu sync.Mutex
+	quotaEvidence   = map[int]map[string]int64{}
 )
+
+const quotaCrossModelWindow = 15 * time.Minute
+
+// RecordQuotaModelFailure records model-scoped quota evidence. A relay channel
+// is only considered account-wide exhausted when at least two distinct models
+// report quota faults inside a short window.
+func RecordQuotaModelFailure(channelID int, modelName string) int {
+	modelName = strings.TrimSpace(modelName)
+	if channelID <= 0 || modelName == "" {
+		return 0
+	}
+	now := time.Now().Unix()
+	cutoff := now - int64(quotaCrossModelWindow/time.Second)
+	quotaEvidenceMu.Lock()
+	defer quotaEvidenceMu.Unlock()
+	models := quotaEvidence[channelID]
+	if models == nil {
+		models = map[string]int64{}
+		quotaEvidence[channelID] = models
+	}
+	for model, seenAt := range models {
+		if seenAt < cutoff {
+			delete(models, model)
+		}
+	}
+	models[modelName] = now
+	return len(models)
+}
+
+func ClearQuotaFailureEvidence(channelID int) {
+	quotaEvidenceMu.Lock()
+	delete(quotaEvidence, channelID)
+	quotaEvidenceMu.Unlock()
+}
 
 func smartDownKey(chId int, mdl string) string {
 	return fmt.Sprintf("%d|%s", chId, mdl)

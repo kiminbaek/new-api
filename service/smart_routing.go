@@ -91,7 +91,7 @@ func ShouldRecordRelayHealthFailure(err *types.NewAPIError, firstTokenTimeout, c
 		return false
 	}
 	switch AttributeChannelError(err).Category {
-	case "account_quota", "authentication", "upstream_capacity", "empty_stream", "model_missing", "rate_limit", "timeout", "upstream_5xx":
+	case "account_quota", "account_disabled", "authentication", "upstream_capacity", "empty_stream", "model_missing", "rate_limit", "timeout", "upstream_5xx":
 		return true
 	default:
 		return false
@@ -139,8 +139,10 @@ func AttributeChannelError(err *types.NewAPIError) FaultAttribution {
 	msg := strings.ToLower(err.Error())
 	code := err.StatusCode
 	switch {
+	case smartMatchAny(msg, smartAccountDisabledKeywords):
+		return FaultAttribution{"account_disabled", .99, "disable_channel", "账户或组织已被上游明确停用"}
 	case code == http.StatusPaymentRequired || smartMatchAny(msg, smartAccountLevelKeywords):
-		return FaultAttribution{"account_quota", .98, "disable_channel", "账号额度、预算池或账户状态异常"}
+		return FaultAttribution{"account_quota", .98, "quarantine_model", "当前模型对应的账号池额度异常；跨模型一致失败后才升级渠道"}
 	case err.GetErrorCode() == types.ErrorCodeChannelInvalidKey || code == http.StatusUnauthorized || smartMatchAny(msg, smartKeyLevelKeywords):
 		return FaultAttribution{"authentication", .98, "rotate_key", "密钥失效或认证失败"}
 	case err.GetErrorCode() == types.ErrorCodeChannelNoAvailableKey || smartMatchAny(msg, smartUpstreamCapacityKeywords):
@@ -170,7 +172,7 @@ func ShouldFailoverChannelError(err *types.NewAPIError) bool {
 		return false
 	}
 	switch AttributeChannelError(err).Category {
-	case "account_quota", "authentication", "upstream_capacity", "empty_stream", "model_missing", "rate_limit", "timeout", "upstream_5xx":
+	case "account_quota", "account_disabled", "authentication", "upstream_capacity", "empty_stream", "model_missing", "rate_limit", "timeout", "upstream_5xx":
 		return true
 	default:
 		return false

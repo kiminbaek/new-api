@@ -31,6 +31,9 @@ func resetSmartState() {
 	consecStore = map[string]int{}
 	chanStreakStore = map[int]int{}
 	consecMu.Unlock()
+	quotaEvidenceMu.Lock()
+	quotaEvidence = map[int]map[string]int64{}
+	quotaEvidenceMu.Unlock()
 }
 
 func TestClassifyChannelError_TimeoutNeverKillsChannel(t *testing.T) {
@@ -69,19 +72,84 @@ func TestClassifyChannelError_RequestSideErrorsAreIgnored(t *testing.T) {
 	}
 }
 
-func TestClassifyChannelError_AccountLevelDisablesChannel(t *testing.T) {
+func TestClassifyChannelError_QuotaDefaultsToModelLevel(t *testing.T) {
 	cases := []string{
 		"Your credit balance is too low to run this request",
-		"This organization has been disabled.",
 		"You exceeded your current quota",
+		"credit insufficient balance: balance=0 required=102",
 		"账户余额不足，请充值",
 	}
 	for _, msg := range cases {
 		err := types.NewErrorWithStatusCode(errors.New(msg),
-			types.ErrorCodeDoRequestFailed, http.StatusForbidden)
-		assert.Equalf(t, ActionDisableChannel, ClassifyChannelError(err, true),
-			"account-level error should disable channel: %s", msg)
+			types.ErrorCodeDoRequestFailed, http.StatusBadRequest)
+		assert.Equalf(t, ActionDisableModel, ClassifyChannelError(err, true),
+			"quota evidence from one model pool must stay model-level: %s", msg)
 	}
+
+	accountDisabled := types.NewErrorWithStatusCode(errors.New("This organization has been disabled."),
+		types.ErrorCodeDoRequestFailed, http.StatusForbidden)
+	assert.Equal(t, "account_disabled", AttributeChannelError(accountDisabled).Category)
+	assert.Equal(t, ActionDisableChannel, ClassifyChannelError(accountDisabled, true),
+		"explicit account suspension is channel-wide evidence")
+}
+
+func TestSingleModelQuotaNeverUsesWholeChannelStreak(t *testing.T) {
+	resetSmartState()
+	oldSmart, oldAuto := common.SmartAutoDisableEnabled, common.AutomaticDisableChannelEnabled
+	oldDisable := smartDisableChannelImpl
+	common.SmartAutoDisableEnabled, common.AutomaticDisableChannelEnabled = true, true
+	defer func() {
+		common.SmartAutoDisableEnabled, common.AutomaticDisableChannelEnabled = oldSmart, oldAuto
+		smartDisableChannelImpl = oldDisable
+	}()
+	disabled := 0
+	smartDisableChannelImpl = func(types.ChannelError, string) { disabled++ }
+	err := types.WithOpenAIError(types.OpenAIError{Message: "credit insufficient balance: balance=0", Code: "insufficient_user_quota"}, http.StatusBadRequest)
+	ch := types.ChannelError{ChannelId: 53, ChannelName: "relay", AutoBan: true}
+	for i := 0; i < smartChannelFastQuarantineStreak; i++ {
+		RecordRelayFailure(53, "glm-5.3-flash")
+	}
+	action, handled := ApplyDisablePolicy(ch, "glm-5.3-flash", err)
+	assert.True(t, handled)
+	assert.NotEqual(t, ActionDisableChannel, action)
+	assert.Zero(t, disabled)
+}
+
+func TestQuotaEvidenceRequiresDistinctModelsAndSuccessClearsIt(t *testing.T) {
+	resetSmartState()
+	assert.Equal(t, 1, RecordQuotaModelFailure(53, "glm-5.3-flash"))
+	assert.Equal(t, 1, RecordQuotaModelFailure(53, "glm-5.3-flash"), "same model must not escalate")
+	RecordRelaySuccess(53, "qwen3.8-flash")
+	assert.Equal(t, 1, RecordQuotaModelFailure(53, "glm-5.3"), "any model success proves channel-wide outage false")
+	assert.Equal(t, 2, RecordQuotaModelFailure(53, "mimo-v2.5"))
+}
+
+func TestApplyDisablePolicyQuotaEscalatesOnlyAcrossModels(t *testing.T) {
+	resetSmartState()
+	oldSmart, oldAuto := common.SmartAutoDisableEnabled, common.AutomaticDisableChannelEnabled
+	oldDisable := smartDisableChannelImpl
+	common.SmartAutoDisableEnabled, common.AutomaticDisableChannelEnabled = true, true
+	defer func() {
+		common.SmartAutoDisableEnabled, common.AutomaticDisableChannelEnabled = oldSmart, oldAuto
+		smartDisableChannelImpl = oldDisable
+	}()
+
+	disabled := 0
+	smartDisableChannelImpl = func(types.ChannelError, string) { disabled++ }
+	err := types.WithOpenAIError(types.OpenAIError{Message: "credit insufficient balance: balance=0", Type: "upstream_error", Code: "insufficient_user_quota"}, http.StatusBadRequest)
+	ch := types.ChannelError{ChannelId: 53, ChannelName: "relay", AutoBan: true}
+
+	RecordRelayFailure(53, "glm-5.3-flash")
+	action, handled := ApplyDisablePolicy(ch, "glm-5.3-flash", err)
+	assert.True(t, handled)
+	assert.NotEqual(t, ActionDisableChannel, action)
+	assert.Zero(t, disabled)
+
+	RecordRelayFailure(53, "glm-5.3")
+	action, handled = ApplyDisablePolicy(ch, "glm-5.3", err)
+	assert.True(t, handled)
+	assert.Equal(t, ActionDisableChannel, action)
+	assert.Equal(t, 1, disabled)
 }
 
 func TestClassifyChannelError_KeyFailureDisablesVisibleChannel(t *testing.T) {

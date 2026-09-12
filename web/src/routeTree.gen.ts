@@ -58,6 +58,7 @@ import { Route as AuthenticatedWalletIndexRouteImport } from './routes/_authenti
 import { Route as PricingModelIdIndexRouteImport } from './routes/pricing/$modelId/index'
 import { Route as AuthenticatedAdminModelPriorityIndexRouteImport } from './routes/_authenticated/admin/model-priority/index'
 import { Route as AuthenticatedAdminModelQualityIndexRouteImport } from './routes/_authenticated/admin/model-quality/index'
+import { Route as AuthenticatedAdminProbeQualityIndexRouteImport } from './routes/_authenticated/admin/probe-quality/index'
 import { Route as AuthenticatedSystemSettingsAuthIndexRouteImport } from './routes/_authenticated/system-settings/auth/index'
 import { Route as AuthenticatedSystemSettingsAuthSectionRouteImport } from './routes/_authenticated/system-settings/auth/$section'
 import { Route as AuthenticatedSystemSettingsBillingIndexRouteImport } from './routes/_authenticated/system-settings/billing/index'
@@ -336,6 +337,12 @@ const AuthenticatedAdminModelQualityIndexRoute =
     path: '/admin/model-quality/',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
+const AuthenticatedAdminProbeQualityIndexRoute =
+  AuthenticatedAdminProbeQualityIndexRouteImport.update({
+    id: '/admin/probe-quality/',
+    path: '/admin/probe-quality/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
 const AuthenticatedSystemSettingsAuthIndexRoute =
   AuthenticatedSystemSettingsAuthIndexRouteImport.update({
     id: '/auth/',
@@ -476,6 +483,7 @@ export interface FileRoutesByFullPath {
   '/system-settings/site/$section': typeof AuthenticatedSystemSettingsSiteSectionRoute
   '/admin/model-priority/': typeof AuthenticatedAdminModelPriorityIndexRoute
   '/admin/model-quality/': typeof AuthenticatedAdminModelQualityIndexRoute
+  '/admin/probe-quality/': typeof AuthenticatedAdminProbeQualityIndexRoute
   '/system-settings/auth/': typeof AuthenticatedSystemSettingsAuthIndexRoute
   '/system-settings/billing/': typeof AuthenticatedSystemSettingsBillingIndexRoute
   '/system-settings/content/': typeof AuthenticatedSystemSettingsContentIndexRoute
@@ -538,6 +546,7 @@ export interface FileRoutesByTo {
   '/system-settings/site/$section': typeof AuthenticatedSystemSettingsSiteSectionRoute
   '/admin/model-priority': typeof AuthenticatedAdminModelPriorityIndexRoute
   '/admin/model-quality': typeof AuthenticatedAdminModelQualityIndexRoute
+  '/admin/probe-quality': typeof AuthenticatedAdminProbeQualityIndexRoute
   '/system-settings/auth': typeof AuthenticatedSystemSettingsAuthIndexRoute
   '/system-settings/billing': typeof AuthenticatedSystemSettingsBillingIndexRoute
   '/system-settings/content': typeof AuthenticatedSystemSettingsContentIndexRoute
@@ -604,6 +613,7 @@ export interface FileRoutesById {
   '/_authenticated/system-settings/site/$section': typeof AuthenticatedSystemSettingsSiteSectionRoute
   '/_authenticated/admin/model-priority/': typeof AuthenticatedAdminModelPriorityIndexRoute
   '/_authenticated/admin/model-quality/': typeof AuthenticatedAdminModelQualityIndexRoute
+  '/_authenticated/admin/probe-quality/': typeof AuthenticatedAdminProbeQualityIndexRoute
   '/_authenticated/system-settings/auth/': typeof AuthenticatedSystemSettingsAuthIndexRoute
   '/_authenticated/system-settings/billing/': typeof AuthenticatedSystemSettingsBillingIndexRoute
   '/_authenticated/system-settings/content/': typeof AuthenticatedSystemSettingsContentIndexRoute
@@ -669,6 +679,7 @@ export interface FileRouteTypes {
     | '/system-settings/site/$section'
     | '/admin/model-priority/'
     | '/admin/model-quality/'
+    | '/admin/probe-quality/'
     | '/system-settings/auth/'
     | '/system-settings/billing/'
     | '/system-settings/content/'
@@ -731,6 +742,7 @@ export interface FileRouteTypes {
     | '/system-settings/site/$section'
     | '/admin/model-priority'
     | '/admin/model-quality'
+    | '/admin/probe-quality'
     | '/system-settings/auth'
     | '/system-settings/billing'
     | '/system-settings/content'
@@ -796,6 +808,7 @@ export interface FileRouteTypes {
     | '/_authenticated/system-settings/site/$section'
     | '/_authenticated/admin/model-priority/'
     | '/_authenticated/admin/model-quality/'
+    | '/_authenticated/admin/probe-quality/'
     | '/_authenticated/system-settings/auth/'
     | '/_authenticated/system-settings/billing/'
     | '/_authenticated/system-settings/content/'
@@ -1170,6 +1183,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedAdminModelQualityIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/admin/probe-quality/': {
+      id: '/_authenticated/admin/probe-quality/'
+      path: '/admin/probe-quality'
+      fullPath: '/admin/probe-quality/'
+      preLoaderRoute: typeof AuthenticatedAdminProbeQualityIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/system-settings/auth/': {
       id: '/_authenticated/system-settings/auth/'
       path: '/auth'
@@ -1378,6 +1398,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedWalletIndexRoute: typeof AuthenticatedWalletIndexRoute
   AuthenticatedAdminModelPriorityIndexRoute: typeof AuthenticatedAdminModelPriorityIndexRoute
   AuthenticatedAdminModelQualityIndexRoute: typeof AuthenticatedAdminModelQualityIndexRoute
+  AuthenticatedAdminProbeQualityIndexRoute: typeof AuthenticatedAdminProbeQualityIndexRoute
 }
 
 const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
@@ -1408,6 +1429,8 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
     AuthenticatedAdminModelPriorityIndexRoute,
   AuthenticatedAdminModelQualityIndexRoute:
     AuthenticatedAdminModelQualityIndexRoute,
+  AuthenticatedAdminProbeQualityIndexRoute:
+    AuthenticatedAdminProbeQualityIndexRoute,
 }
 
 const AuthenticatedRouteRouteWithChildren =

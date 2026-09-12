@@ -180,6 +180,12 @@ export function useSidebarData(): SidebarData {
             icon: ShieldCheck,
             requiredRole: ROLE.SUPER_ADMIN,
           },
+          {
+            title: '探测质量',
+            url: '/admin/probe-quality',
+            icon: Activity,
+            requiredRole: ROLE.SUPER_ADMIN,
+          },
         ],
       },
     ],
