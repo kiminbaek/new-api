@@ -4,13 +4,21 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
+	"math"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,6 +41,7 @@ import (
 
 	"github.com/samber/lo"
 	"github.com/tidwall/gjson"
+	_ "golang.org/x/image/webp"
 
 	"github.com/gin-gonic/gin"
 )
@@ -244,8 +253,13 @@ func testChannelWithOptions(ctx context.Context, channel *model.Channel, testUse
 	}
 
 	request := opts.request
+	var mathChallenge *StealthMathChallenge
 	if request == nil {
-		request = buildTestRequest(testModel, endpointType, channel, isStream)
+		challenge := NewStealthMathChallenge()
+		request = buildTestRequest(testModel, endpointType, channel, isStream, challenge)
+		if isMathChallengeTestRequest(request) {
+			mathChallenge = &challenge
+		}
 	}
 
 	info, err := relaycommon.GenRelayInfo(c, relayFormat, request, nil)
@@ -516,6 +530,21 @@ func testChannelWithOptions(ctx context.Context, channel *model.Channel, testUse
 			newAPIError: types.NewOpenAIError(bodyErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError),
 		}
 	}
+	if mathChallenge != nil {
+		if answerErr := validateMathChallengeResponse(respBody, isStream, mathChallenge.Answer); answerErr != nil {
+			return testResult{
+				context:     c,
+				localErr:    answerErr,
+				newAPIError: types.NewOpenAIError(answerErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError),
+			}
+		}
+	} else if outputErr := validateNonChatTestResponse(request, respBody); outputErr != nil {
+		return testResult{
+			context:     c,
+			localErr:    outputErr,
+			newAPIError: types.NewOpenAIError(outputErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError),
+		}
+	}
 	info.SetEstimatePromptTokens(usage.PromptTokens)
 
 	milliseconds := time.Since(tik).Milliseconds()
@@ -610,11 +639,22 @@ func coerceTestUsage(usageAny any, isStream bool, estimatePromptTokens int) (*dt
 
 func readTestResponseBody(body io.ReadCloser, isStream bool) ([]byte, error) {
 	defer func() { _ = body.Close() }()
-	const maxStreamLogBytes = 8 << 10
+	const (
+		maxStreamProbeBytes    = 2 << 20
+		maxNonStreamProbeBytes = 16 << 20
+	)
+	limit := maxNonStreamProbeBytes
 	if isStream {
-		return io.ReadAll(io.LimitReader(body, maxStreamLogBytes))
+		limit = maxStreamProbeBytes
 	}
-	return io.ReadAll(body)
+	data, err := io.ReadAll(io.LimitReader(body, int64(limit)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > limit {
+		return nil, fmt.Errorf("模型探测响应超过 %d MiB 上限", limit>>20)
+	}
+	return data, nil
 }
 
 func detectErrorFromTestResponseBody(respBody []byte) error {
@@ -678,6 +718,238 @@ func validateTestResponseBody(respBody []byte, isStream bool) error {
 	return nil
 }
 
+func isMathChallengeTestRequest(request dto.Request) bool {
+	switch request.(type) {
+	case *dto.GeneralOpenAIRequest, *dto.ClaudeRequest, *dto.GeminiChatRequest, *dto.OpenAIResponsesRequest:
+		return true
+	default:
+		return false
+	}
+}
+
+func collectTestResponseText(value any, texts *[]string) {
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			collectTestResponseText(item, texts)
+		}
+	case map[string]any:
+		for key, item := range typed {
+			switch key {
+			case "content", "text", "output_text", "delta":
+				if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
+					*texts = append(*texts, text)
+					continue
+				}
+			}
+			collectTestResponseText(item, texts)
+		}
+	}
+}
+
+func extractTestResponseText(respBody []byte, isStream bool) string {
+	var texts []string
+	consume := func(payload []byte) {
+		var value any
+		if err := common.Unmarshal(payload, &value); err != nil {
+			return
+		}
+		if event, ok := value.(map[string]any); ok {
+			if eventType, _ := event["type"].(string); eventType == "response.output_text.done" {
+				return
+			}
+		}
+		collectTestResponseText(value, &texts)
+	}
+	if !isStream {
+		consume(bytes.TrimSpace(respBody))
+		return strings.Join(texts, "\n")
+	}
+	var eventData [][]byte
+	flush := func() {
+		if len(eventData) == 0 {
+			return
+		}
+		payload := bytes.Join(eventData, []byte{'\n'})
+		if !bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
+			consume(payload)
+		}
+		eventData = nil
+	}
+	for _, rawLine := range bytes.Split(respBody, []byte{'\n'}) {
+		line := bytes.TrimSuffix(rawLine, []byte{'\r'})
+		if len(line) == 0 {
+			flush()
+			continue
+		}
+		if bytes.HasPrefix(line, []byte("data:")) {
+			eventData = append(eventData, bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:"))))
+		}
+	}
+	flush()
+	return strings.Join(texts, "")
+}
+
+var explicitMathAnswerPattern = regexp.MustCompile(`(?i)(?:final\s+answer|correct\s+(?:answer|value|result)|answer|正确答案|答案|结果|等于|=)\s*(?:is|是|为|:|：)?\s*([-+]?\d+)`)
+var correctedMathAnswerPattern = regexp.MustCompile(`(?i)(?:\bno\b|\bwrong\b|\bincorrect\b|\bactually\b|\bcorrection\b|错误|不对|更正|纠正)[^\d+-]*([-+]?\d+)`)
+var integerPattern = regexp.MustCompile(`[-+]?\d+`)
+
+func validateMathChallengeText(text string, expected int) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return errors.New("模型响应正常，但未提取到可校验的回答文本")
+	}
+	corrected := correctedMathAnswerPattern.FindAllStringSubmatch(text, -1)
+	if len(corrected) > 0 {
+		actual, err := strconv.Atoi(corrected[len(corrected)-1][1])
+		if err == nil && actual != expected {
+			return fmt.Errorf("模型响应正常，但随机题目回答错误：标准答案 %d，模型更正为 %d", expected, actual)
+		}
+		if err == nil {
+			return nil
+		}
+	}
+	explicit := explicitMathAnswerPattern.FindAllStringSubmatch(text, -1)
+	if len(explicit) > 0 {
+		actual, err := strconv.Atoi(explicit[len(explicit)-1][1])
+		if err == nil && actual != expected {
+			return fmt.Errorf("模型响应正常，但随机题目回答错误：标准答案 %d，模型回答 %d", expected, actual)
+		}
+		if err == nil {
+			return nil
+		}
+	}
+	answerPattern := regexp.MustCompile(`(^|[^0-9])` + regexp.QuoteMeta(strconv.Itoa(expected)) + `([^0-9]|$)`)
+	if !answerPattern.MatchString(text) {
+		return fmt.Errorf("模型响应正常，但随机题目回答错误：标准答案 %d，回答中未找到该结果", expected)
+	}
+	seen := map[string]struct{}{}
+	for _, number := range integerPattern.FindAllString(text, -1) {
+		seen[number] = struct{}{}
+	}
+	if len(seen) > 1 {
+		return fmt.Errorf("模型响应正常，但回答包含多个相互冲突的数值，无法确认标准答案 %d", expected)
+	}
+	return nil
+}
+
+func validateMathChallengeResponse(respBody []byte, isStream bool, expected int) error {
+	return validateMathChallengeText(extractTestResponseText(respBody, isStream), expected)
+}
+
+func validateNonChatTestResponse(request dto.Request, respBody []byte) error {
+	switch typed := request.(type) {
+	case *dto.EmbeddingRequest:
+		return validateEmbeddingTestResponse(respBody)
+	case *dto.RerankRequest:
+		return validateRerankTestResponse(respBody, len(typed.Documents))
+	case *dto.ImageRequest:
+		return validateImageTestResponse(respBody)
+	default:
+		return nil
+	}
+}
+
+func validateEmbeddingTestResponse(respBody []byte) error {
+	var response dto.EmbeddingResponse
+	if err := common.Unmarshal(respBody, &response); err != nil {
+		return fmt.Errorf("向量模型响应不是有效 JSON：%w", err)
+	}
+	if len(response.Data) != 1 {
+		return fmt.Errorf("向量模型响应正常，但单输入探测应返回 1 条向量，实际返回 %d 条", len(response.Data))
+	}
+	for _, item := range response.Data {
+		if item.Index != 0 {
+			return fmt.Errorf("向量模型响应正常，但单输入探测返回了无效索引 %d", item.Index)
+		}
+		if len(item.Embedding) < 2 {
+			return fmt.Errorf("向量模型响应正常，但第 %d 条向量维度不足", item.Index)
+		}
+		for _, value := range item.Embedding {
+			if math.IsNaN(value) || math.IsInf(value, 0) {
+				return fmt.Errorf("向量模型响应正常，但第 %d 条向量包含无效数值", item.Index)
+			}
+		}
+	}
+	return nil
+}
+
+func validateRerankTestResponse(respBody []byte, documentCount int) error {
+	var response dto.RerankResponse
+	if err := common.Unmarshal(respBody, &response); err != nil {
+		return fmt.Errorf("重排模型响应不是有效 JSON：%w", err)
+	}
+	if len(response.Results) == 0 {
+		return errors.New("重排模型响应正常，但没有返回排序结果")
+	}
+	seen := make(map[int]struct{}, len(response.Results))
+	previousScore := math.Inf(1)
+	for _, result := range response.Results {
+		if result.Index < 0 || result.Index >= documentCount {
+			return fmt.Errorf("重排模型响应正常，但结果索引 %d 超出文档范围", result.Index)
+		}
+		if _, exists := seen[result.Index]; exists {
+			return fmt.Errorf("重排模型响应正常，但结果索引 %d 重复", result.Index)
+		}
+		seen[result.Index] = struct{}{}
+		if math.IsNaN(result.RelevanceScore) || math.IsInf(result.RelevanceScore, 0) {
+			return fmt.Errorf("重排模型响应正常，但结果索引 %d 的相关性分数无效", result.Index)
+		}
+		if result.RelevanceScore > previousScore {
+			return errors.New("重排模型响应正常，但结果没有按相关性分数从高到低排序")
+		}
+		previousScore = result.RelevanceScore
+	}
+	return nil
+}
+
+func isRecognizedImageData(data []byte) bool {
+	const maxProbeImageBytes = 11 << 20
+	if len(data) == 0 || len(data) > maxProbeImageBytes {
+		return false
+	}
+	config, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || config.Width <= 0 || config.Height <= 0 || config.Width > 4096 || config.Height > 4096 || int64(config.Width)*int64(config.Height) > 16*1024*1024 {
+		return false
+	}
+	decoded, decodedFormat, err := image.Decode(bytes.NewReader(data))
+	if err != nil || decoded == nil || decodedFormat != format {
+		return false
+	}
+	bounds := decoded.Bounds()
+	if bounds.Dx() != config.Width || bounds.Dy() != config.Height {
+		return false
+	}
+	switch format {
+	case "png", "jpeg", "gif", "webp":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateImageTestResponse(respBody []byte) error {
+	var response dto.ImageResponse
+	if err := common.Unmarshal(respBody, &response); err != nil {
+		return fmt.Errorf("图片模型响应不是有效 JSON：%w", err)
+	}
+	for _, item := range response.Data {
+		if rawURL := strings.TrimSpace(item.Url); rawURL != "" {
+			parsed, err := url.ParseRequestURI(rawURL)
+			if err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != "" {
+				return nil
+			}
+		}
+		if encoded := strings.TrimSpace(item.B64Json); encoded != "" {
+			decoded, err := base64.StdEncoding.DecodeString(encoded)
+			if err == nil && isRecognizedImageData(decoded) {
+				return nil
+			}
+		}
+	}
+	return errors.New("图片模型响应正常，但没有返回有效的图片 URL 或图片数据")
+}
+
 func shouldUseStreamForAutomaticChannelTest(channel *model.Channel) bool {
 	return channel != nil && channel.Type == constant.ChannelTypeCodex
 }
@@ -711,10 +983,10 @@ func detectErrorMessageFromJSONBytes(jsonBytes []byte) string {
 	return message
 }
 
-func buildTestRequest(model string, endpointType string, channel *model.Channel, isStream bool) dto.Request {
+func buildTestRequest(model string, endpointType string, channel *model.Channel, isStream bool, challenge StealthMathChallenge) dto.Request {
 	// [CUSTOM] stealth: every test payload below is randomized per request
 	// so upstreams cannot fingerprint new-api by fixed health-check prompts.
-	testResponsesInput := StealthMessagesRaw()
+	testResponsesInput := StealthMessagesRawWithPrompt(challenge.Prompt)
 
 	if endpointType != "" {
 		switch constant.EndpointType(endpointType) {
@@ -741,7 +1013,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 		case constant.EndpointTypeOpenAIResponse:
 			return &dto.OpenAIResponsesRequest{
 				Model:  model,
-				Input:  StealthMessagesRaw(),
+				Input:  StealthMessagesRawWithPrompt(challenge.Prompt),
 				Stream: lo.ToPtr(isStream),
 			}
 		case constant.EndpointTypeOpenAIResponseCompact:
@@ -757,7 +1029,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 				Messages: []dto.ClaudeMessage{
 					{
 						Role:    "user",
-						Content: StealthMathPrompt(),
+						Content: challenge.Prompt,
 					},
 				},
 			}
@@ -766,7 +1038,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 				Contents: []dto.GeminiChatContent{
 					{
 						Role:  "user",
-						Parts: []dto.GeminiPart{{Text: StealthMathPrompt()}},
+						Parts: []dto.GeminiPart{{Text: challenge.Prompt}},
 					},
 				},
 				GenerationConfig: dto.GeminiChatGenerationConfig{
@@ -780,7 +1052,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 				Messages: []dto.Message{
 					{
 						Role:    "user",
-						Content: StealthMathPrompt(),
+						Content: challenge.Prompt,
 					},
 				},
 				MaxTokens: lo.ToPtr(StealthMaxTokens(16)),
@@ -817,7 +1089,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 	if strings.Contains(strings.ToLower(model), "codex") {
 		return &dto.OpenAIResponsesRequest{
 			Model:  model,
-			Input:  StealthMessagesRaw(),
+			Input:  StealthMessagesRawWithPrompt(challenge.Prompt),
 			Stream: lo.ToPtr(isStream),
 		}
 	}
@@ -829,7 +1101,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 		Messages: []dto.Message{
 			{
 				Role:    "user",
-				Content: StealthMathPrompt(),
+				Content: challenge.Prompt,
 			},
 		},
 	}

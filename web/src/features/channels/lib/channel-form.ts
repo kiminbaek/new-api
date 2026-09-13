@@ -78,6 +78,112 @@ export const HTTP_PROTOCOL_AUTO = 'auto'
 export const HTTP_PROTOCOL_HTTP1 = 'http1'
 export const MAX_HTTP2_CONNECTION_SHARDS = 8
 
+export const OPENAI_PYTHON_FINGERPRINT_HEADERS: Record<string, string> = {
+  Accept: 'application/json',
+  'User-Agent': 'OpenAI/Python 2.33.0',
+  'X-Stainless-Arch': 'x64',
+  'X-Stainless-Async': 'false',
+  'X-Stainless-Lang': 'python',
+  'X-Stainless-OS': 'Linux',
+  'X-Stainless-Package-Version': '2.33.0',
+  'X-Stainless-Runtime': 'CPython',
+  'X-Stainless-Runtime-Version': '3.12.4',
+}
+
+export const OPENAI_PYTHON_FINGERPRINT_JSON = JSON.stringify(
+  OPENAI_PYTHON_FINGERPRINT_HEADERS,
+  null,
+  2
+)
+
+function findHeaderKeyIgnoreCase(
+  headers: Record<string, unknown>,
+  wanted: string
+): string | undefined {
+  const normalized = wanted.toLowerCase()
+  return Object.keys(headers).find((key) => key.toLowerCase() === normalized)
+}
+
+export function hasOpenAIPythonFingerprint(value: string | undefined): boolean {
+  try {
+    const headers = value?.trim() ? JSON.parse(value) : {}
+    return Object.entries(OPENAI_PYTHON_FINGERPRINT_HEADERS).every(
+      ([key, expected]) => {
+        const actualKey = findHeaderKeyIgnoreCase(headers, key)
+        return actualKey !== undefined && headers[actualKey] === expected
+      }
+    )
+  } catch {
+    return false
+  }
+}
+
+export function hasNonDefaultReliabilitySettings(
+  values: Pick<
+    ChannelFormValues,
+    | 'header_override'
+    | 'openai_python_fingerprint_enabled'
+    | 'timeout_seconds'
+    | 'fail_threshold'
+  >
+): boolean {
+  let headerCount = 0
+  try {
+    const headers = values.header_override?.trim()
+      ? JSON.parse(values.header_override)
+      : {}
+    if (headers && typeof headers === 'object' && !Array.isArray(headers)) {
+      headerCount = Object.keys(headers).length
+    } else {
+      return true
+    }
+  } catch {
+    return true
+  }
+  const onlyDefaultFingerprint =
+    hasOpenAIPythonFingerprint(values.header_override) &&
+    headerCount === Object.keys(OPENAI_PYTHON_FINGERPRINT_HEADERS).length
+  const hasCustomHeader = headerCount > 0 && !onlyDefaultFingerprint
+  return Boolean(
+    hasCustomHeader ||
+    values.openai_python_fingerprint_enabled === false ||
+    (values.timeout_seconds != null && values.timeout_seconds !== 180) ||
+    (values.fail_threshold != null && values.fail_threshold !== 3)
+  )
+}
+
+export function updateOpenAIPythonFingerprint(
+  value: string | undefined,
+  enabled: boolean
+): string {
+  let headers: Record<string, unknown> = {}
+  try {
+    const parsed = value?.trim() ? JSON.parse(value) : {}
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      headers = { ...parsed }
+    }
+  } catch {
+    return value || ''
+  }
+  if (enabled) {
+    for (const [key, defaultValue] of Object.entries(
+      OPENAI_PYTHON_FINGERPRINT_HEADERS
+    )) {
+      if (!findHeaderKeyIgnoreCase(headers, key)) headers[key] = defaultValue
+    }
+  } else {
+    for (const [key, defaultValue] of Object.entries(
+      OPENAI_PYTHON_FINGERPRINT_HEADERS
+    )) {
+      const actualKey = findHeaderKeyIgnoreCase(headers, key)
+      if (actualKey && headers[actualKey] === defaultValue) {
+        delete headers[actualKey]
+      }
+    }
+  }
+  return Object.keys(headers).length ? JSON.stringify(headers, null, 2) : ''
+}
+
 export function normalizeHttpProtocol(
   value: string | undefined | null
 ): 'auto' | 'http1' {
@@ -118,6 +224,18 @@ function isOptionalJsonObject(value: string | undefined): boolean {
   try {
     const parsed = parseOptionalJson(value)
     return parsed === undefined || isJsonObjectValue(parsed)
+  } catch {
+    return false
+  }
+}
+
+function hasNoCaseInsensitiveDuplicateKeys(value: string | undefined): boolean {
+  try {
+    const parsed = parseOptionalJson(value)
+    if (parsed === undefined) return true
+    if (!isJsonObjectValue(parsed)) return false
+    const keys = Object.keys(parsed).map((key) => key.toLowerCase())
+    return new Set(keys).size === keys.length
   } catch {
     return false
   }
@@ -242,7 +360,12 @@ export const channelFormSchema = z
     header_override: z
       .string()
       .optional()
-      .refine(isOptionalJsonObject, ERROR_MESSAGES.INVALID_JSON),
+      .refine(isOptionalJsonObject, ERROR_MESSAGES.INVALID_JSON)
+      .refine(
+        hasNoCaseInsensitiveDuplicateKeys,
+        '请求头名称不区分大小写，不能包含重复名称'
+      ),
+    openai_python_fingerprint_enabled: z.boolean().optional(),
     settings: z
       .string()
       .optional()
@@ -454,7 +577,8 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   remark: '',
   setting: '',
   param_override: '',
-  header_override: '',
+  header_override: OPENAI_PYTHON_FINGERPRINT_JSON,
+  openai_python_fingerprint_enabled: true,
   settings: '{}',
   other: '',
   multi_key_mode: 'single',
@@ -469,8 +593,8 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   http2_connection_shards: 1,
   model_priorities_text: '',
   retry_times: undefined,
-  timeout_seconds: undefined,
-  fail_threshold: undefined,
+  timeout_seconds: 180,
+  fail_threshold: 3,
   max_concurrency: undefined,
   max_concurrency_per_key: undefined,
   concurrency_scope: '',
@@ -522,6 +646,9 @@ export function transformChannelToFormDefaults(
     system_prompt_override: false,
     model_priorities_text: '',
     retry_times: undefined,
+    openai_python_fingerprint_enabled: hasOpenAIPythonFingerprint(
+      channel.header_override || ''
+    ),
     health_check_mode: '' as '' | 'default' | 'scheduled' | 'passive',
     health_check_minutes: undefined,
     chat_to_responses: undefined,
@@ -555,12 +682,17 @@ export function transformChannelToFormDefaults(
           ? JSON.stringify(parsed.model_priorities, null, 2)
           : '',
         retry_times: parsed.retry_times ?? undefined,
+        openai_python_fingerprint_enabled:
+          typeof parsed.openai_python_fingerprint_enabled === 'boolean'
+            ? parsed.openai_python_fingerprint_enabled
+            : hasOpenAIPythonFingerprint(channel.header_override || ''),
         timeout_seconds: parsed.timeout_seconds ?? undefined,
         fail_threshold: parsed.fail_threshold ?? undefined,
         max_concurrency: parsed.max_concurrency ?? undefined,
         max_concurrency_per_key: parsed.max_concurrency_per_key ?? undefined,
         concurrency_scope:
-          parsed.concurrency_scope === 'redis' || parsed.concurrency_scope === 'local'
+          parsed.concurrency_scope === 'redis' ||
+          parsed.concurrency_scope === 'local'
             ? parsed.concurrency_scope
             : '',
         concurrency_group: parsed.concurrency_group ?? '',
@@ -680,7 +812,43 @@ export function transformChannelToFormDefaults(
  * Build the setting JSON string from form extra settings
  */
 export function buildSettingJSON(formData: ChannelFormValues): string {
-  const settingObj: Record<string, unknown> = {
+  let settingObj: Record<string, unknown> = {}
+  try {
+    const parsed = formData.setting?.trim() ? JSON.parse(formData.setting) : {}
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      settingObj = { ...parsed }
+    }
+  } catch {
+    // schema 已校验；提交时仍以当前表单字段生成安全对象
+  }
+
+  const managedKeys = [
+    'task_plugin_key',
+    'force_format',
+    'thinking_to_content',
+    'proxy',
+    'pass_through_body_enabled',
+    'system_prompt',
+    'system_prompt_override',
+    'openai_python_fingerprint_enabled',
+    'model_priorities',
+    'retry_times',
+    'timeout_seconds',
+    'fail_threshold',
+    'max_concurrency',
+    'max_concurrency_per_key',
+    'concurrency_scope',
+    'concurrency_group',
+    'model_concurrency',
+    'health_check_mode',
+    'health_check_minutes',
+    'chat_to_responses',
+    'http_protocol',
+    'http2_connection_shards',
+  ]
+  for (const key of managedKeys) delete settingObj[key]
+
+  Object.assign(settingObj, {
     task_plugin_key:
       formData.type === CHANNEL_TYPE_TASK_PLUGIN
         ? formData.task_plugin_key?.trim() || ''
@@ -691,7 +859,9 @@ export function buildSettingJSON(formData: ChannelFormValues): string {
     pass_through_body_enabled: formData.pass_through_body_enabled || false,
     system_prompt: formData.system_prompt || '',
     system_prompt_override: formData.system_prompt_override || false,
-  }
+    openai_python_fingerprint_enabled:
+      formData.openai_python_fingerprint_enabled ?? true,
+  })
 
   const protocol = normalizeHttpProtocol(formData.http_protocol)
   const shards =
@@ -939,7 +1109,11 @@ export function transformFormDataToCreatePayload(formData: ChannelFormValues): {
     remark: formData.remark || '',
     setting: buildSettingJSON(formData),
     param_override: formData.param_override || null,
-    header_override: formData.header_override || null,
+    header_override:
+      updateOpenAIPythonFingerprint(
+        formData.header_override,
+        formData.openai_python_fingerprint_enabled ?? true
+      ) || null,
     settings: buildSettingsJSON(formData),
     other: formData.other || '',
   }
@@ -986,7 +1160,11 @@ export function transformFormDataToUpdatePayload(
     remark: formData.remark || '',
     setting: buildSettingJSON(formData),
     param_override: formData.param_override || null,
-    header_override: formData.header_override || null,
+    header_override:
+      updateOpenAIPythonFingerprint(
+        formData.header_override,
+        formData.openai_python_fingerprint_enabled ?? true
+      ) || null,
     settings: buildSettingsJSON(formData),
     other: formData.other || '',
   }
@@ -1012,7 +1190,11 @@ export function transformFormDataToUpdatePayload(
   payload.model_mapping = formData.model_mapping || ''
   payload.status_code_mapping = formData.status_code_mapping || ''
   payload.param_override = formData.param_override || ''
-  payload.header_override = formData.header_override || ''
+  payload.header_override =
+    updateOpenAIPythonFingerprint(
+      formData.header_override,
+      formData.openai_python_fingerprint_enabled ?? true
+    ) || ''
 
   return payload
 }

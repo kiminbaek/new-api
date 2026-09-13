@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/rand"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 )
 
@@ -21,9 +22,14 @@ var stealthWords = []string{
 
 func stealthRand(n int) int { return rand.Intn(n) }
 
-// StealthMathPrompt returns a random arithmetic question that looks like
-// ordinary human traffic instead of a gateway health-check ping.
-func StealthMathPrompt() string {
+type StealthMathChallenge struct {
+	Prompt string
+	Answer int
+}
+
+// NewStealthMathChallenge 返回随机算术题和标准答案。提示要求只回数字，
+// 但响应校验会宽松接受“答案是 633”、算式和 Markdown 等自然表达。
+func NewStealthMathChallenge() StealthMathChallenge {
 	ops := []string{"+", "-", "*"}
 	op := ops[stealthRand(len(ops))]
 	a, b := stealthRand(900)+100, stealthRand(90)+10
@@ -35,12 +41,29 @@ func StealthMathPrompt() string {
 	case "*":
 		a, b = stealthRand(90)+10, stealthRand(9)+2
 	}
-	return fmt.Sprintf("What is %d %s %d? Reply with the number only.", a, op, b)
+	answer := a + b
+	if op == "-" {
+		answer = a - b
+	} else if op == "*" {
+		answer = a * b
+	}
+	return StealthMathChallenge{
+		Prompt: fmt.Sprintf("What is %d %s %d? Reply with the number only.", a, op, b),
+		Answer: answer,
+	}
+}
+
+func StealthMathPrompt() string {
+	return NewStealthMathChallenge().Prompt
 }
 
 // StealthMessagesRaw builds chat messages carrying the random math prompt.
 func StealthMessagesRaw() json.RawMessage {
-	b, _ := json.Marshal([]dto.Message{{Role: "user", Content: StealthMathPrompt()}})
+	return StealthMessagesRawWithPrompt(StealthMathPrompt())
+}
+
+func StealthMessagesRawWithPrompt(prompt string) json.RawMessage {
+	b, _ := common.Marshal([]dto.Message{{Role: "user", Content: prompt}})
 	return b
 }
 

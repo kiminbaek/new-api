@@ -982,14 +982,11 @@ func EditTagChannels(c *gin.Context) {
 	}
 	if channelTag.HeaderOverride != nil {
 		trimmed := strings.TrimSpace(*channelTag.HeaderOverride)
-		if trimmed != "" && !json.Valid([]byte(trimmed)) {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "请求头覆盖必须是合法的 JSON 格式",
-			})
+		channelTag.HeaderOverride = common.GetPointer[string](trimmed)
+		if err := model.ValidateHeaderOverride(channelTag.HeaderOverride); err != nil {
+			common.ApiError(c, err)
 			return
 		}
-		channelTag.HeaderOverride = common.GetPointer[string](trimmed)
 	}
 	taskPluginBindingMu.Lock()
 	defer taskPluginBindingMu.Unlock()
@@ -1143,6 +1140,12 @@ func UpdateChannel(c *gin.Context) {
 	originProxy := originChannel.GetSetting().Proxy
 	proxyChanged := false
 	if _, settingProvided := requestData["setting"]; settingProvided {
+		mergedSetting, mergeErr := model.MergeUnknownChannelSettings(originChannel.Setting, channel.Setting)
+		if mergeErr != nil {
+			common.ApiError(c, mergeErr)
+			return
+		}
+		channel.Setting = mergedSetting
 		newProxy, _ := service.NormalizeProxyURL(channel.GetSetting().Proxy)
 		normalizedOriginProxy, originProxyErr := service.NormalizeProxyURL(originProxy)
 		proxyChanged = originProxyErr != nil || normalizedOriginProxy != newProxy
@@ -1160,6 +1163,12 @@ func UpdateChannel(c *gin.Context) {
 	// If the request explicitly specifies a new MultiKeyMode, apply it on top of the original info.
 	if channel.MultiKeyMode != nil && *channel.MultiKeyMode != "" {
 		channel.ChannelInfo.MultiKeyMode = constant.MultiKeyMode(*channel.MultiKeyMode)
+	}
+	if _, provided := requestData["header_override"]; provided {
+		if err := model.ValidateHeaderOverride(channel.HeaderOverride); err != nil {
+			common.ApiError(c, err)
+			return
+		}
 	}
 
 	// 处理多key模式下的密钥追加/覆盖逻辑

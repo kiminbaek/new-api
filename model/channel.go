@@ -488,6 +488,11 @@ func BatchInsertChannels(channels []Channel) error {
 	if len(channels) == 0 {
 		return nil
 	}
+	for i := range channels {
+		if err := channels[i].applyCreateDefaults(); err != nil {
+			return err
+		}
+	}
 	tx := DB.Begin()
 	if tx.Error != nil {
 		return tx.Error
@@ -584,7 +589,161 @@ func (channel *Channel) GetStatusCodeMapping() string {
 	return *channel.StatusCodeMapping
 }
 
+const DefaultOpenAIPythonFingerprintJSON = `{"Accept":"application/json","User-Agent":"OpenAI/Python 2.33.0","X-Stainless-Arch":"x64","X-Stainless-Async":"false","X-Stainless-Lang":"python","X-Stainless-OS":"Linux","X-Stainless-Package-Version":"2.33.0","X-Stainless-Runtime":"CPython","X-Stainless-Runtime-Version":"3.12.4"}`
+
+var managedChannelSettingKeys = map[string]struct{}{
+	"task_plugin_key": {}, "force_format": {}, "thinking_to_content": {}, "proxy": {},
+	"pass_through_body_enabled": {}, "system_prompt": {}, "system_prompt_override": {},
+	"openai_python_fingerprint_enabled": {}, "model_priorities": {}, "retry_times": {},
+	"timeout_seconds": {}, "fail_threshold": {}, "max_concurrency": {},
+	"max_concurrency_per_key": {}, "concurrency_scope": {}, "concurrency_group": {},
+	"model_concurrency": {}, "health_check_mode": {}, "health_check_minutes": {},
+	"chat_to_responses": {}, "http_protocol": {}, "http2_connection_shards": {},
+}
+
+func parseRawJSONObject(raw *string, fieldName string) (map[string]json.RawMessage, error) {
+	values := map[string]json.RawMessage{}
+	if raw == nil || strings.TrimSpace(*raw) == "" {
+		return values, nil
+	}
+	if err := common.Unmarshal([]byte(*raw), &values); err != nil {
+		return nil, fmt.Errorf("%s不是有效的 JSON 对象：%w", fieldName, err)
+	}
+	if values == nil {
+		return nil, fmt.Errorf("%s必须是 JSON 对象，不能是 null", fieldName)
+	}
+	return values, nil
+}
+
+func MergeUnknownChannelSettings(existing, incoming *string) (*string, error) {
+	oldValues, err := parseRawJSONObject(existing, "原渠道设置")
+	if err != nil {
+		return nil, err
+	}
+	newValues, err := parseRawJSONObject(incoming, "渠道设置")
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range oldValues {
+		if _, managed := managedChannelSettingKeys[key]; managed {
+			continue
+		}
+		newValues[key] = value
+	}
+	raw, err := common.Marshal(newValues)
+	if err != nil {
+		return nil, err
+	}
+	value := string(raw)
+	return &value, nil
+}
+
+func validateAndIndexHeaderKeys(headers map[string]interface{}) (map[string]string, error) {
+	index := make(map[string]string, len(headers))
+	for key := range headers {
+		normalized := strings.ToLower(key)
+		if existing, duplicate := index[normalized]; duplicate {
+			return nil, fmt.Errorf("自定义请求头包含大小写重复键：%s / %s", existing, key)
+		}
+		index[normalized] = key
+	}
+	return index, nil
+}
+
+func ValidateHeaderOverride(raw *string) error {
+	if raw == nil || strings.TrimSpace(*raw) == "" {
+		return nil
+	}
+	headers := map[string]interface{}{}
+	if err := common.Unmarshal([]byte(*raw), &headers); err != nil {
+		return fmt.Errorf("自定义请求头不是有效的 JSON 对象：%w", err)
+	}
+	if headers == nil {
+		return errors.New("自定义请求头必须是 JSON 对象，不能是 null")
+	}
+	_, err := validateAndIndexHeaderKeys(headers)
+	return err
+}
+
+func (channel *Channel) applyCreateDefaults() error {
+	settingValues, err := parseRawJSONObject(channel.Setting, "渠道设置")
+	if err != nil {
+		return err
+	}
+	if value, exists := settingValues["timeout_seconds"]; !exists || string(value) == "null" {
+		settingValues["timeout_seconds"] = json.RawMessage("180")
+	}
+	if value, exists := settingValues["fail_threshold"]; !exists || string(value) == "null" {
+		settingValues["fail_threshold"] = json.RawMessage("3")
+	}
+	fingerprintEnabled := true
+	if raw, exists := settingValues["openai_python_fingerprint_enabled"]; exists {
+		if err := common.Unmarshal(raw, &fingerprintEnabled); err != nil {
+			return errors.New("渠道设置 openai_python_fingerprint_enabled 必须是布尔值")
+		}
+	} else {
+		settingValues["openai_python_fingerprint_enabled"] = json.RawMessage("true")
+	}
+	headers := map[string]interface{}{}
+	if channel.HeaderOverride != nil && strings.TrimSpace(*channel.HeaderOverride) != "" {
+		if err := common.Unmarshal([]byte(*channel.HeaderOverride), &headers); err != nil {
+			return fmt.Errorf("自定义请求头不是有效的 JSON：%w", err)
+		}
+		if headers == nil {
+			return errors.New("自定义请求头必须是 JSON 对象，不能是 null")
+		}
+	}
+	headerIndex, err := validateAndIndexHeaderKeys(headers)
+	if err != nil {
+		return err
+	}
+	defaults := map[string]interface{}{}
+	if err := common.Unmarshal([]byte(DefaultOpenAIPythonFingerprintJSON), &defaults); err != nil {
+		return err
+	}
+	if fingerprintEnabled {
+		for key, value := range defaults {
+			if _, exists := headerIndex[strings.ToLower(key)]; !exists {
+				headers[key] = value
+			}
+		}
+	} else {
+		for key, defaultValue := range defaults {
+			actualKey, exists := headerIndex[strings.ToLower(key)]
+			if !exists {
+				continue
+			}
+			actual, actualOK := headers[actualKey].(string)
+			expected, expectedOK := defaultValue.(string)
+			if actualOK && expectedOK && actual == expected {
+				delete(headers, actualKey)
+			}
+		}
+	}
+	if len(headers) == 0 {
+		empty := ""
+		channel.HeaderOverride = &empty
+	} else {
+		raw, err := common.Marshal(headers)
+		if err != nil {
+			return err
+		}
+		value := string(raw)
+		channel.HeaderOverride = &value
+	}
+	rawSetting, err := common.Marshal(settingValues)
+	if err != nil {
+		return err
+	}
+	value := string(rawSetting)
+	channel.Setting = &value
+	return nil
+}
+
 func (channel *Channel) Insert() error {
+	if err := channel.applyCreateDefaults(); err != nil {
+		return err
+	}
 	var err error
 	err = DB.Create(channel).Error
 	if err != nil {

@@ -3,7 +3,9 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,8 +25,10 @@ import (
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestValidateChannelProxy(t *testing.T) {
@@ -503,6 +507,12 @@ func TestFormatModelProbeReportOnlyIncludesFailures(t *testing.T) {
 func TestSequentialModelProbesUseExactPlanAndInterruptibleInterval(t *testing.T) {
 	oldProbe := scheduledModelProbe
 	oldInterval := common.RequestInterval
+	oldDB := model.DB
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&model.ChannelModelRecoveryState{}))
+	model.DB = database
+	require.NoError(t, service.ReloadSmartDownCache())
 	common.RequestInterval = time.Hour
 	ctx, cancel := context.WithCancel(context.Background())
 	calls := make(chan string, 2)
@@ -513,19 +523,35 @@ func TestSequentialModelProbesUseExactPlanAndInterruptibleInterval(t *testing.T)
 	t.Cleanup(func() {
 		scheduledModelProbe = oldProbe
 		common.RequestInterval = oldInterval
+		model.DB = oldDB
 	})
 
 	channel := &model.Channel{Id: 7, Name: "probe", Models: " alpha,alpha, ,beta "}
 	progress := make([][2]int, 0, 2)
+	var progressMu sync.Mutex
+	firstCounted := make(chan struct{}, 1)
 	done := make(chan channelTestSummary, 1)
 	go func() {
 		summary, _ := runSequentialModelProbes(ctx, []*model.Channel{channel}, 1, func(processed, total int) {
+			progressMu.Lock()
 			progress = append(progress, [2]int{processed, total})
+			progressMu.Unlock()
+			if processed == 1 {
+				select {
+				case firstCounted <- struct{}{}:
+				default:
+				}
+			}
 		})
 		done <- summary
 	}()
 
 	require.Equal(t, "7:alpha", <-calls)
+	select {
+	case <-firstCounted:
+	case <-time.After(time.Second):
+		t.Fatal("first probe was not counted")
+	}
 	cancel()
 	select {
 	case summary := <-done:
@@ -533,7 +559,9 @@ func TestSequentialModelProbesUseExactPlanAndInterruptibleInterval(t *testing.T)
 	case <-time.After(time.Second):
 		t.Fatal("RequestInterval wait did not stop on cancellation")
 	}
+	progressMu.Lock()
 	assert.Equal(t, [][2]int{{0, 2}, {1, 2}}, progress)
+	progressMu.Unlock()
 	select {
 	case extra := <-calls:
 		t.Fatalf("unexpected probe after cancellation: %s", extra)
@@ -621,4 +649,111 @@ func TestSequentialModelProbesOnlyCountChannelAttributableFailures(t *testing.T)
 	summary, _ = runSequentialModelProbes(context.Background(), []*model.Channel{channel}, 1, nil)
 	assert.Equal(t, 1, summary.Failed)
 	assert.Equal(t, 1, service.RelayConsecutiveFailures(upstreamErrorChannel, "alpha"), "upstream failures must feed smart routing health")
+}
+
+func TestValidateMathChallengeTextAllowsNaturalAnswers(t *testing.T) {
+	accepted := []string{
+		"633",
+		"答案是 633。",
+		"计算可得：387 + 246 = 633，希望能帮到你。",
+		"**最终答案：633**",
+		"The final answer is 633.",
+	}
+	for _, answer := range accepted {
+		t.Run(answer, func(t *testing.T) {
+			require.NoError(t, validateMathChallengeText(answer, 633))
+		})
+	}
+}
+
+func TestValidateMathChallengeTextRejectsWrongFinalAnswer(t *testing.T) {
+	for _, answer := range []string{
+		"一开始猜 633，但最终答案是 632。",
+		"633 是错误的，正确答案是 632。",
+		"633 is wrong; the correct value is 632.",
+		"Answer: 633? No, 632.",
+	} {
+		err := validateMathChallengeText(answer, 633)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "模型响应正常，但随机题目回答错误")
+	}
+}
+
+func TestReadTestResponseBodyKeepsLongStreamAnswerAndRejectsOversize(t *testing.T) {
+	longStream := "data: {\"choices\":[{\"delta\":{\"content\":\"" + strings.Repeat("思考", 5000) + "\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"最终答案：633\"}}]}\n\n"
+	body, err := readTestResponseBody(io.NopCloser(strings.NewReader(longStream)), true)
+	require.NoError(t, err)
+	require.Greater(t, len(body), 8<<10)
+	require.NoError(t, validateMathChallengeResponse(body, true, 633))
+
+	_, err = readTestResponseBody(io.NopCloser(strings.NewReader(strings.Repeat("x", (2<<20)+1))), true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "2 MiB")
+
+	_, err = readTestResponseBody(io.NopCloser(strings.NewReader(strings.Repeat("x", (16<<20)+1))), false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "16 MiB")
+}
+
+func TestValidateMathChallengeResponseExtractsProtocolText(t *testing.T) {
+	cases := []struct {
+		name   string
+		body   string
+		stream bool
+	}{
+		{"OpenAI", `{"choices":[{"message":{"role":"assistant","content":"答案是 633。"}}],"usage":{"total_tokens":17}}`, false},
+		{"Claude", `{"content":[{"type":"text","text":"387 + 246 = 633"}],"usage":{"output_tokens":8}}`, false},
+		{"Gemini", `{"candidates":[{"content":{"parts":[{"text":"**633**"}]}}]}`, false},
+		{"Responses", `{"output":[{"type":"message","content":[{"type":"output_text","text":"最终答案：633。"}]}]}`, false},
+		{"OpenAI SSE", "data: {\"choices\":[{\"delta\":{\"content\":\"答案是 \"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"633。\"}}]}\n\ndata: [DONE]\n", true},
+		{"Responses SSE", "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"最终答案：\"}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"633\"}\n\nevent: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"text\":\"最终答案：633\"}\n\n", true},
+		{"多行 SSE", "data: {\"choices\":[{\"delta\":\ndata: {\"content\":\"答案是 633\"}}]}\n\n", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, validateMathChallengeResponse([]byte(tc.body), tc.stream, 633))
+		})
+	}
+}
+
+func TestValidateMathChallengeResponseDoesNotUseUsageNumbers(t *testing.T) {
+	body := `{"choices":[{"message":{"content":"答案是 632"}}],"usage":{"total_tokens":633}}`
+	require.Error(t, validateMathChallengeResponse([]byte(body), false, 633))
+}
+
+func TestValidateNonChatTestResponse(t *testing.T) {
+	embedding := &dto.EmbeddingRequest{}
+	require.NoError(t, validateNonChatTestResponse(embedding, []byte(`{"data":[{"index":0,"embedding":[0.1,-0.2,0.3]}]}`)))
+	require.Error(t, validateNonChatTestResponse(embedding, []byte(`{"data":[{"index":0,"embedding":[]}]}`)))
+	require.Error(t, validateNonChatTestResponse(embedding, []byte(`{"data":[{"index":99,"embedding":[0.1,0.2]}]}`)))
+	require.Error(t, validateNonChatTestResponse(embedding, []byte(`{"data":[{"index":0,"embedding":[0.1,0.2]},{"index":0,"embedding":[0.3,0.4]}]}`)))
+
+	rerank := &dto.RerankRequest{Documents: []any{"a", "b", "c"}}
+	require.NoError(t, validateNonChatTestResponse(rerank, []byte(`{"results":[{"index":2,"relevance_score":0.91},{"index":0,"relevance_score":0.22}]}`)))
+	require.Error(t, validateNonChatTestResponse(rerank, []byte(`{"results":[{"index":3,"relevance_score":0.91}]}`)))
+	require.Error(t, validateNonChatTestResponse(rerank, []byte(`{"results":[{"index":1,"relevance_score":0.9},{"index":1,"relevance_score":0.8}]}`)))
+	require.Error(t, validateNonChatTestResponse(rerank, []byte(`{"results":[{"index":0,"relevance_score":0.2},{"index":1,"relevance_score":0.9}]}`)))
+
+	image := &dto.ImageRequest{}
+	require.NoError(t, validateNonChatTestResponse(image, []byte(`{"data":[{"url":"https://example.com/generated.png"}]}`)))
+	require.NoError(t, validateNonChatTestResponse(image, []byte(`{"data":[{"b64_json":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="}]}`)))
+	require.Error(t, validateNonChatTestResponse(image, []byte(`{"data":[{"b64_json":"iVBORw0KGgo="}]}`)))
+	require.Error(t, validateNonChatTestResponse(image, []byte(`{"data":[{"b64_json":"iVBORw0KGgoAAAANSUhEUgAAAAAAAAAA"}]}`)))
+	require.Error(t, validateNonChatTestResponse(image, []byte(`{"data":[{"url":"not-a-url","b64_json":"not-base64"}]}`)))
+	require.Error(t, validateNonChatTestResponse(image, []byte(`{"data":[{"b64_json":"YWJjZGVmZ2g="}]}`)))
+}
+
+func TestValidateNonChatTestResponseLeavesPluginSpecificRequestsAlone(t *testing.T) {
+	custom := &dto.GeneralOpenAIRequest{}
+	require.NoError(t, validateNonChatTestResponse(custom, []byte(`{"custom":"plugin-specific"}`)))
+}
+
+func TestRecognizedImageDataAcceptsUpToElevenMiBAndRejectsOversize(t *testing.T) {
+	pngData, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+	require.NoError(t, err)
+	withinLimit := append(append([]byte{}, pngData...), make([]byte, (11<<20)-len(pngData))...)
+	require.True(t, isRecognizedImageData(withinLimit))
+	overLimit := append(append([]byte{}, pngData...), make([]byte, (11<<20)+1-len(pngData))...)
+	require.False(t, isRecognizedImageData(overLimit))
 }

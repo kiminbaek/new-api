@@ -174,6 +174,8 @@ import {
   findMissingModelsInMapping,
   validateModelMappingJson,
   hasAdvancedSettingsErrors,
+  hasNonDefaultReliabilitySettings,
+  updateOpenAIPythonFingerprint,
 } from '../../lib'
 import {
   collectInvalidStatusCodeEntries,
@@ -347,7 +349,7 @@ function hasConfiguredOverrideValue(value: unknown): boolean {
 function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
   return Boolean(
     hasConfiguredOverrideValue(values.param_override) ||
-    hasConfiguredOverrideValue(values.header_override) ||
+    hasNonDefaultReliabilitySettings(values) ||
     values.advanced_custom?.trim() ||
     hasConfiguredOverrideValue(values.status_code_mapping) ||
     values.tag?.trim() ||
@@ -364,8 +366,6 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     (values.http2_connection_shards != null &&
       values.http2_connection_shards > 1) ||
     values.retry_times != null ||
-    values.timeout_seconds != null ||
-    values.fail_threshold != null ||
     values.max_concurrency != null ||
     values.max_concurrency_per_key != null ||
     (values.concurrency_scope != null && values.concurrency_scope !== '' && values.concurrency_scope !== 'local') ||
@@ -4071,7 +4071,7 @@ export function ChannelMutateDrawer({
                                           size='sm'
                                           onClick={() => field.onChange('')}
                                         >
-                                          {t('Clear')}
+                                          {t('清空')}
                                         </Button>
                                       </div>
                                     </div>
@@ -4097,16 +4097,63 @@ export function ChannelMutateDrawer({
 
                               <FormField
                                 control={form.control}
+                                name='openai_python_fingerprint_enabled'
+                                render={({ field }) => (
+                                  <FormItem
+                                    className={sideDrawerSwitchItemClassName()}
+                                  >
+                                    <div className='flex flex-col gap-0.5'>
+                                      <FormLabel>
+                                        {t(
+                                          '启用 OpenAI Python SDK 请求指纹（推荐）'
+                                        )}
+                                      </FormLabel>
+                                      <FormDescription>
+                                        {t(
+                                          '自动添加常见的 OpenAI Python SDK 请求头。新建渠道默认开启；关闭时只移除系统生成的请求头，不影响你的其他自定义请求头。'
+                                        )}
+                                      </FormDescription>
+                                    </div>
+                                    <FormControl>
+                                      <Switch
+                                        checked={field.value ?? true}
+                                        disabled={
+                                          sensitiveLocked || isSubmitting
+                                        }
+                                        onCheckedChange={(checked) => {
+                                          field.onChange(checked)
+                                          form.setValue(
+                                            'header_override',
+                                            updateOpenAIPythonFingerprint(
+                                              form.getValues('header_override'),
+                                              checked
+                                            ),
+                                            {
+                                              shouldDirty: true,
+                                              shouldValidate: true,
+                                            }
+                                          )
+                                        }}
+                                      />
+                                    </FormControl>
+                                  </FormItem>
+                                )}
+                              />
+
+                              <FormField
+                                control={form.control}
                                 name='header_override'
                                 render={({ field }) => (
                                   <FormItem className='space-y-3 border-t pt-4'>
                                     <div className='flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between'>
                                       <div className='space-y-1'>
                                         <FormLabel>
-                                          {t('Request Header Override')}
+                                          {t('高级自定义请求头')}
                                         </FormLabel>
                                         <FormDescription>
-                                          {t('Override request headers')}
+                                          {t(
+                                            '仅在需要透传或覆盖特殊请求头时使用。普通渠道保持上方推荐开关开启即可。'
+                                          )}
                                         </FormDescription>
                                       </div>
                                       <div className='flex flex-wrap gap-2'>
@@ -4131,7 +4178,7 @@ export function ChannelMutateDrawer({
                                             )
                                           }
                                         >
-                                          {t('Fill Template')}
+                                          {t('填入示例')}
                                         </Button>
                                         <Button
                                           type='button'
@@ -4147,7 +4194,7 @@ export function ChannelMutateDrawer({
                                             )
                                           }
                                         >
-                                          {t('Passthrough Template')}
+                                          {t('使用透传模板')}
                                         </Button>
                                         <Button
                                           type='button'
@@ -4155,7 +4202,7 @@ export function ChannelMutateDrawer({
                                           size='sm'
                                           onClick={() => field.onChange('')}
                                         >
-                                          {t('Clear')}
+                                          {t('清空')}
                                         </Button>
                                       </div>
                                     </div>

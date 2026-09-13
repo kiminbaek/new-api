@@ -25,10 +25,11 @@ type ChannelSettings struct {
 	// (1-8). Zero/unset means 1. Ignored when HTTPProtocol is "http1".
 	HTTP2ConnectionShards int `json:"http2_connection_shards,omitempty"`
 	// [CUSTOM] 二改扩展：分模型优先级 / 分渠道可靠性（nil或空=继承全局默认）
-	ModelPriorities map[string]int64 `json:"model_priorities,omitempty"`
-	RetryTimes      *int             `json:"retry_times,omitempty"`     // 该渠道每次请求最多被选中的次数(0=单次机会)
-	TimeoutSeconds  *int             `json:"timeout_seconds,omitempty"` // 仅非流式请求生效
-	FailThreshold   *int             `json:"fail_threshold,omitempty"`  // 连续窗口内失败达到N次才自动禁用(nil=沿用即时禁用)
+	ModelPriorities                map[string]int64 `json:"model_priorities,omitempty"`
+	RetryTimes                     *int             `json:"retry_times,omitempty"`                       // 该渠道每次请求最多被选中的次数(0=单次机会)
+	TimeoutSeconds                 *int             `json:"timeout_seconds,omitempty"`                   // 仅非流式请求生效
+	FailThreshold                  *int             `json:"fail_threshold,omitempty"`                    // 连续窗口内失败达到N次才自动禁用(nil=沿用即时禁用)
+	OpenAIPythonFingerprintEnabled *bool            `json:"openai_python_fingerprint_enabled,omitempty"` // OpenAI Python SDK 九头请求指纹；nil=新建时默认开启
 	// [CUSTOM] 上游并发额度（nil/0=不限制）。三个维度会同时生效，任一维度满载即跳过当前渠道。
 	MaxConcurrency       *int           `json:"max_concurrency,omitempty"`         // 渠道总在途上限
 	MaxConcurrencyPerKey *int           `json:"max_concurrency_per_key,omitempty"` // 单个上游 Key 在途上限
